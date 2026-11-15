@@ -1,0 +1,59 @@
+name: Publish Node.js Package
+
+on:
+  release:
+    types: [created]
+
+jobs:
+  publish-npm:
+    name: Publish to npm Registry
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+      attestations: write
+      packages: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24.x
+          registry-url: 'https://registry.npmjs.org/'
+          cache: 'npm'
+
+      - name: Upgrade npm for OIDC trusted publishing
+        run: npm install -g npm@latest
+
+      - name: Install dependencies cleanly
+        run: npm ci
+
+      - name: Run build
+        run: npm run build
+
+      - name: Publish package to npm
+        if: github.repository_owner == 'brahma-dev'
+        run: npm publish --access public --provenance
+
+      - name: Set up Node.js for GitHub Packages
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24.x
+          registry-url: 'https://npm.pkg.github.com/'
+          scope: '@brahma-dev'
+
+      - name: Modify package.json for GitHub Packages
+        run: |
+          node -e '
+            const fs = require("fs");
+            const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
+            pkg.name = "@brahma-dev/" + pkg.name;
+            fs.writeFileSync("package.json", JSON.stringify(pkg, null, 2));
+          '
+
+      - name: Publish to GitHub Packages
+        run: npm publish --access public --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

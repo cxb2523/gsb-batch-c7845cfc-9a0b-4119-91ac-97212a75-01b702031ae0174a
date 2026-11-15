@@ -1,0 +1,124 @@
+# .github/workflows/build.yml
+
+name: Build and Test
+
+on:
+   workflow_dispatch:
+   push:
+      paths-ignore:
+         - ".github/**"
+         - "README.md"
+         - "LICENSE.md"
+   pull_request:
+      paths-ignore:
+         - ".github/**"
+         - "README.md"
+         - "LICENSE.md"
+
+jobs:
+   test-node:
+      name: Test on Node.js ${{ matrix.node-version }}
+      runs-on: ubuntu-latest
+      strategy:
+         matrix:
+            node-version: [22.x, 24.x, 26.x]
+            linkedom-version: [0.13, 0.14, 0.15, 0.16, 0.18]
+
+      steps:
+         - name: Checkout repository
+           uses: actions/checkout@v6
+
+         - name: Set up Node.js ${{ matrix.node-version }}
+           uses: actions/setup-node@v6
+           with:
+              node-version: ${{ matrix.node-version }}
+              cache: "npm" # Add caching for npm dependencies
+
+         - name: Install Puppeteer Dependencies
+           run: |
+              # The runner's preinstalled Microsoft apt repo intermittently 403s; we need nothing from it.
+              sudo grep -rlE 'packages\.microsoft\.com' /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null | xargs -r sudo rm -f
+              sudo apt-get update
+              sudo apt-get install -y \
+                libx11-6 libxcomposite1 libxcursor1 libxdamage1 libxext6 \
+                libxfixes3 libxi6 libxtst6 libnss3 libglib2.0-0 libgtk-3-0t64 \
+                libasound2t64 libxrandr2 libpangocairo-1.0-0 libatk1.0-0 \
+                libatk-bridge2.0-0 libcups2 libdbus-1-3 libdrm2 libgbm1 \
+                libgdk-pixbuf2.0-0
+
+         - name: Install dependencies
+           run: npm install
+
+         # Build against the lockfile's linkedom (what gets published), then swap in
+         # the matrix version to check runtime compatibility. linkedom 0.13 has no
+         # "types" in its exports map, so it can't be type-checked under NodeNext.
+         - name: Run build
+           run: npm run build
+
+         - name: Install specific linkedom version
+           run: npm install linkedom@${{ matrix.linkedom-version }}
+
+         - name: Run tests
+           run: npm run test:ci
+
+         - name: Generate and upload coverage report
+           if: matrix.node-version == '26.x' && matrix.linkedom-version == '0.18' # Only run coverage on the latest LTS version
+           run: npm run coverage
+
+         - name: Upload coverage to Coveralls
+           if: matrix.node-version == '26.x' && matrix.linkedom-version == '0.18'
+           uses: coverallsapp/github-action@v2
+           with:
+              github-token: ${{ secrets.GITHUB_TOKEN }}
+
+         - name: Upload coverage to Codecov
+           if: matrix.node-version == '26.x' && matrix.linkedom-version == '0.18'
+           uses: codecov/codecov-action@v4
+           with:
+              token: ${{ secrets.CODECOV_TOKEN }}
+         - name: Upload test results to Codecov
+           if: ${{ matrix.node-version == '26.x' && matrix.linkedom-version == '0.18' && !cancelled() }}
+           uses: codecov/test-results-action@v1
+           with:
+              token: ${{ secrets.CODECOV_TOKEN }}
+
+   # --- Test on the Bun runtime ---
+   test-bun:
+      name: Test on Bun
+      runs-on: ubuntu-latest
+
+      strategy:
+         fail-fast: false
+         matrix:
+            linkedom-version: [0.13, 0.14, 0.15, 0.16, 0.18]
+
+      steps:
+         - name: Checkout repository
+           uses: actions/checkout@v6
+
+         - name: Set up Bun
+           uses: oven-sh/setup-bun@v2
+           with:
+              bun-version: latest # Or a specific version
+              # Caching is enabled by default with setup-bun
+
+         - name: Install Puppeteer Dependencies
+           run: |
+              # The runner's preinstalled Microsoft apt repo intermittently 403s; we need nothing from it.
+              sudo grep -rlE 'packages\.microsoft\.com' /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null | xargs -r sudo rm -f
+              sudo apt-get update
+              sudo apt-get install -y \
+                libx11-6 libxcomposite1 libxcursor1 libxdamage1 libxext6 \
+                libxfixes3 libxi6 libxtst6 libnss3 libglib2.0-0 libgtk-3-0t64 \
+                libasound2t64 libxrandr2 libpangocairo-1.0-0 libatk1.0-0 \
+                libatk-bridge2.0-0 libcups2 libdbus-1-3 libdrm2 libgbm1 \
+                libgdk-pixbuf2.0-0
+
+         - name: Install dependencies
+           run: bun install
+
+         - name: Override linkedom version
+           run: bun add linkedom@${{ matrix.linkedom-version }}
+
+         - name: Run tests with Bun
+           run: bun run test:ci

@@ -1,0 +1,11 @@
+{
+  "node-option": [
+    "import=tsx/esm"
+  ],
+  "extensions": [
+    "ts"
+  ],
+  "spec": [
+    "test/*.ts"
+  ]
+}
