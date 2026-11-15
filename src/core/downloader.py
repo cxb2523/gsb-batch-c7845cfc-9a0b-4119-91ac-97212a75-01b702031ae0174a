@@ -307,9 +307,47 @@ class ImageDownloader:
         ).images
 
 
+def report_images_by_page(image_report) -> dict[int, str]:
+    """Map each extracted image URL to its original reader page number.
+
+    ``page_numbers`` is positionally aligned with ``image_urls``; using the
+    real reader page numbers (instead of list positions) keeps skipped ad or
+    placeholder pages from shifting every subsequent page index.
+    Reports produced before ``page_numbers`` existed fall back to 1-based
+    ordinals so their positional contract is preserved.
+    """
+    image_urls = list(getattr(image_report, "image_urls", None) or [])
+    page_numbers = list(getattr(image_report, "page_numbers", None) or [])
+    if len(page_numbers) != len(image_urls):
+        page_numbers = list(range(1, len(image_urls) + 1))
+    return {
+        page: url
+        for page, url in zip(page_numbers, image_urls)
+        if page not in (None, 0)
+    }
+
+
+def report_expected_pages(image_report) -> list[int]:
+    """Return the reader page numbers that should yield an image.
+
+    Skipped ad/placeholder pages are excluded so an extracted chapter with
+    skipped pages still counts as complete without fabricating downloads.
+    """
+    page_count = int(getattr(image_report, "page_count", 0) or 0)
+    skipped = set(getattr(image_report, "skipped_pages", None) or [])
+    if page_count > 0:
+        return [
+            page
+            for page in range(1, page_count + 1)
+            if page not in skipped
+        ]
+    # Legacy reports carry no page metadata: trust what was extracted.
+    return list(report_images_by_page(image_report).keys())
+
+
 class ChapterDownloader:
     """Downloads a single chapter with all its images."""
-    
+
     def __init__(
         self,
         config: DownloadConfig,
@@ -321,6 +359,23 @@ class ChapterDownloader:
         self.manga = manga
         self.reader_service = reader_service
         self.image_downloader = ImageDownloader(config, pool=image_pool)
+
+    def _fetch_reader_report(self, chapter: Chapter, use_reader_service: bool):
+        """Re-open the chapter reader to obtain fresh image sources."""
+        from ..api.comix import ComixAPI
+
+        if use_reader_service:
+            return self.reader_service.fetch(
+                chapter.chapter_id,
+                self.manga.slug or self.manga.hash_id,
+                chapter.number,
+            )
+        return ComixAPI.get_chapter_image_report(
+            chapter.chapter_id,
+            manga_slug=self.manga.slug or self.manga.hash_id,
+            chapter_number=chapter.number,
+            headless=self.config.headless,
+        )
     
     def download_chapter(
         self,
@@ -364,104 +419,119 @@ class ChapterDownloader:
                     headless=self.config.headless
                 ) if hasattr(ComixAPI, "get_chapter_image_report") else None
 
-            if image_report:
-                image_urls = image_report.image_urls
-                expected_pages = image_report.expected_image_count
-                failed_pages = image_report.failed_pages
-            else:
+            if image_report is None:
                 image_urls = ComixAPI.get_chapter_images(
                     chapter.chapter_id,
                     manga_slug=self.manga.slug or self.manga.hash_id,
                     chapter_number=chapter.number,
                     headless=self.config.headless
                 )
-                expected_pages = len(image_urls)
-                failed_pages = []
-            
-            if not image_urls:
+                from ..api.comix import ChapterImageFetchReport
+                image_report = ChapterImageFetchReport(image_urls)
+
+            # Key every image by its original reader page number so skipped
+            # ad/placeholder pages cannot shift subsequent page indexes.
+            indexed_urls = report_images_by_page(image_report)
+            expected_pages = report_expected_pages(image_report)
+            expected_total = len(expected_pages)
+            present_pages = set(indexed_urls)
+            # Pages whose render timed out during extraction: keep the partial
+            # chapter instead of failing it outright, then refresh the reader
+            # and backfill only these pages below.
+            missing_pages = sorted(
+                set(expected_pages) - present_pages
+            )
+
+            if not indexed_urls:
                 return False, f"No images found for {chapter.get_display_name()}"
 
-            if failed_pages or expected_pages != len(image_urls):
-                return False, (
-                    f"Incomplete image extraction for {chapter.get_display_name()} "
-                    f"({len(image_urls)}/{expected_pages} pages ready)"
-                )
-            
+            if is_cancelled():
+                return False, "Download cancelled"
+
             # Create task for image downloads
             task_id = None
             if progress:
                 task_id = progress.add_task(
                     f"[cyan]  └─ {chapter.get_display_name()}",
-                    total=len(image_urls)
+                    total=expected_total
                 )
-            
-            # Download all images
-            download_report = self.image_downloader.download_all_images_report(
-                image_urls, progress, task_id, on_progress=on_image_progress
+
+            # Download only the pages extraction managed to produce.
+            download_report = self.image_downloader.download_indexed_images(
+                indexed_urls, on_progress=on_image_progress
+            )
+
+            # Image download failures join the extraction-time missing pages so
+            # a single reader refresh can recover both kinds, and successfully
+            # downloaded pages are never requested again.
+            missing_pages.extend(
+                page
+                for page, _error in download_report.failed
+                if page not in missing_pages
             )
 
             # Signed CDN URLs can expire between reader extraction and the
-            # image pass. Refresh the reader once and retry only the failed
-            # ordinals, preserving successful pages and progress counts.
-            if download_report.failed:
+            # image pass, and render-time failures leave pages unextracted.
+            # Refresh the reader source once and retry only the missing page
+            # numbers, preserving every successful page and progress count.
+            if missing_pages:
+                recovered_by_index: dict[int, bytes] = {}
                 try:
-                    refreshed = (
-                        self.reader_service.fetch(
-                            chapter.chapter_id,
-                            self.manga.slug or self.manga.hash_id,
-                            chapter.number,
-                        )
-                        if use_reader_service
-                        else ComixAPI.get_chapter_image_report(
-                            chapter.chapter_id,
-                            manga_slug=self.manga.slug or self.manga.hash_id,
-                            chapter_number=chapter.number,
-                            headless=self.config.headless,
-                        )
-                    )
-                    original_page_numbers = getattr(image_report, "page_numbers", [])
-                    refreshed_page_numbers = getattr(refreshed, "page_numbers", [])
-                    refreshed_by_page = {
-                        page: url
-                        for page, url in zip(refreshed_page_numbers, refreshed.image_urls)
+                    refreshed = self._fetch_reader_report(chapter, use_reader_service)
+                    refreshed_by_page = report_images_by_page(refreshed)
+                    replacements = {
+                        page: refreshed_by_page[page]
+                        for page in missing_pages
+                        if page in refreshed_by_page
                     }
-                    replacements = {}
-                    for index, _error in download_report.failed:
-                        page_number = (
-                            original_page_numbers[index - 1]
-                            if 0 < index <= len(original_page_numbers)
-                            else index
-                        )
-                        replacement = refreshed_by_page.get(page_number)
-                        if replacement is None and 0 < index <= len(refreshed.image_urls):
-                            replacement = refreshed.image_urls[index - 1]
-                        if replacement is not None:
-                            replacements[index] = replacement
                     if replacements:
                         logger.info(
-                            "Retrying %s failed pages with refreshed chapter sources",
+                            "Retrying %s missing page(s) with refreshed chapter sources",
                             len(replacements),
                         )
-                        recovered = self.image_downloader.download_indexed_images(replacements)
-                        recovered_by_index = dict(recovered.images)
-                        existing_by_index = dict(download_report.images)
-                        existing_by_index.update(recovered_by_index)
-                        still_failed = {
-                            index: error
-                            for index, error in download_report.failed
-                            if index not in recovered_by_index
-                        }
-                        download_report = ImageDownloadReport(
-                            images=sorted(existing_by_index.items()),
-                            failed=sorted(still_failed.items()),
-                            total=download_report.total,
-                            failure_details=[
-                                failure for failure in download_report.failure_details
-                                if failure.index in still_failed
-                            ],
+                        recovered = self.image_downloader.download_indexed_images(
+                            replacements, on_progress=on_image_progress
                         )
+                        recovered_by_index = dict(recovered.images)
                 except Exception as recovery_error:
                     logger.warning("Failed-page source refresh unavailable: %s", recovery_error)
+
+                existing_by_index = dict(download_report.images)
+                existing_by_index.update(recovered_by_index)
+                remaining_missing = sorted(
+                    page for page in missing_pages
+                    if page not in recovered_by_index
+                )
+                prior_details = {
+                    detail.index: detail
+                    for detail in download_report.failure_details
+                }
+
+                def _failure_detail(page: int) -> ImageFailure:
+                    if page in prior_details:
+                        return prior_details[page]
+                    return ImageFailure(
+                        index=page,
+                        category="extraction",
+                        attempts=1,
+                        message=(
+                            "Page was not rendered by the chapter reader "
+                            "after refreshing its source"
+                        ),
+                    )
+
+                failure_details = [_failure_detail(page) for page in remaining_missing]
+                download_report = ImageDownloadReport(
+                    images=sorted(existing_by_index.items()),
+                    failed=[
+                        (page, _failure_detail(page).message)
+                        for page in remaining_missing
+                    ],
+                    total=expected_total,
+                    failure_details=sorted(
+                        failure_details, key=lambda item: item.index
+                    ),
+                )
 
             image_data = download_report.images
 
@@ -474,11 +544,11 @@ class ChapterDownloader:
             if not download_report.is_complete:
                 if self.config.output_format == OutputFormat.IMAGES:
                     save_images(image_data, base_path, chapter_folder)
-                failed_indexes = [index for index, _error in download_report.failed]
+                failed_page_numbers = [page for page, _error in download_report.failed]
                 failed_text = ""
-                if failed_indexes:
-                    shown = ", ".join(str(index) for index in failed_indexes[:20])
-                    suffix = "…" if len(failed_indexes) > 20 else ""
+                if failed_page_numbers:
+                    shown = ", ".join(str(page) for page in failed_page_numbers[:20])
+                    suffix = "…" if len(failed_page_numbers) > 20 else ""
                     failed_text = f"; failed pages: {shown}{suffix}"
                 return False, (
                     f"Incomplete download for {chapter.get_display_name()} "
@@ -510,7 +580,7 @@ class ChapterDownloader:
                     create_cbz_from_bytes(image_data, cbz_path, self.manga, chapter)
             
             if progress and task_id:
-                progress.update(task_id, completed=len(image_urls))
+                progress.update(task_id, completed=expected_total)
             
             return True, f"Downloaded {chapter.get_display_name()} ({len(image_data)} pages)"
             

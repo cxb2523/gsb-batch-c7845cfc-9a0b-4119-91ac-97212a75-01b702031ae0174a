@@ -157,6 +157,209 @@ class ChapterDownloaderTests(unittest.TestCase):
             files = list((Path(tmpdir) / "Recovery Manga" / "Chapter_1").glob("*"))
             self.assertEqual(len(files), 2)
 
+    def test_extraction_time_missing_pages_are_backfilled_after_reader_refresh(self):
+        # First extraction rendered pages 1 and 3 but timed out on page 2.
+        good = data_url(image_bytes((10, 20, 30)))
+        initial_report = ChapterImageFetchReport(
+            image_urls=[good, good],
+            page_count=3,
+            failed_pages=[2],
+            page_numbers=[1, 3],
+        )
+        refreshed_report = ChapterImageFetchReport(
+            image_urls=[good, good, good],
+            page_count=3,
+            page_numbers=[1, 2, 3],
+        )
+        reports = iter([initial_report, refreshed_report])
+        ComixAPI.get_chapter_image_report = staticmethod(
+            lambda *args, **kwargs: next(reports)
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = DownloadConfig(
+                output_format=OutputFormat.IMAGES,
+                download_path=tmpdir,
+                max_image_workers=2,
+            )
+            manga = MangaInfo(hash_id="abc", slug="abc-title", title="Extraction Gap Manga")
+            chapter = Chapter(chapter_id=12, number="1")
+            downloader = ChapterDownloader(config, manga)
+
+            requested_indexes = []
+            original_indexed = downloader.image_downloader.download_indexed_images
+
+            def spy(indexed_urls, on_progress=None):
+                requested_indexes.extend(sorted(indexed_urls))
+                return original_indexed(indexed_urls, on_progress)
+
+            downloader.image_downloader.download_indexed_images = spy
+            success, message = downloader.download_chapter(chapter)
+
+            self.assertTrue(success, message)
+            # The initial pass downloads pages 1 and 3; the refresh retries only page 2.
+            self.assertEqual(requested_indexes, [1, 3, 2])
+            files = sorted(
+                path.name
+                for path in (Path(tmpdir) / "Extraction Gap Manga" / "Chapter_1").glob("*")
+            )
+            self.assertEqual(files, ["001.png", "002.png", "003.png"])
+
+    def test_still_missing_pages_after_refresh_are_listed_and_block_artifacts(self):
+        good = data_url(image_bytes((10, 20, 30)))
+        # Page 2 never renders, even after the reader is refreshed.
+        def build_report():
+            return ChapterImageFetchReport(
+                image_urls=[good, good],
+                page_count=3,
+                failed_pages=[2],
+                page_numbers=[1, 3],
+            )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            for output_format in (OutputFormat.PDF, OutputFormat.CBZ):
+                reports = iter([build_report(), build_report()])
+                ComixAPI.get_chapter_image_report = staticmethod(
+                    lambda *args, **kwargs: next(reports)
+                )
+                root = Path(tmpdir) / output_format.value
+                config = DownloadConfig(
+                    output_format=output_format,
+                    download_path=str(root),
+                    max_image_workers=2,
+                )
+                manga = MangaInfo(hash_id="abc", slug="abc-title", title="Still Missing Manga")
+                chapter = Chapter(chapter_id=13, number="1")
+                success, message = ChapterDownloader(config, manga).download_chapter(chapter)
+                artifact = (
+                    root
+                    / manga.get_safe_title()
+                    / f"{chapter.get_safe_folder_name()}.{output_format.value}"
+                )
+
+                self.assertFalse(success)
+                self.assertIn("Incomplete download", message)
+                self.assertIn("2/3 pages", message)
+                self.assertIn("failed pages: 2", message)
+                self.assertFalse(artifact.exists())
+
+    def test_skipped_ad_pages_do_not_shift_subsequent_page_numbers(self):
+        good = data_url(image_bytes((10, 20, 30)))
+        # Page 2 is an ad/placeholder; pages 1 and 3 are real content.
+        report = ChapterImageFetchReport(
+            image_urls=[good, good],
+            page_count=3,
+            skipped_pages=[2],
+            page_numbers=[1, 3],
+        )
+        calls = []
+        ComixAPI.get_chapter_image_report = staticmethod(
+            lambda *args, **kwargs: (calls.append(1) or report)
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = DownloadConfig(
+                output_format=OutputFormat.IMAGES,
+                download_path=tmpdir,
+                max_image_workers=2,
+            )
+            manga = MangaInfo(hash_id="abc", slug="abc-title", title="Ad Skip Manga")
+            chapter = Chapter(chapter_id=14, number="1")
+            success, message = ChapterDownloader(config, manga).download_chapter(chapter)
+
+            self.assertTrue(success, message)
+            # Skipped pages are not failures, so no reader refresh is needed.
+            self.assertEqual(len(calls), 1)
+            files = sorted(
+                path.name
+                for path in (Path(tmpdir) / "Ad Skip Manga" / "Chapter_1").glob("*")
+            )
+            self.assertEqual(files, ["001.png", "003.png"])
+
+    def test_reader_service_path_backfills_extraction_missing_pages(self):
+        good = data_url(image_bytes((40, 50, 60)))
+
+        class FakeReaderService:
+            def __init__(self):
+                self.calls = 0
+
+            def fetch(self, chapter_id, slug, number):
+                self.calls += 1
+                if self.calls == 1:
+                    return ChapterImageFetchReport(
+                        image_urls=[good, good],
+                        page_count=3,
+                        failed_pages=[2],
+                        page_numbers=[1, 3],
+                    )
+                return ChapterImageFetchReport(
+                    image_urls=[good],
+                    page_count=3,
+                    page_numbers=[2],
+                )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = FakeReaderService()
+            config = DownloadConfig(
+                output_format=OutputFormat.IMAGES,
+                download_path=tmpdir,
+                max_image_workers=2,
+            )
+            manga = MangaInfo(hash_id="abc", slug="abc-title", title="Service Gap Manga")
+            chapter = Chapter(chapter_id=16, number="1")
+            downloader = ChapterDownloader(config, manga, reader_service=service)
+            requested = []
+            original_indexed = downloader.image_downloader.download_indexed_images
+
+            def spy(indexed_urls, on_progress=None):
+                requested.append(sorted(indexed_urls))
+                return original_indexed(indexed_urls, on_progress)
+
+            downloader.image_downloader.download_indexed_images = spy
+            success, message = downloader.download_chapter(chapter)
+
+            self.assertTrue(success, message)
+            self.assertEqual(service.calls, 2)
+            self.assertEqual(requested, [[1, 3], [2]])
+            files = sorted(
+                path.name
+                for path in (Path(tmpdir) / "Service Gap Manga" / "Chapter_1").glob("*")
+            )
+            self.assertEqual(files, ["001.png", "002.png", "003.png"])
+
+    def test_missing_page_list_is_truncated_at_twenty_pages(self):
+        good = data_url(image_bytes((10, 20, 30)))
+        bad = "data:image/png;base64,not-valid-base64"
+        # 22 reader pages: page 1 succeeds; pages 2-22 fail to download.
+        report = ChapterImageFetchReport(
+            image_urls=[good] + [bad] * 21,
+            page_count=22,
+            page_numbers=list(range(1, 23)),
+        )
+        reports = iter([report, report])
+        ComixAPI.get_chapter_image_report = staticmethod(
+            lambda *args, **kwargs: next(reports)
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = DownloadConfig(
+                output_format=OutputFormat.PDF,
+                download_path=tmpdir,
+                max_image_workers=4,
+                retry_count=0,
+                retry_delay=0,
+            )
+            manga = MangaInfo(hash_id="abc", slug="abc-title", title="Truncation Manga")
+            chapter = Chapter(chapter_id=15, number="1")
+            success, message = ChapterDownloader(config, manga).download_chapter(chapter)
+
+            self.assertFalse(success)
+            self.assertIn("failed pages: 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, "
+                          "12, 13, 14, 15, 16, 17, 18, 19, 20, 21…", message)
+            self.assertNotIn("22", message.split("failed pages:", 1)[1].split("…", 1)[0])
+            artifact = Path(tmpdir) / manga.get_safe_title() / f"{chapter.get_safe_folder_name()}.pdf"
+            self.assertFalse(artifact.exists())
+
     def test_tls_eof_retries_with_a_reset_session(self):
         class RequestException(Exception):
             pass

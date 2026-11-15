@@ -1,5 +1,6 @@
 import asyncio
 import json
+import re
 import importlib
 import sys
 import tempfile
@@ -510,6 +511,120 @@ class ComixChapterTests(unittest.TestCase):
         self.assertFalse(asyncio.run(comix_module._solve_comix_waf_challenge(
             Browser(), ChallengePage(), headless=True
         )))
+
+
+# A data URL long enough to clear the reader's >20k blank-canvas threshold.
+_FAKE_CANVAS_DATA_URL = "data:image/webp;base64," + ("A" * 24000)
+
+
+async def _async_noop(*args, **kwargs):
+    return None
+
+
+class FakeChapterPage:
+    """Scripted stand-in for a nodriver chapter reader tab."""
+
+    def __init__(self, page_count, *, timeout_pages=(), skip_pages=()):
+        self.page_count = page_count
+        self.timeout_pages = set(timeout_pages)
+        self.skip_pages = set(skip_pages)
+
+    async def send(self, *args, **kwargs):
+        return None
+
+    async def get(self, url):
+        return self
+
+    async def sleep(self, _seconds):
+        return None
+
+    async def evaluate(self, script, **kwargs):
+        if ".rpage-page').length" in script:
+            return self.page_count
+        if "data-page=\"1\"] canvas" in script:
+            return True
+        if "navigator.userAgent" in script:
+            return "fake-agent"
+        if "scrollIntoView" in script:
+            return None
+        match = re.search(r'data-page=\\?"(\d+)\\?"', script)
+        page_num = int(match.group(1)) if match else 0
+        if page_num in self.timeout_pages:
+            return None
+        if page_num in self.skip_pages:
+            return json.dumps({"type": "skip"})
+        if "drawImage" in script:
+            # Secondary extraction path (img elements) is never reached for
+            # canvas-ready pages.
+            raise AssertionError("canvas pages should not enter the img extraction path")
+        return json.dumps({"type": "canvas_data", "data": _FAKE_CANVAS_DATA_URL})
+
+
+class FakeChapterBrowser:
+    def __init__(self, page):
+        self.main_tab = page
+        self.closed = False
+
+    async def get(self, url):
+        return self.main_tab
+
+
+class ChapterImageExtractionTests(unittest.TestCase):
+    def _run_extraction(self, page_count, **kwargs):
+        page = FakeChapterPage(page_count, **kwargs)
+        browser = FakeChapterBrowser(page)
+
+        with patch.object(comix_module, "_wait_for_comix_page", new=_async_noop), \
+                patch.object(comix_module, "_publish_comix_session", new=_async_noop), \
+                patch.object(comix_module, "_save_comix_cookies", new=_async_noop):
+            return asyncio.run(ComixAPI._get_chapter_images_async(
+                100, "fake-manga", "1", True, browser=browser
+            ))
+
+    def test_render_timeout_keeps_partial_pages_with_aligned_page_numbers(self):
+        # Page 2 never renders; pages 1 and 3 are still returned to the
+        # downloader together with the failed-page list.
+        report = self._run_extraction(3, timeout_pages={2})
+
+        self.assertEqual(report.page_count, 3)
+        self.assertEqual(report.page_numbers, [1, 3])
+        self.assertEqual(len(report.image_urls), 2)
+        self.assertEqual(report.failed_pages, [2])
+        self.assertEqual(report.skipped_pages, [])
+        self.assertEqual(len(report.page_numbers), len(report.image_urls))
+        self.assertEqual(
+            set(report.page_numbers) | set(report.failed_pages), {1, 2, 3}
+        )
+
+    def test_extraction_deadline_returns_partial_report_without_raising(self):
+        page = FakeChapterPage(4, timeout_pages={1, 2, 3, 4})
+        browser = FakeChapterBrowser(page)
+
+        with patch.object(comix_module, "_wait_for_comix_page", new=_async_noop), \
+                patch.object(comix_module, "_publish_comix_session", new=_async_noop), \
+                patch.object(comix_module, "_save_comix_cookies", new=_async_noop), \
+                patch.object(comix_module,
+                             "_CHAPTER_EXTRACTION_MIN_SECONDS", 0.0), \
+                patch.object(comix_module,
+                             "_CHAPTER_EXTRACTION_MAX_SECONDS", 0.0):
+            report = asyncio.run(ComixAPI._get_chapter_images_async(
+                100, "fake-manga", "1", True, browser=browser
+            ))
+
+        self.assertEqual(report.page_count, 4)
+        self.assertEqual(report.image_urls, [])
+        self.assertEqual(report.page_numbers, [])
+        self.assertEqual(report.failed_pages, [1, 2, 3, 4])
+
+    def test_skipped_ad_pages_do_not_align_or_offset_image_page_numbers(self):
+        report = self._run_extraction(3, skip_pages={2})
+
+        self.assertEqual(report.page_count, 3)
+        self.assertEqual(report.skipped_pages, [2])
+        self.assertEqual(report.failed_pages, [])
+        self.assertEqual(report.page_numbers, [1, 3])
+        self.assertEqual(len(report.image_urls), 2)
+        self.assertEqual(report.expected_image_count, 2)
 
 
 if __name__ == "__main__":
