@@ -96,6 +96,9 @@ class Settings:
     per_host_concurrency: int = 2
     per_host_delay: float = 0.0
     max_host_wait: float = 30.0
+    # How many times a 429/503 with Retry-After retries the same URL before
+    # the fetch fails with a rate-limit error (each wait is bounded above).
+    rate_limit_retries: int = 3
     delivery_max_response_bytes: int = 1024 * 1024
 
     # Server controls.
@@ -255,6 +258,7 @@ class Settings:
             "per_host_concurrency": self.per_host_concurrency,
             "per_host_delay": self.per_host_delay,
             "max_host_wait": self.max_host_wait,
+            "rate_limit_retries": self.rate_limit_retries,
             "history_retention_days": self.history_retention_days,
         }
         for name, value in nonnegative.items():

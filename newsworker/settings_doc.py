@@ -65,6 +65,11 @@ SETTINGS_HELP: dict[str, dict[str, str]] = {
             "Longest wait, in seconds, for a slot or a `Retry-After` window before the "
             "request fails as rate limited."
         ),
+        "rate_limit_retries": (
+            "How many times a 429/503 response carrying `Retry-After` retries the same URL "
+            "before the fetch fails as rate limited; each individual wait is bounded by "
+            "`max_host_wait`."
+        ),
     },
     "Extraction": {
         "filtered_text_length": "Longest text node considered as a date candidate.",

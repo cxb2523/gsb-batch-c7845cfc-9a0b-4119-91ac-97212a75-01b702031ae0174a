@@ -57,6 +57,7 @@ redacted wherever configuration is printed.
 | `per_host_concurrency`<br/>`NEWSWORKER_PER_HOST_CONCURRENCY` | `2` | Requests in flight per site across all workers of the process (0 = unlimited). |
 | `per_host_delay`<br/>`NEWSWORKER_PER_HOST_DELAY` | `0.0` | Minimum seconds between requests to one site; robots.txt `Crawl-delay` raises it. |
 | `max_host_wait`<br/>`NEWSWORKER_MAX_HOST_WAIT` | `30.0` | Longest wait, in seconds, for a slot or a `Retry-After` window before the request fails as rate limited. |
+| `rate_limit_retries`<br/>`NEWSWORKER_RATE_LIMIT_RETRIES` | `3` | How many times a 429/503 response carrying `Retry-After` retries the same URL before the fetch fails as rate limited; each individual wait is bounded by `max_host_wait`. |
 
 ## Extraction
 

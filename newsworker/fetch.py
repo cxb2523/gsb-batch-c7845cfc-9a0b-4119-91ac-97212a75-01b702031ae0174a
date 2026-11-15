@@ -74,6 +74,35 @@ class RateLimited(FetchError):
 
 
 @dataclass(frozen=True)
+class RateLimitWait:
+    """One ``Retry-After`` window a host asked this fetch to observe.
+
+    ``requested`` is the (capped) delay the site asked for; ``waited`` is the
+    time the transport actually slept before retrying, which can be smaller
+    when part of the window had already elapsed.
+    """
+
+    host: str
+    requested: float
+    waited: float
+
+
+@dataclass(frozen=True)
+class RedirectHop:
+    """One redirect followed during a fetch and its credential handling.
+
+    ``dropped_headers`` names the request headers removed before the next
+    request because it left the starting origin; it is empty for same-origin
+    redirects, which keep every header.
+    """
+
+    url: str
+    status: int
+    cross_origin: bool
+    dropped_headers: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class FetchRequest:
     url: str
     method: str = "GET"
@@ -108,6 +137,9 @@ class FetchPolicy:
     host_concurrency: int = 0
     host_interval: float = 0.0
     max_host_wait: float = 30.0
+    #: How many times a 429/503 response carrying ``Retry-After`` retries the
+    #: same URL after honouring the wait, before the fetch fails.
+    rate_limit_retries: int = 3
 
 
 @dataclass(frozen=True)
@@ -119,6 +151,11 @@ class FetchResult:
     body: bytes
     redirect_chain: tuple[str, ...] = ()
     not_modified: bool = False
+    #: Per-redirect diagnostics, including which headers were dropped on a
+    #: cross-origin hop. ``redirect_chain`` remains the plain URL tuple.
+    redirects: tuple[RedirectHop, ...] = ()
+    #: Every ``Retry-After`` wait this fetch actually performed, in order.
+    rate_limit_waits: tuple[RateLimitWait, ...] = ()
 
     def header(self, name: str) -> str | None:
         """A response header by case-insensitive name (aiohttp sends ``Etag``)."""
@@ -127,6 +164,11 @@ class FetchResult:
             return value
         wanted = name.lower()
         return next((v for k, v in self.headers.items() if k.lower() == wanted), None)
+
+    @property
+    def rate_limit_wait_seconds(self) -> float:
+        """Total seconds actually spent waiting on ``Retry-After`` windows."""
+        return sum(item.waited for item in self.rate_limit_waits)
 
     @property
     def validators(self) -> dict[str, str]:
@@ -297,6 +339,40 @@ class HostScheduler:
             state = self._state(host)
             until = self._clock() + min(max(0.0, seconds), MAX_RETRY_AFTER)
             state.not_before = max(state.not_before, until)
+
+    def register_retry_after(
+        self, host: str, seconds: float, *, max_wait: float
+    ) -> tuple[float, float]:
+        """Honour a ``Retry-After`` window for ``host`` and return its timing.
+
+        Sets the host's "not before" time and returns ``(requested, delay)``
+        where ``requested`` is the capped wait the site demanded and ``delay``
+        is how long remains to wait right now (already-elapsed time is
+        credited). Raises :class:`RateLimited`, naming the host and the wait,
+        when the remaining delay exceeds ``max_wait``.
+        """
+        with self._cond:
+            state = self._state(host)
+            now = self._clock()
+            requested = min(max(0.0, float(seconds)), MAX_RETRY_AFTER)
+            state.not_before = max(state.not_before, now + requested)
+            delay = max(0.0, state.not_before - now)
+            if delay > max_wait:
+                raise RateLimited(
+                    f"{host} asks to wait {delay:.0f}s, more than the {max_wait:.0f}s allowed"
+                )
+            return requested, delay
+
+    def wait_retry_after(self, host: str, seconds: float, *, max_wait: float) -> tuple[float, float]:
+        """Block for a ``Retry-After`` window (bounded by ``max_wait``).
+
+        Same contract as :meth:`register_retry_after`, but sleeps through the
+        wait using the scheduler's clock so tests can drive it deterministically.
+        """
+        requested, delay = self.register_retry_after(host, seconds, max_wait=max_wait)
+        if delay > 0:
+            self._sleep(delay)
+        return requested, delay
 
     def reserve(self, host: str, *, interval: float = 0.0, max_wait: float = 30.0) -> float:
         """Claim the next start time for ``host``; return how long to wait for it."""
@@ -501,16 +577,26 @@ def _origin(url: str) -> tuple[str, str, int | None]:
 
 def strip_cross_origin_headers(
     headers: dict[str, str], policy: FetchPolicy, *, keep: Iterable[str] = ()
-) -> dict[str, str]:
-    """Drop credentials and user-supplied headers before leaving the origin."""
+) -> tuple[dict[str, str], tuple[str, ...]]:
+    """Drop credentials and user-supplied headers before leaving the origin.
+
+    Returns the headers safe to send to the new origin and the original names
+    of the headers that were removed (the kept ``User-agent`` is never among
+    them). Same-origin callers must not use this: they keep every header.
+    """
     configured = {key.lower() for key in policy.extra_headers}
     retained = {key.lower() for key in keep}
-    return {
-        key: value
-        for key, value in headers.items()
-        if key.lower() in retained
-        or (key.lower() not in SENSITIVE_HEADERS and key.lower() not in configured)
-    }
+    kept: dict[str, str] = {}
+    dropped: list[str] = []
+    for key, value in headers.items():
+        lowered = key.lower()
+        if lowered in retained or (
+            lowered not in SENSITIVE_HEADERS and lowered not in configured
+        ):
+            kept[key] = value
+        else:
+            dropped.append(key)
+    return kept, tuple(dropped)
 
 
 class RequestsTransport:
@@ -555,7 +641,10 @@ class RequestsTransport:
         current_url = requested_url
         method = request.method.upper()
         body = request.body
-        chain = []
+        chain: list[str] = []
+        hops: list[RedirectHop] = []
+        waits: list[RateLimitWait] = []
+        rate_retries = 0
         headers = dict(policy.extra_headers)
         if not any(key.lower() == "user-agent" for key in headers):
             headers["User-agent"] = policy.user_agent
@@ -602,8 +691,28 @@ class RequestsTransport:
                 status_code = getattr(response, "status_code", 200)
                 if status_code in (429, 503):
                     wait = retry_after_seconds(response.headers.get("Retry-After"))
-                    if wait is not None:
+                    if wait is not None and request.operation != "source":
+                        # Delivery endpoints are not crawled: pace later
+                        # requests to the host but never sleep, retry or hide
+                        # the response — the channel classifies the status.
                         HOSTS.note_retry_after(host, wait)
+                    elif wait is not None:
+                        close = getattr(response, "close", None)
+                        if close:
+                            close()
+                        if rate_retries >= policy.rate_limit_retries:
+                            raise RateLimited(
+                                f"{host} kept returning {status_code} with Retry-After after "
+                                f"{rate_retries} retries (last request: {wait:.0f}s)"
+                            )
+                        # Bounded wait, then retry the same URL; the not-before
+                        # time also spaces every later request to this host.
+                        requested, slept = HOSTS.wait_retry_after(
+                            host, wait, max_wait=policy.max_host_wait
+                        )
+                        waits.append(RateLimitWait(host=host, requested=requested, waited=slept))
+                        rate_retries += 1
+                        continue
                 if status_code in REDIRECT_STATUSES and response.headers.get("Location"):
                     if redirect_index >= policy.redirect_limit:
                         close = getattr(response, "close", None)
@@ -614,10 +723,22 @@ class RequestsTransport:
                         )
                     next_url = urljoin(current_url, response.headers["Location"])
                     validate_destination(next_url, policy)
-                    if _origin(next_url) != start_origin:
+                    cross_origin = _origin(next_url) != start_origin
+                    dropped: tuple[str, ...] = ()
+                    if cross_origin:
                         # Credentials belong to the origin they were configured for;
                         # requests' own redirect stripping is bypassed by manual redirects.
-                        headers = strip_cross_origin_headers(headers, policy, keep=("User-agent",))
+                        headers, dropped = strip_cross_origin_headers(
+                            headers, policy, keep=("User-agent",)
+                        )
+                    hops.append(
+                        RedirectHop(
+                            url=next_url,
+                            status=status_code,
+                            cross_origin=cross_origin,
+                            dropped_headers=dropped,
+                        )
+                    )
                     chain.append(next_url)
                     if status_code == 303 or (status_code in (301, 302) and method == "POST"):
                         method, body = "GET", None
@@ -639,6 +760,8 @@ class RequestsTransport:
                         body=b"",
                         redirect_chain=tuple(chain),
                         not_modified=True,
+                        redirects=tuple(hops),
+                        rate_limit_waits=tuple(waits),
                     )
                 try:
                     if request.operation != "delivery":
@@ -655,6 +778,8 @@ class RequestsTransport:
                     headers=dict(response.headers),
                     body=response_body,
                     redirect_chain=tuple(chain),
+                    redirects=tuple(hops),
+                    rate_limit_waits=tuple(waits),
                 )
         raise RedirectPolicyError("Redirect handling exhausted")
 
@@ -702,4 +827,5 @@ def policy_from_settings(settings: Any, *, operation: str = "source") -> FetchPo
         host_concurrency=int(getattr(settings, "per_host_concurrency", 0) or 0),
         host_interval=float(getattr(settings, "per_host_delay", 0.0) or 0.0),
         max_host_wait=float(getattr(settings, "max_host_wait", 30.0)),
+        rate_limit_retries=int(getattr(settings, "rate_limit_retries", 3) or 0),
     )

@@ -18,6 +18,9 @@ from .fetch import (
     FetchError,
     FetchResult,
     FetchTimeout,
+    RateLimited,
+    RateLimitWait,
+    RedirectHop,
     RedirectPolicyError,
     ResponseTooLarge,
     _origin,
@@ -148,6 +151,9 @@ async def _fetch_one(session, url, policy, limits=None, request_headers=None):
     requested_url = url
     current_url = url
     chain = []
+    hops = []
+    waits = []
+    rate_retries = 0
     headers = dict(policy.extra_headers)
     if not any(key.lower() == "user-agent" for key in headers):
         headers["User-Agent"] = policy.user_agent
@@ -165,21 +171,53 @@ async def _fetch_one(session, url, policy, limits=None, request_headers=None):
             )
             if delay > 0:
                 await asyncio.sleep(delay)
-            outcome = await _send(session, current_url, policy, host, headers)
+            outcome = await _send(session, current_url, policy, headers)
         finally:
             if semaphore is not None:
                 semaphore.release()
-        if isinstance(outcome, str):
+        if outcome[0] == "redirect":
+            _, redirect_status, location = outcome
             if redirect_index >= policy.redirect_limit:
                 raise RedirectPolicyError(f"Redirect limit {policy.redirect_limit} exceeded")
-            current_url = urljoin(current_url, outcome)
-            validate_destination(current_url, policy)
-            if _origin(current_url) != start_origin:
+            next_url = urljoin(current_url, location)
+            validate_destination(next_url, policy)
+            cross_origin = _origin(next_url) != start_origin
+            dropped: tuple[str, ...] = ()
+            if cross_origin:
                 # Credentials belong to the origin they were configured for.
-                headers = strip_cross_origin_headers(headers, policy, keep=("User-Agent",))
-            chain.append(current_url)
+                headers, dropped = strip_cross_origin_headers(
+                    headers, policy, keep=("User-Agent",)
+                )
+            hops.append(
+                RedirectHop(
+                    url=next_url,
+                    status=redirect_status,
+                    cross_origin=cross_origin,
+                    dropped_headers=dropped,
+                )
+            )
+            chain.append(next_url)
+            current_url = next_url
             continue
-        status, response_headers, body = outcome
+        kind, payload = outcome
+        if kind == "rate_limited":
+            status_code, wait, retry_after_header = payload
+            if rate_retries >= policy.rate_limit_retries:
+                raise RateLimited(
+                    f"{host} kept returning {status_code} with Retry-After after "
+                    f"{rate_retries} retries (last request: {wait:.0f}s)"
+                )
+            # Bounded wait; the registered not-before time also spaces every
+            # later request to this host, including concurrent batch workers.
+            requested, remaining = HOSTS.register_retry_after(
+                host, retry_after_header, max_wait=policy.max_host_wait
+            )
+            if remaining > 0:
+                await asyncio.sleep(remaining)
+            waits.append(RateLimitWait(host=host, requested=requested, waited=remaining))
+            rate_retries += 1
+            continue
+        status, response_headers, body = payload
         return FetchResult(
             requested_url,
             current_url,
@@ -188,12 +226,19 @@ async def _fetch_one(session, url, policy, limits=None, request_headers=None):
             body,
             tuple(chain),
             status == 304,
+            tuple(hops),
+            tuple(waits),
         )
     raise RedirectPolicyError("Redirect handling exhausted")
 
 
-async def _send(session, current_url, policy, host, headers=None):
-    """One request: a redirect ``Location`` string or ``(status, headers, body)``."""
+async def _send(session, current_url, policy, headers=None):
+    """One request, returned as a tagged outcome the fetch loop can branch on.
+
+    Either ``("redirect", status, location)``, ``("rate_limited", (status,
+    retry_after_seconds, header))`` or ``("response", (status, headers,
+    body))``. Exceptions cover timeouts and transport errors.
+    """
     import aiohttp
 
     try:
@@ -205,13 +250,16 @@ async def _send(session, current_url, policy, host, headers=None):
             allow_redirects=False,
         ) as response:
             if response.status in (429, 503):
-                wait = retry_after_seconds(response.headers.get("Retry-After"))
+                header = response.headers.get("Retry-After")
+                wait = retry_after_seconds(header)
                 if wait is not None:
-                    HOSTS.note_retry_after(host, wait)
+                    # The fetch loop registers the not-before window, waits and
+                    # retries; nothing is read from this response.
+                    return "rate_limited", (response.status, wait, header)
             if response.status in REDIRECT_STATUSES and response.headers.get("Location"):
-                return response.headers["Location"]
+                return "redirect", response.status, response.headers["Location"]
             if response.status == 304:
-                return 304, dict(response.headers), b""
+                return "response", (304, dict(response.headers), b"")
             response.raise_for_status()
             declared = response.headers.get("Content-Length")
             if declared and declared.isdigit() and int(declared) > policy.max_bytes:
@@ -225,7 +273,7 @@ async def _send(session, current_url, policy, host, headers=None):
                 if total > policy.max_bytes:
                     raise ResponseTooLarge(f"Response exceeds byte limit {policy.max_bytes}")
                 chunks.append(chunk)
-            return response.status, dict(response.headers), b"".join(chunks)
+            return "response", (response.status, dict(response.headers), b"".join(chunks))
     except asyncio.TimeoutError as exc:
         raise FetchTimeout(f"Request timed out after {policy.timeout}s") from exc
     except aiohttp.ClientError as exc:

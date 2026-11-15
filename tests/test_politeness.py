@@ -6,7 +6,6 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
-import requests
 
 from newsworker.fetch import (
     HOSTS,
@@ -131,9 +130,11 @@ def test_concurrency_cap_applies_across_transports(server):
 
 
 def test_429_with_retry_after_pauses_the_host(server):
+    # The site asks for more than max_host_wait: no hanging, the fetch ends
+    # with a recognizable rate-limit error naming host and the required wait.
     policy = _policy(max_host_wait=5)
     transport = RequestsTransport()
-    with pytest.raises(requests.HTTPError):
+    with pytest.raises(RateLimited, match=r"127\.0\.0\.1.*120"):
         transport.fetch(FetchRequest(f"http://127.0.0.1:{server}/busy"), policy)
     started = time.monotonic()
     with pytest.raises(RateLimited):

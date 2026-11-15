@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Fetch diagnostics** — `FetchResult` now carries `redirects` (one
+  `RedirectHop` per redirect with its status, origin change and the names of
+  headers dropped on the cross-origin hop) and `rate_limit_waits` (each
+  `Retry-After` window, with the seconds the site asked for and the seconds
+  actually waited), plus a `rate_limit_wait_seconds` total. The existing
+  `redirect_chain` URL tuple and all positional constructors keep working.
+- **Bounded `Retry-After` retries** — a 429/503 carrying `Retry-After` now
+  waits (bounded by `max_host_wait`), retries the same URL up to
+  `rate_limit_retries` times, and records the host's "not before" time so
+  later requests to it observe the window. Waits longer than `max_host_wait`
+  fail immediately with a `RateLimited` error naming the host and the
+  required wait instead of hanging. Delivery requests are never retried or
+  slept on; they keep marking the host for later page fetches.
+
+### Changed
+- Cross-origin redirects strip `authorization`, `cookie`, `proxy-authorization`,
+  `x-api-key`, `x-auth-token` and every header configured in `extra_headers`,
+  keeping only `User-agent`; same-origin redirects keep all headers. The
+  stripped names are reported per hop in `FetchResult.redirects`.
+
 ## [1.5.0] - 2026-11-04
 
 Speed, coverage and discovery: with qddate 1.1.0 and a leaner feed build the
