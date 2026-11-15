@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WOS Download Bot Enhanced
 // @namespace    https://github.com/chugit/wos-download-bot-enhanced/
-// @version      2.0.0
+// @version      2.1.0
 // @description  Web of Science 核心合集批量导出助手（优化重构版：暂停/继续/停止/断点续传/预热/中断当前请求）
 // @author       chugit
 // @supportURL   https://github.com/chugit/wos-download-bot-enhanced/
@@ -29,7 +29,7 @@
     'use strict';
 
     const CONFIG = Object.freeze({
-        VERSION: '2.0.0',
+        VERSION: '2.1.0',
         PAGE_SIZE: 500,
         RECOMMENDED_DIRECT_START_MAX: 99501,
         MAX_HARD_STOP: 200000,
@@ -168,7 +168,54 @@
 
     function loadTask(taskKey = getTaskKey()) {
         const raw = localStorage.getItem(getStorageKey(taskKey));
-        return raw ? safeJsonParse(raw, null) : null;
+        return raw ? migrateTask(safeJsonParse(raw, null)) : null;
+    }
+
+    // 兼容旧版本任务记录，并保证预热进度与正式下载进度字段彻底分离：
+    // - requestedStart：用户请求的起始条目（不变）
+    // - warmupRequired / warmupDone：是否需要预热 / 预热是否完成
+    // - warmupNextStart：预热阶段当前推进到的批次起点（只属于预热）
+    // - nextStart / nextStop：正式下载的下一批范围（只属于正式下载）
+    function migrateTask(task) {
+        if (!task || typeof task !== 'object') return null;
+
+        const requestedStart = parseInt(task.requestedStart ?? task.nextStart, 10);
+        task.requestedStart = Number.isInteger(requestedStart) && requestedStart >= 1 ? requestedStart : 1;
+
+        if (typeof task.warmupRequired !== 'boolean') {
+            task.warmupRequired = task.requestedStart > CONFIG.RECOMMENDED_DIRECT_START_MAX;
+        }
+
+        if (typeof task.warmupDone !== 'boolean') {
+            // 旧记录中 warmupMode === true 表示预热尚未完成；false 或缺失表示无需预热或预热已完成
+            task.warmupDone = task.warmupRequired ? task.warmupMode === false : true;
+        }
+
+        if (!Number.isInteger(task.warmupNextStart)) {
+            if (!task.warmupDone) {
+                // 旧记录预热途中：nextStart 曾是预热游标，迁移为预热游标
+                task.warmupNextStart = Number.isInteger(task.nextStart) && task.nextStart >= 1
+                    ? task.nextStart
+                    : CONFIG.RECOMMENDED_DIRECT_START_MAX;
+            } else {
+                task.warmupNextStart = task.warmupRequired ? task.requestedStart : null;
+            }
+        }
+
+        if (!task.warmupDone) {
+            // 预热未完成时正式下载尚未开始，正式游标必须锚定在用户指定起始条目，
+            // 绝不允许沿用被预热推进过的 nextStart
+            task.nextStart = task.requestedStart;
+            task.nextStop = getSafeStop(task.nextStart, task.total, task.nextStart + CONFIG.PAGE_SIZE - 1);
+        } else if (!Number.isInteger(task.nextStart) || task.nextStart < 1) {
+            task.nextStart = task.requestedStart;
+            task.nextStop = getSafeStop(task.nextStart, task.total, task.nextStart + CONFIG.PAGE_SIZE - 1);
+        }
+
+        if (!Array.isArray(task.completedRanges)) task.completedRanges = [];
+        delete task.warmupMode;
+
+        return task;
     }
 
     function saveTask(task) {
@@ -323,9 +370,7 @@
     function createTask({ start, totalCount, fileFormat, waitSecond }) {
         const requestedStart = parseInt(start, 10);
         const total = parseInt(totalCount, 10);
-        const warmupMode = requestedStart > CONFIG.RECOMMENDED_DIRECT_START_MAX;
-        const initialStart = warmupMode ? CONFIG.RECOMMENDED_DIRECT_START_MAX : requestedStart;
-        const initialStop = getSafeStop(initialStart, total, initialStart + CONFIG.PAGE_SIZE - 1);
+        const warmupRequired = requestedStart > CONFIG.RECOMMENDED_DIRECT_START_MAX;
 
         return {
             taskKey: getTaskKey(),
@@ -337,11 +382,17 @@
             fileFormat,
             waitSecond,
 
+            // 用户请求的起始条目（正式下载必须从这里开始）
             requestedStart,
-            warmupMode,
 
-            nextStart: initialStart,
-            nextStop: initialStop,
+            // 预热进度（独立维护，不保存文件，不污染正式下载游标）
+            warmupRequired,
+            warmupDone: !warmupRequired,
+            warmupNextStart: warmupRequired ? CONFIG.RECOMMENDED_DIRECT_START_MAX : null,
+
+            // 正式下载进度（下一批范围），预热阶段保持不变
+            nextStart: requestedStart,
+            nextStop: getSafeStop(requestedStart, total, requestedStart + CONFIG.PAGE_SIZE - 1),
 
             lastSuccessStart: null,
             lastSuccessStop: null,
@@ -355,16 +406,26 @@
         };
     }
 
+    // 当前是否处于预热阶段（预热未完成）
+    function isWarmupPhase(task) {
+        return Boolean(task?.warmupRequired && !task?.warmupDone);
+    }
+
+    function getWarmupStop(task) {
+        if (!Number.isInteger(task?.warmupNextStart)) return null;
+        return getSafeStop(task.warmupNextStart, task.total, task.warmupNextStart + CONFIG.PAGE_SIZE - 1);
+    }
+
     function getStatusText(task) {
         if (!task) return '无任务';
-        if (task.status === TASK_STATUS.RUNNING && task.warmupMode) return '预热中';
+        const warming = isWarmupPhase(task);
 
         switch (task.status) {
-            case TASK_STATUS.RUNNING: return '下载中';
-            case TASK_STATUS.PAUSED: return '已暂停';
+            case TASK_STATUS.RUNNING: return warming ? '预热中' : '下载中';
+            case TASK_STATUS.PAUSED: return warming ? '已暂停（预热阶段）' : '已暂停';
             case TASK_STATUS.STOPPED: return '已停止';
             case TASK_STATUS.COMPLETED: return '已完成';
-            case TASK_STATUS.ERROR: return '出错';
+            case TASK_STATUS.ERROR: return warming ? '出错（预热阶段）' : '出错';
             default: return '空闲';
         }
     }
@@ -503,7 +564,11 @@
         }
 
         if (task.status === TASK_STATUS.RUNNING) {
-            disableMainButton(`${task.warmupMode ? '预热中' : '下载中'} ${task.nextStart}-${task.nextStop}`);
+            if (isWarmupPhase(task)) {
+                disableMainButton(`预热中 ${task.warmupNextStart}-${getWarmupStop(task)}`);
+            } else {
+                disableMainButton(`下载中 ${task.nextStart}-${task.nextStop}`);
+            }
             return;
         }
 
@@ -553,7 +618,9 @@
             </div>
             <div style="padding:12px;line-height:1.7;">
                 <div><b>状态：</b><span id="wos-task-status"></span></div>
+                <div><b>起始条目：</b><span id="wos-task-requested-start"></span></div>
                 <div><b>进度：</b><span id="wos-task-progress"></span>（<span id="wos-task-percent"></span>）</div>
+                <div id="wos-task-warmup-row"><b>预热进度：</b><span id="wos-task-warmup-progress"></span></div>
                 <div><b>格式：</b><span id="wos-task-format"></span></div>
                 <div><b>排序：</b><span id="wos-task-sort"></span></div>
                 <div><b>下批范围：</b><span id="wos-task-next-range"></span></div>
@@ -594,11 +661,30 @@
         };
 
         setText('wos-task-status', getStatusText(task));
+        setText('wos-task-requested-start', task.requestedStart ?? '-');
         setText('wos-task-progress', getProgressText(task));
         setText('wos-task-percent', `${getPercent(task)}%`);
         setText('wos-task-format', task.fileFormat);
         setText('wos-task-sort', task.sortBy);
-        setText('wos-task-next-range', `${task.nextStart || '-'} - ${task.nextStop || '-'}`);
+
+        const warmupRow = dom.byId('wos-task-warmup-row');
+        if (task.warmupRequired) {
+            if (warmupRow) warmupRow.style.display = '';
+            setText(
+                'wos-task-warmup-progress',
+                task.warmupDone
+                    ? `已完成（目标起始 ${task.requestedStart}）`
+                    : `${task.warmupNextStart} / ${task.requestedStart}（不保存文件）`
+            );
+        } else if (warmupRow) {
+            warmupRow.style.display = 'none';
+        }
+
+        if (isWarmupPhase(task)) {
+            setText('wos-task-next-range', `预热 ${task.warmupNextStart} - ${getWarmupStop(task)}`);
+        } else {
+            setText('wos-task-next-range', `${task.nextStart || '-'} - ${task.nextStop || '-'}`);
+        }
         setText(
             'wos-task-last-range',
             task.lastSuccessStart && task.lastSuccessStop
@@ -830,7 +916,102 @@
         task.lastError = null;
         upsertTask(task);
 
-        while (task.nextStart <= task.total) {
+        const pauseAndExit = () => {
+            markTaskStatus(task, TASK_STATUS.PAUSED);
+            clearRuntimeControls();
+            enableMainButton('继续下载');
+        };
+
+        while (true) {
+            if (runtime.stopRequested) {
+                finalizeStop(task);
+                return;
+            }
+
+            if (runtime.pauseRequested) {
+                pauseAndExit();
+                return;
+            }
+
+            // ===== 预热阶段：只推进 warmupNextStart，不保存文件，绝不动 nextStart =====
+            if (isWarmupPhase(task)) {
+                if (task.warmupNextStart > CONFIG.MAX_HARD_STOP) {
+                    markTaskStatus(task, TASK_STATUS.ERROR, `预热起始条目超过接口上限 ${CONFIG.MAX_HARD_STOP}`);
+                    clearRuntimeControls();
+                    enableMainButton('超过接口上限');
+                    alert(`预热起始条目超过接口上限 ${CONFIG.MAX_HARD_STOP}。`);
+                    return;
+                }
+
+                const start = task.warmupNextStart;
+                const stop = getWarmupStop(task);
+
+                disableMainButton(`预热中 ${start}-${stop}`);
+                updateControlPanel(task);
+                log(`正在预热 ${start}-${stop}（不保存文件，目标起始 ${task.requestedStart}）/ ${task.total}`);
+
+                try {
+                    await doDownloadWithRetry(task, start, stop);
+                } catch (err) {
+                    if (runtime.stopRequested || err.name === 'AbortError') {
+                        finalizeStop(task, false);
+                        return;
+                    }
+
+                    const msg = formatError(err, '预热出错');
+                    console.error(err);
+                    markTaskStatus(task, TASK_STATUS.ERROR, msg);
+                    clearRuntimeControls();
+                    enableMainButton('恢复下载');
+                    alert(msg);
+                    return;
+                }
+
+                if (runtime.stopRequested) {
+                    finalizeStop(task);
+                    return;
+                }
+
+                task.lastError = null;
+
+                const nextCandidate = stop + 1;
+                if (nextCandidate >= task.requestedStart) {
+                    // 预热完成：正式下载游标锚定到用户指定起始条目
+                    task.warmupDone = true;
+                    task.warmupNextStart = task.requestedStart;
+                    task.nextStart = task.requestedStart;
+                    task.nextStop = getSafeStop(task.nextStart, task.total, task.nextStart + CONFIG.PAGE_SIZE - 1);
+                    log(`预热完成，将从用户指定起始条目 ${task.requestedStart} 开始正式下载`);
+                } else {
+                    task.warmupNextStart = nextCandidate;
+                }
+                upsertTask(task);
+
+                if (runtime.pauseRequested) {
+                    pauseAndExit();
+                    return;
+                }
+
+                if (runtime.stopRequested) {
+                    finalizeStop(task);
+                    return;
+                }
+
+                const warmupDelay = randomInt(CONFIG.WARMUP_DELAY_MIN, CONFIG.WARMUP_DELAY_MAX);
+                disableMainButton(`预热等待 ${warmupDelay}s`);
+                log(`预热等待 ${warmupDelay} 秒后继续...`);
+                await sleep(warmupDelay * 1000);
+                continue;
+            }
+
+            // ===== 正式下载阶段：只推进 nextStart，从用户指定起始条目开始 =====
+            if (task.nextStart > task.total) {
+                markTaskStatus(task, TASK_STATUS.COMPLETED);
+                clearRuntimeControls();
+                alert('下载完成');
+                return;
+            }
+
             if (task.nextStart > CONFIG.MAX_HARD_STOP) {
                 markTaskStatus(task, TASK_STATUS.ERROR, `当前接口限制起始条目不能超过 ${CONFIG.MAX_HARD_STOP}`);
                 clearRuntimeControls();
@@ -839,112 +1020,24 @@
                 return;
             }
 
-            if (runtime.stopRequested) {
-                finalizeStop(task);
-                return;
-            }
-
-            if (runtime.pauseRequested) {
-                markTaskStatus(task, TASK_STATUS.PAUSED);
-                clearRuntimeControls();
-                enableMainButton('继续下载');
-                return;
-            }
-
             const start = task.nextStart;
             const stop = getSafeStop(start, task.total, start + CONFIG.PAGE_SIZE - 1);
             task.nextStop = stop;
             upsertTask(task);
 
-            disableMainButton(`${task.warmupMode ? '预热中' : '下载中'} ${start}-${stop}`);
-            log(`${task.warmupMode ? '正在预热' : '正在下载'} ${start}-${stop} / ${task.total}`);
+            disableMainButton(`下载中 ${start}-${stop}`);
+            log(`正在下载 ${start}-${stop} / ${task.total}`);
 
+            let blob;
             try {
-                const blob = await doDownloadWithRetry(task, start, stop);
-
-                if (runtime.stopRequested) {
-                    finalizeStop(task);
-                    return;
-                }
-
-                if (!task.warmupMode) {
-                    downloadBlob(buildDownloadFileName(task, start, stop), blob);
-                    task.lastSuccessStart = start;
-                    task.lastSuccessStop = stop;
-                    task.completedRanges.push({ start, stop });
-                }
-
-                task.lastError = null;
-
-                if (task.warmupMode) {
-                    const nextCandidate = stop + 1;
-                    if (nextCandidate >= task.requestedStart) {
-                        task.warmupMode = false;
-                        task.nextStart = task.requestedStart;
-                    } else {
-                        task.nextStart = nextCandidate;
-                    }
-
-                    task.nextStop = getSafeStop(task.nextStart, task.total, task.nextStart + CONFIG.PAGE_SIZE - 1);
-                    upsertTask(task);
-
-                    if (runtime.pauseRequested) {
-                        markTaskStatus(task, TASK_STATUS.PAUSED);
-                        clearRuntimeControls();
-                        enableMainButton('继续下载');
-                        return;
-                    }
-
-                    if (runtime.stopRequested) {
-                        finalizeStop(task);
-                        return;
-                    }
-
-                    const warmupDelay = randomInt(CONFIG.WARMUP_DELAY_MIN, CONFIG.WARMUP_DELAY_MAX);
-                    disableMainButton(`预热等待 ${warmupDelay}s`);
-                    log(`预热等待 ${warmupDelay} 秒后继续...`);
-                    await sleep(warmupDelay * 1000);
-                    continue;
-                }
-
-                task.nextStart = stop + 1;
-                task.nextStop = getSafeStop(task.nextStart, task.total, task.nextStart + CONFIG.PAGE_SIZE - 1);
-                upsertTask(task);
-
-                if (task.nextStart > task.total || task.nextStart > CONFIG.MAX_HARD_STOP) {
-                    markTaskStatus(task, TASK_STATUS.COMPLETED);
-                    clearRuntimeControls();
-                    alert('下载完成');
-                    return;
-                }
-
-                if (runtime.pauseRequested) {
-                    markTaskStatus(task, TASK_STATUS.PAUSED);
-                    clearRuntimeControls();
-                    enableMainButton('继续下载');
-                    return;
-                }
-
-                if (runtime.stopRequested) {
-                    finalizeStop(task);
-                    return;
-                }
-
-                const minVal = Math.max(CONFIG.NORMAL_DELAY_MIN_ALLOWED, task.waitSecond - 5);
-                const maxVal = Math.max(minVal, task.waitSecond + 5);
-                const delay = randomInt(minVal, maxVal);
-
-                disableMainButton(`等待 ${delay}s`);
-                log(`等待 ${delay} 秒后继续下载...`);
-                await sleep(delay * 1000);
-
+                blob = await doDownloadWithRetry(task, start, stop);
             } catch (err) {
                 if (runtime.stopRequested || err.name === 'AbortError') {
                     finalizeStop(task, false);
                     return;
                 }
 
-                const msg = formatError(err, task.warmupMode ? '预热出错' : '下载出错');
+                const msg = formatError(err, '下载出错');
                 console.error(err);
                 markTaskStatus(task, TASK_STATUS.ERROR, msg);
                 clearRuntimeControls();
@@ -952,11 +1045,47 @@
                 alert(msg);
                 return;
             }
-        }
 
-        markTaskStatus(task, TASK_STATUS.COMPLETED);
-        clearRuntimeControls();
-        alert('下载完成');
+            if (runtime.stopRequested) {
+                finalizeStop(task);
+                return;
+            }
+
+            downloadBlob(buildDownloadFileName(task, start, stop), blob);
+            task.lastSuccessStart = start;
+            task.lastSuccessStop = stop;
+            task.completedRanges.push({ start, stop });
+            task.lastError = null;
+
+            task.nextStart = stop + 1;
+            task.nextStop = getSafeStop(task.nextStart, task.total, task.nextStart + CONFIG.PAGE_SIZE - 1);
+            upsertTask(task);
+
+            if (task.nextStart > task.total || task.nextStart > CONFIG.MAX_HARD_STOP) {
+                markTaskStatus(task, TASK_STATUS.COMPLETED);
+                clearRuntimeControls();
+                alert('下载完成');
+                return;
+            }
+
+            if (runtime.pauseRequested) {
+                pauseAndExit();
+                return;
+            }
+
+            if (runtime.stopRequested) {
+                finalizeStop(task);
+                return;
+            }
+
+            const minVal = Math.max(CONFIG.NORMAL_DELAY_MIN_ALLOWED, task.waitSecond - 5);
+            const maxVal = Math.max(minVal, task.waitSecond + 5);
+            const delay = randomInt(minVal, maxVal);
+
+            disableMainButton(`等待 ${delay}s`);
+            log(`等待 ${delay} 秒后继续下载...`);
+            await sleep(delay * 1000);
+        }
     }
 
     async function resumeTask() {
