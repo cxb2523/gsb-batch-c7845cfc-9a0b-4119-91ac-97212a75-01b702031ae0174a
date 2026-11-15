@@ -1,10 +1,10 @@
 import gradio as gr
-import xxhash
 from gradio.components import _Keywords
 
 from ai import AI
 from config import Config
-from contents import *
+from contents import SOURCE_STATIC, describe_source, extract_text_from_docx, \
+    extract_text_from_pdf, extract_text_from_txt, hash_contents, web_crawler_newspaper
 from storage import Storage
 
 
@@ -30,7 +30,13 @@ class Webui:
             return tokens
 
     def _get_hash_id(self, contents):
-        return xxhash.xxh3_128_hexdigest('\n'.join(contents))
+        return hash_contents(contents)
+
+    @staticmethod
+    def _source_text(source):
+        if source == SOURCE_STATIC:
+            return "Content source: static HTTP request (browser rendering was unavailable)"
+        return f"Content source: {describe_source(source)}"
 
     def run(self):
         with gr.Blocks() as demo:
@@ -51,7 +57,7 @@ class Webui:
                             return {url_error_box: gr.update(value="Enter URL", visible=True)}
                         try:
                             print(f"Crawling URL {url}")
-                            content, lang = web_crawler_newspaper(url)
+                            content, lang, source = web_crawler_newspaper(url)
                             if len(content) == 0:
                                 return {url_error_box: gr.update(value="Can not crawl this url", visible=True)}
                             hash_id = self._get_hash_id(content)
@@ -63,21 +69,16 @@ class Webui:
                             url_box: gr.update(value=""),
                             init_page: gr.update(visible=False),
                             chat_page: gr.update(visible=True),
+                            source_box: gr.update(value=self._source_text(source), visible=True),
                             hash_id_state: hash_id
                         }
-
-                    url_submit_btn.click(
-                        submit,
-                        [url_box],
-                        [init_page, url_error_box, chat_page, url_box, hash_id_state],
-                    )
 
                 with gr.Tab("file"):
                     file_error_box = gr.Textbox(label="Input Error", visible=False)
                     file_box = gr.File(label="File", file_types=["pdf", "txt", "docx"])
                     file_submit_btn = gr.Button("Submit file", variant="primary")
 
-                    def submit(file):
+                    def submit_file(file):
                         url = file.name
                         if url.endswith('.pdf'):
                             contents, lang = extract_text_from_pdf(url)
@@ -98,16 +99,12 @@ class Webui:
                             chat_page: gr.update(visible=True),
                             file_box: gr.update(value=_Keywords.NO_VALUE),
                             file_error_box: gr.update(visible=False),
+                            source_box: gr.update(value="Content source: uploaded file", visible=True),
                             hash_id_state: hash_id
                         }
 
-                    file_submit_btn.click(
-                        submit,
-                        [file_box],
-                        [init_page, chat_page, file_box, file_error_box, hash_id_state],
-                    )
-
             with chat_page:
+                source_box = gr.Textbox(label="Content source", interactive=False, visible=False)
                 with gr.Row():
                     with gr.Column():
                         chatbot = gr.Chatbot()
@@ -150,23 +147,35 @@ class Webui:
                         msg: gr.update(value=""),
                         kw_box: gr.update(value=[], visible=False),
                         dataset_box: gr.update(value=[], visible=False),
+                        source_box: gr.update(value="", visible=False),
                         hash_id_state: None,
                     }
 
-                msg.submit(
-                    respond,
-                    [msg, chatbot, hash_id_state],
-                    [msg, chatbot, dataset_box, kw_box, dataset_box, kw_box]
-                )
-                submit_box.click(
-                    respond,
-                    [msg, chatbot, hash_id_state],
-                    [msg, chatbot, dataset_box, kw_box, dataset_box, kw_box]
-                )
-                reset_box.click(
-                    reset,
-                    None,
-                    [init_page, chat_page, chatbot, msg, kw_box, dataset_box, hash_id_state]
-                )
+            # Wire the handlers once every component they reference exists.
+            url_submit_btn.click(
+                submit,
+                [url_box],
+                [init_page, url_error_box, chat_page, url_box, hash_id_state, source_box],
+            )
+            file_submit_btn.click(
+                submit_file,
+                [file_box],
+                [init_page, chat_page, file_box, file_error_box, hash_id_state, source_box],
+            )
+            msg.submit(
+                respond,
+                [msg, chatbot, hash_id_state],
+                [msg, chatbot, dataset_box, kw_box, dataset_box, kw_box]
+            )
+            submit_box.click(
+                respond,
+                [msg, chatbot, hash_id_state],
+                [msg, chatbot, dataset_box, kw_box, dataset_box, kw_box]
+            )
+            reset_box.click(
+                reset,
+                None,
+                [init_page, chat_page, chatbot, msg, kw_box, dataset_box, hash_id_state, source_box]
+            )
         demo.title = "Chat Web"
         demo.launch(server_port=self.cfg.webui_port, server_name=self.cfg.webui_host, show_api=False)

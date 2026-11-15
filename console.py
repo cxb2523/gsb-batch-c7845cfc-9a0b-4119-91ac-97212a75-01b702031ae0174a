@@ -1,9 +1,10 @@
-import xxhash
+import os
 
 from ai import AI
 from config import Config
 from storage import Storage
-from contents import *
+from contents import describe_source, extract_text_from_docx, extract_text_from_pdf, \
+    extract_text_from_txt, hash_contents, web_crawler_newspaper
 
 
 def console(cfg: Config):
@@ -117,11 +118,12 @@ def _get_contents() -> tuple[list[str], str, str]:
                     print("Unsupported file format.")
                     continue
             else:
-                contents, data = web_crawler_newspaper(url)
+                contents, data, source = web_crawler_newspaper(url)
+                print("The article was retrieved via", describe_source(source) + ".")
             if not contents:
                 print("Unable to retrieve the content of the article. Please enter the link to the article or "
                       "the file path of the PDF/TXT/DOCX document again.")
                 continue
-            return contents, data, xxhash.xxh3_128_hexdigest('\n'.join(contents))
+            return contents, data, hash_contents(contents)
         except Exception as e:
             print("Error:", e)

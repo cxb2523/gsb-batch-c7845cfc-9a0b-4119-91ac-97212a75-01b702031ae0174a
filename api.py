@@ -2,7 +2,6 @@ import os
 import shutil
 
 import uvicorn
-import xxhash
 from fastapi import FastAPI, UploadFile, File
 from fastapi.exceptions import RequestValidationError
 from pydantic import BaseModel
@@ -13,7 +12,7 @@ from starlette.responses import JSONResponse
 from ai import AI
 from config import Config
 from contents import web_crawler_newspaper, extract_text_from_txt, extract_text_from_docx, \
-    extract_text_from_pdf
+    extract_text_from_pdf, WebCrawlError, describe_source, hash_contents
 from storage import Storage
 
 
@@ -31,10 +30,15 @@ def api(cfg: Config):
     @app.post("/crawler_url")
     async def crawler_url(req: CrawlerUrlRequest):
         """Crawler the URL."""
-        contents, lang = web_crawler_newspaper(req.url)
-        hash_id = xxhash.xxh3_128_hexdigest('\n'.join(contents))
+        try:
+            contents, lang, source = web_crawler_newspaper(req.url)
+        except WebCrawlError as e:
+            return {"code": 1, "msg": str(e), "data": {}}
+        hash_id = hash_contents(contents)
         tokens = _save_to_storage(contents, hash_id)
-        return {"code": 0, "msg": "ok", "data": {"uri": f"{hash_id}/{lang}", "tokens": tokens}}
+        return {"code": 0, "msg": "ok",
+                "data": {"uri": f"{hash_id}/{lang}", "tokens": tokens, "source": source,
+                         "source_desc": describe_source(source)}}
 
     def _save_to_storage(contents, hash_id):
         storage = Storage.create_storage(cfg)
@@ -62,7 +66,7 @@ def api(cfg: Config):
             contents, lang = extract_text_from_docx(upload_path)
         else:
             return {"code": 1, "msg": "not support", "data": {}}
-        hash_id = xxhash.xxh3_128_hexdigest('\n'.join(contents))
+        hash_id = hash_contents(contents)
         tokens = _save_to_storage(contents, hash_id)
         os.remove(upload_path)
         return {"code": 0, "msg": "ok", "data": {"uri": f"{hash_id}/{lang}", "tokens": tokens}}
