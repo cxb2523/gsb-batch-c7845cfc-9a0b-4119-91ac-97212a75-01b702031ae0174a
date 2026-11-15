@@ -28,8 +28,16 @@ def get_random_str(length: int = 64, chars: str = '0123456789abcdef') -> str:
 
 
 class RequestError(Exception):
-    """曼谷航空 API 请求异常。"""
-    pass
+    """曼谷航空 API 请求异常。
+
+    携带失败步骤名和（如适用）HTTP 状态码，
+    异常消息格式为 ``[步骤名] 消息``，便于调用方定位问题。
+    """
+
+    def __init__(self, step: str, message: str, status_code: int = None):
+        self.step = step
+        self.status_code = status_code
+        super().__init__('[%s] %s' % (step, message))
 
 
 class Bangkokair:
@@ -47,11 +55,22 @@ class Bangkokair:
             ...
         }
         b = Bangkokair(params)
-        b.main()
+        result = b.main()   # 返回可判读的结果字典，见 main() 文档
     """
 
     default_user_agent = (
         "Mozilla/5.0 (compatible; MSIE 10.0; Windows NT 6.1; WOW64; Trident/6.0)"
+    )
+
+    # 查询流程的步骤，按执行顺序排列
+    STEPS = (
+        'booking',
+        'get_pg_js_name',
+        'check_client',
+        'get_pid',
+        'get_cookies',
+        'search',
+        'search_parse',
     )
 
     def __init__(self, request_params: dict, **kwargs):
@@ -63,6 +82,8 @@ class Bangkokair:
             'PID': '',              # 页面 ID
             'booking_data': {},     # 初始订票请求的返回数据
             'html': '',             # 搜索结果页面 HTML
+            'flights': None,        # 解析出的航班分组 (proposedFlightsGroup)
+            'prices': None,         # 解析出的价格列表 (recommendationList)
             'GMT_FORMAT': '%b %d, %Y %I:%M:%S %p',
         }
         # 初始化 HTTP 会话
@@ -71,15 +92,43 @@ class Bangkokair:
         self.user_agent = kwargs.get('user_agent', self.default_user_agent)
         self.request_params = request_params
 
-    def main(self):
-        """执行完整的订票查询流程。"""
-        self.booking()
-        self.get_pg_js_name()
-        self.check_client()
-        self.get_pid()
-        self.get_cookies()
-        self.search()
-        self.search_parse()
+    def main(self) -> dict:
+        """执行完整的订票查询流程，返回一份可判读的结果字典。
+
+        任何一步失败都不会把异常直接抛给调用方，而是记录在结果中::
+
+            {
+                'success': bool,              # 整体是否成功
+                'failed_step': str | None,    # 失败发生在哪一步（成功时为 None）
+                'error_type': str | None,     # 失败步骤的异常类型名
+                'error_message': str | None,  # 失败步骤的异常信息（含状态码/步骤名）
+                'completed_steps': list[str], # 已成功完成的步骤列表
+                'flights': list | None,       # 解析出的航班分组（成功时）
+                'prices': list | None,        # 解析出的价格列表（成功时）
+            }
+        """
+        result = {
+            'success': False,
+            'failed_step': None,
+            'error_type': None,
+            'error_message': None,
+            'completed_steps': [],
+            'flights': None,
+            'prices': None,
+        }
+        for step in self.STEPS:
+            try:
+                getattr(self, step)()
+            except Exception as exc:
+                result['failed_step'] = step
+                result['error_type'] = type(exc).__name__
+                result['error_message'] = str(exc)
+                return result
+            result['completed_steps'].append(step)
+        result['success'] = True
+        result['flights'] = self.common_data['flights']
+        result['prices'] = self.common_data['prices']
+        return result
 
     def booking(self):
         """步骤 1：提交初始订票请求，获取后续需要的 token 和 URL。"""
@@ -87,7 +136,8 @@ class Bangkokair:
         method = "POST"
         rst = self.session.request(method, url, data=self.request_params)
         if rst.status_code != 200:
-            raise RequestError('booking 请求失败: %s' % rst.status_code)
+            raise RequestError('booking', '请求失败，HTTP 状态码: %s' % rst.status_code,
+                               status_code=rst.status_code)
         self.common_data['booking_data'] = rst.json()
 
     def get_pg_js_name(self):
@@ -112,10 +162,14 @@ class Bangkokair:
         }
         rst = self.session.request(method, url, headers=headers, data=data)
         if rst.status_code != 200:
-            raise RequestError('获取 PGxxx.js 失败: %s' % rst.status_code)
+            raise RequestError('get_pg_js_name', '获取 PGxxx.js 失败，HTTP 状态码: %s' % rst.status_code,
+                               status_code=rst.status_code)
         # 从 HTML 中正则匹配 PGxxxx.js 文件名
         patt = r'<script type="text/javascript" src="/(PG\w+.js)"'
-        self.common_data['PG_JS_name'] = re.findall(patt, rst.text)[0]
+        matches = re.findall(patt, rst.text)
+        if not matches:
+            raise RequestError('get_pg_js_name', '未能从返回 HTML 中匹配到 PGxxx.js 文件名')
+        self.common_data['PG_JS_name'] = matches[0]
 
     def check_client(self):
         """步骤 3：执行 qlSUmvhsKL.js 做客户端环境校验。
@@ -278,7 +332,8 @@ class Bangkokair:
         }
         rst = self.session.request(**kwargs)
         if rst.status_code != 200:
-            raise RequestError('qlSUmvhsKL 请求失败: %s' % rst.status_code)
+            raise RequestError('check_client', 'qlSUmvhsKL 请求失败，HTTP 状态码: %s' % rst.status_code,
+                               status_code=rst.status_code)
 
     def get_pid(self):
         """步骤 4：访问 PGxxx.js 并从页面中提取 PID。
@@ -292,10 +347,14 @@ class Bangkokair:
         }
         rst = self.session.request("GET", url, headers=headers)
         if rst.status_code != 200:
-            raise RequestError('PID 获取失败: %s' % rst.status_code)
+            raise RequestError('get_pid', 'PID 获取失败，HTTP 状态码: %s' % rst.status_code,
+                               status_code=rst.status_code)
         # 从 JavaScript URL 中解析 PID 参数
         patt = r'"/PG[a-z]+.js\?PID=([A-Z0-9-]+)"'
-        self.common_data['PID'] = re.findall(patt, rst.text)[0]
+        matches = re.findall(patt, rst.text)
+        if not matches:
+            raise RequestError('get_pid', '未能从 PGxxx.js 页面中匹配到 PID')
+        self.common_data['PID'] = matches[0]
 
     def get_cookies(self):
         """步骤 5：执行 PGxxx.js 的 proof 函数获取签名 cookie。
@@ -527,7 +586,8 @@ class Bangkokair:
         }
         rst = self.session.request(method, url, headers=headers, params=params, data=data)
         if rst.status_code != 200:
-            raise RequestError('获取 Cookie 失败: %s' % rst.status_code)
+            raise RequestError('get_cookies', '获取 Cookie 失败，HTTP 状态码: %s' % rst.status_code,
+                               status_code=rst.status_code)
 
     def search(self):
         """步骤 6：带上 cookie 重新提交订票请求，获取航班搜索结果。"""
@@ -547,29 +607,39 @@ class Bangkokair:
         }
         rst = self.session.request(method, url, headers=headers, data=data)
         if rst.status_code != 200:
-            raise RequestError('search 请求失败: %s' % rst.status_code)
+            raise RequestError('search', 'search 请求失败，HTTP 状态码: %s' % rst.status_code,
+                               status_code=rst.status_code)
         self.common_data['html'] = rst.content.decode()
 
-    def search_parse(self):
+    def search_parse(self) -> dict:
         """步骤 7：解析搜索结果，提取航班和价格信息。
 
         从 HTML 中正则提取 pageProvider 配置 JSON，
         解析出 proposedFlightsGroup（航班信息）和
         recommendationList（价格信息）。
+
+        解析结果会存入 ``common_data['flights']`` / ``common_data['prices']``
+        并作为返回值返回，同时保留原有的打印行为。
         """
         patt = r'plnextv2.utils.pageProvider.PlnextPageProvider.init\({.*?config : (.*?), pageEngine : pageEngine'
-        rst = re.findall(patt, self.common_data['html'], re.DOTALL)
-        rst = rst[0]
+        matches = re.findall(patt, self.common_data['html'], re.DOTALL)
+        if not matches:
+            raise RequestError('search_parse', '未能从搜索结果 HTML 中匹配到 pageProvider 配置')
 
-        rst = json.loads(rst)
+        rst = json.loads(matches[0])
 
-        proposedFlightsGroup = rst['pageDefinitionConfig']['pageData']['business']['Availability']['proposedBounds'][0][
-            'proposedFlightsGroup']
+        availability = rst['pageDefinitionConfig']['pageData']['business']['Availability']
+        proposedFlightsGroup = availability['proposedBounds'][0]['proposedFlightsGroup']
+        recommendationList = availability['recommendationList']
 
         # 航班号、起飞时间、到达时间、飞行时间等
         print(proposedFlightsGroup)
         # 价格信息
-        print(rst['pageDefinitionConfig']['pageData']['business']['Availability']['recommendationList'])
+        print(recommendationList)
+
+        self.common_data['flights'] = proposedFlightsGroup
+        self.common_data['prices'] = recommendationList
+        return {'flights': proposedFlightsGroup, 'prices': recommendationList}
 
 
 if __name__ == "__main__":
@@ -591,4 +661,9 @@ if __name__ == "__main__":
         "INFANTS": "0"                # 婴儿数量
     }
     b = Bangkokair(params)
-    b.main()
+    result = b.main()
+    if result['success']:
+        print('查询成功，完成步骤: %s' % ', '.join(result['completed_steps']))
+    else:
+        print('查询失败于步骤 [%s]: %s: %s'
+              % (result['failed_step'], result['error_type'], result['error_message']))

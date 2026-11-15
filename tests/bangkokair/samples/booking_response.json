@@ -1,0 +1,8 @@
+{
+  "url": "https://flightbook.bangkokair.com/plnext/BangkokAir/Override.action",
+  "LANGUAGE": "GB",
+  "EMBEDDED_TRANSACTION": "sample-transaction-id",
+  "SITE": "sample-site",
+  "ENCT": "sample-enct",
+  "ENC": "sample-enc"
+}
