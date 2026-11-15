@@ -2,6 +2,7 @@ from http.cookiejar import CookieJar
 from time import sleep
 from time import time
 from typing import Any
+from typing import NamedTuple
 from typing import Optional
 from typing import Type
 from typing import Union
@@ -35,6 +36,14 @@ from .submission import Submission
 from .submission import SubmissionPartial
 from .user import User
 from .user import UserPartial
+
+
+class FavoritesResult(NamedTuple):
+    """
+    The result of a full favorites traversal (see FAAPI.favorites_all).
+    """
+    submissions: list[SubmissionPartial]  # All collected submissions, in the order they were fetched
+    complete: bool  # True if traversal ended normally, False if it stopped early
 
 
 # noinspection GrazieInspection
@@ -270,6 +279,47 @@ class FAAPI:
         info_parsed: dict[str, Any] = parse_user_favorites(page_parsed)
         submissions: list[SubmissionPartial] = list(map(SubmissionPartial, info_parsed["figures"]))
         return submissions, info_parsed["next_page"] or None
+
+    def favorites_all(self, user: str, page: str = "") -> FavoritesResult:
+        """
+        Traverse a user's favorites and collect all submissions into a single list.
+
+        Pages are fetched one at a time using FAAPI.favorites (therefore robots.txt and crawl-delay restrictions
+        apply to every request) and followed using the next-page value returned by each page. Traversal stops when:
+
+        * a page returns an empty list of submissions (the entries collected so far are kept);
+        * a page returns None as its next page (the normal end of the favorites list);
+        * the next page has already been visited, including the page just fetched (this prevents infinite loops
+          when the site repeats or regresses page values).
+
+        :param user: The name of the user (_ characters are allowed).
+        :param page: The page to start from (an empty string fetches the first page, as in FAAPI.favorites).
+        :return: A FavoritesResult containing all collected SubmissionPartial objects in fetch order and a
+            ``complete`` flag: True if traversal ended normally (a page returned None as its next page), False if
+            it stopped early because of an empty page or an already-seen next-page value.
+        :raises Exception: Any exception raised while fetching a page is re-raised to the caller; the submissions
+            collected before the error are attached to the raised exception object as a ``partial_results``
+            attribute (list[SubmissionPartial]).
+        """
+        submissions: list[SubmissionPartial] = []
+        seen_pages: set[str] = set()
+        next_page: Optional[str] = page.strip()
+        complete: bool = False
+        while next_page is not None and next_page not in seen_pages:
+            seen_pages.add(next_page)
+            try:
+                new_submissions, new_next_page = self.favorites(user, next_page)
+            except Exception as err:
+                err.partial_results = list(submissions)  # type: ignore[attr-defined]
+                raise
+            submissions.extend(new_submissions)
+            if not new_submissions:
+                break
+            if new_next_page is None:
+                complete = True
+                break
+            next_page = new_next_page.strip()
+        return FavoritesResult(submissions, complete)
 
     def journals(self, user: str, page: int = 1) -> tuple[list[JournalPartial], Optional[int]]:
         """

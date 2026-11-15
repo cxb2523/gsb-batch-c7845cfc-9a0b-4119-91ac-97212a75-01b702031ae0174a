@@ -177,6 +177,14 @@ on `requests.Session` is accepted.
   returned) are strings. If the favorites page is the last then a `None` is returned as next page. An empty page
   value as argument is equivalent to page 1.<br/>
   *Note:* favorites page "numbers" do not follow any scheme and are only generated server-side.
+* `favorites_all(user: str, page: str = "") -> FavoritesResult`<br/>
+  Traverses a user's favorites starting from the given page (an empty string starts from the first page) and
+  collects all submissions into a single list, following the next-page values returned by `favorites`. Traversal
+  stops when a page returns no submissions, when a page returns `None` as its next page (normal end), or when the
+  next page has already been visited (this prevents infinite loops on repeated or regressing page values). The
+  returned `FavoritesResult` named tuple contains the collected `submissions` (in fetch order) and a `complete`
+  flag telling whether the traversal ended normally (`True`) or stopped early (`False`). If a page request raises an
+  exception, it is re-raised with the submissions collected so far attached to it as a `partial_results` attribute.
 * `journals(user: str, page: int = 1) -> -> tuple[list[JournalPartial], int | None]`<br/>
   Returns the list of submissions found on a specific journals page, and the number of the next page. The returned page
   number is set to `None` if it is the last page.

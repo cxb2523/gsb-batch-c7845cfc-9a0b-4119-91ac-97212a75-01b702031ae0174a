@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### New Features
+
+* Add `FAAPI.favorites_all(user, page="")` to traverse a user's favorites safely: it follows the server-generated
+  next-page values, stops on empty pages and on repeated/regressing page values, and returns a `FavoritesResult`
+  named tuple with the collected submissions and a `complete` flag. Exceptions raised while fetching a page are
+  re-raised with the submissions collected so far attached as a `partial_results` attribute.
+
 ## v3.13.0
 
 ### New Features
