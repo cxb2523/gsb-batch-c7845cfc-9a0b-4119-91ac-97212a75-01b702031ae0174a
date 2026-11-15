@@ -32,6 +32,7 @@ import json
 import math
 import statistics
 from collections import Counter, defaultdict, deque
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Iterable, List, Sequence, Set, Tuple
 from urllib.parse import urlparse
@@ -41,8 +42,55 @@ PAYLOAD_RISK_RATIO = 0.85   # >=85% of 8 KB
 TOP_N = 25
 MAX_DEPTH_FOR_SCAN = 12
 
+LINK_STATUS_COMPLETE = "complete"
+LINK_STATUS_TRUNCATED = "truncated"
+LINK_STATUS_MISSING = "missing"
+
 
 # ---------- helpers ----------------------------------------------------------
+
+def link_status_for(entry: dict) -> Tuple[str, bool]:
+    """Return (status, inferred) for one summary URL entry.
+
+    Newer probes write ``linksStatus`` (complete / truncated / missing).
+    Summaries produced before that field existed are inferred from
+    headerPresent / decodedOk so old reports keep working unchanged.
+    """
+    raw = entry.get("linksStatus")
+    if raw in (LINK_STATUS_COMPLETE, LINK_STATUS_TRUNCATED, LINK_STATUS_MISSING):
+        return raw, False
+    if entry.get("headerPresent", 0) > 0 and entry.get("decodedOk", 0) > 0:
+        return LINK_STATUS_COMPLETE, True
+    return LINK_STATUS_MISSING, True
+
+
+def link_status_reason_for(entry: dict, status: str) -> str:
+    reason = entry.get("linksStatusReason")
+    if reason:
+        return str(reason)
+    if status == LINK_STATUS_TRUNCATED:
+        return "truncated"
+    if status == LINK_STATUS_MISSING:
+        return "missing_header"
+    return ""
+
+
+def omitted_links_for(entry: dict) -> int:
+    """Links the origin skipped because the header was truncated."""
+    status, _ = link_status_for(entry)
+    if status != LINK_STATUS_TRUNCATED:
+        return 0
+    original = entry.get("linksOriginal")
+    emitted = entry.get("maxDecodedLinks")
+    if emitted is None:
+        emitted = entry.get("linksCount")
+    if original is None or emitted is None:
+        return 0
+    try:
+        return max(0, int(original) - int(emitted))
+    except (TypeError, ValueError):
+        return 0
+
 
 def normalize_path(url_or_path: str) -> str:
     """Reduce both absolute URLs and relative links to a canonical /path."""
@@ -111,6 +159,7 @@ def build_graph(urls: List[dict]) -> Tuple[
 
     for entry in urls:
         path = normalize_path(entry["url"])
+        status, inferred = link_status_for(entry)
         nodes[path] = {
             "path": path,
             "url": entry["url"],
@@ -121,6 +170,12 @@ def build_graph(urls: List[dict]) -> Tuple[
             "maxHeaderBytes": entry.get("maxHeaderBytes", 0),
             "avgElapsedMs": entry.get("avgElapsedMs", 0.0),
             "statuses": entry.get("statuses", {}),
+            "linksStatus": status,
+            "linksStatusInferred": inferred,
+            "linksStatusReason": link_status_reason_for(entry, status),
+            "linksOriginal": entry.get("linksOriginal"),
+            "linksCount": entry.get("linksCount"),
+            "omittedLinks": omitted_links_for(entry),
         }
         for link in entry.get("links", []) or []:
             target = normalize_path(link)
@@ -256,6 +311,25 @@ def render_markdown(report: dict) -> str:
         f"({pct(health['headerPresent'], health['pagesCrawled'])})")
     add(f"- Header decoded ok: **{fmt_int(health['decodedOk'])}** "
         f"({pct(health['decodedOk'], health['pagesCrawled'])})")
+    statuses = health.get("linksStatusCounts", {})
+    add("")
+    add("### Link-data completeness")
+    add("")
+    add("| Status | Pages | Meaning |")
+    add("|--------|------:|---------|")
+    add(f"| complete | {fmt_int(statuses.get(LINK_STATUS_COMPLETE, 0))} | "
+        f"Full link list received. Safe for dead-end / orphan / depth conclusions. |")
+    add(f"| truncated | {fmt_int(statuses.get(LINK_STATUS_TRUNCATED, 0))} | "
+        f"Payload clipped by the origin. Emitted links are kept in the graph, "
+        f"but edges may be missing. |")
+    add(f"| missing | {fmt_int(statuses.get(LINK_STATUS_MISSING, 0))} | "
+        f"Header absent or could not be decoded. Outbound links unknown. |")
+    sources = health.get("linksStatusSources", {})
+    if sources.get("inferredFromLegacySummary"):
+        add("")
+        add(f"_Note: {fmt_int(sources['inferredFromLegacySummary'])} pages came from a "
+            f"summary without explicit status fields; their status was inferred from "
+            f"header presence / decode counts._")
     add(f"- Average TTFB-ish (avg elapsed ms across crawl): "
         f"**{health['avgElapsedMs']:.1f} ms**")
     add("")
@@ -296,6 +370,19 @@ def render_markdown(report: dict) -> str:
     add("Orphans are reachable only via the sitemap. Google may rarely recrawl them "
         "and they accrue no internal PageRank. Add inbound links from cluster hubs.")
     add("")
+    risk = report["orphans"].get("incompleteDataRisk", {})
+    if risk and risk.get("incompletePages", 0) > 0:
+        add(f"> **Data-completeness caveat:** {fmt_int(risk.get('incompletePages', 0))} "
+            f"pages have incomplete outbound data this run. "
+            f"{fmt_int(risk.get('orphansThatAreThemselvesIncomplete', 0))} of the "
+            f"orphans above are themselves incomplete. A truncated or missing page "
+            f"may hold the only inbound link to a page counted as an orphan, so the "
+            f"orphan count is an upper bound until the re-crawl list is resolved.")
+        if risk.get("examplesIncomplete"):
+            add("")
+            add("Orphans whose own link data is incomplete (inbound count unreliable): "
+                + ", ".join(f"`{p}`" for p in risk["examplesIncomplete"][:10]))
+        add("")
     if report["orphans"]["examples"]:
         add("Sample orphans (first 25):")
         add("")
@@ -311,9 +398,11 @@ def render_markdown(report: dict) -> str:
     add("Dead ends absorb link equity but don't pass it on. Add a 'related pages' "
         "block that links back to the cluster index and 3-5 sibling pages.")
     add("")
-    add(f"_Note: {fmt_int(report['crawlIncomplete']['count'])} pages had a missing or "
-        f"undecoded `X-Internal-Links` header on this run and were excluded from "
-        f"the dead-end list. Re-crawl them to be sure._")
+    inc = report["crawlIncomplete"]
+    add(f"_Note: {fmt_int(inc['count'])} pages had incomplete link data this run "
+        f"({fmt_int(inc['truncatedCount'])} truncated, {fmt_int(inc['missingCount'])} "
+        f"missing/undecodable) and were excluded from the dead-end list. "
+        f"Dead-end and depth figures below only use **complete** outbound data._")
     add("")
     if report["deadEnds"]["examples"]:
         add("Sample dead ends (first 25):")
@@ -323,13 +412,24 @@ def render_markdown(report: dict) -> str:
     add("")
     add("### 5b. Crawl-incomplete (re-crawl these)")
     add("")
-    add(f"Total: **{fmt_int(report['crawlIncomplete']['count'])}**. "
-        f"Outbound link list is unknown for these pages.")
+    add(f"Total: **{fmt_int(inc['count'])}** — "
+        f"**{fmt_int(inc['truncatedCount'])}** truncated (partial links kept in the "
+        f"graph) and **{fmt_int(inc['missingCount'])}** missing / decode-failed "
+        f"(no usable links).")
+    if inc.get("truncatedLinksOmitted"):
+        add("")
+        add(f"Truncated headers omitted roughly **{fmt_int(inc['truncatedLinksOmitted'])}** "
+            f"links before they reached this report. "
+            f"{fmt_int(inc.get('deadEndsMaskedByIncompleteData', 0))} incomplete pages "
+            f"would otherwise have appeared as dead ends.")
+    if inc.get("reasons"):
+        add("")
+        add("Reasons: " + ", ".join(f"`{r}` × {fmt_int(n)}" for r, n in inc["reasons"].items()))
     add("")
-    if report["crawlIncomplete"]["examples"]:
+    if inc["examples"]:
         add("Sample crawl-incomplete (first 25):")
         add("")
-        for ex in report["crawlIncomplete"]["examples"][:25]:
+        for ex in inc["examples"][:25]:
             add(f"- `{ex}`")
     add("")
 
@@ -345,6 +445,17 @@ def render_markdown(report: dict) -> str:
     add(f"- Unreachable from `/`: **{fmt_int(report['clickDepth']['unreachable'])}**")
     add(f"- Pages at depth >= 4: **{fmt_int(report['clickDepth']['deepCount'])}** "
         f"(SEO-risky — push these into hub navigation)")
+    depth_risk = report["clickDepth"].get("incompleteDataRisk", {})
+    if depth_risk and depth_risk.get("incompletePages", 0) > 0:
+        add(f"- **Data-completeness caveat:** depths are lower bounds where the only "
+            f"shortest path runs through an incomplete page. "
+            f"{fmt_int(depth_risk.get('atRiskCount', 0))} nodes are at risk of being "
+            f"misjudged (incomplete themselves or at depth >= 4); "
+            f"{fmt_int(depth_risk.get('incompletePagesUnreachable', 0))} incomplete "
+            f"pages are currently unreachable from `/`.")
+        if depth_risk.get("examplesAtRisk"):
+            add("- At-risk nodes (first 10): "
+                + ", ".join(f"`{p}`" for p in depth_risk["examplesAtRisk"][:10]))
     add("")
 
     add("## 7. Link-equity distribution")
@@ -446,19 +557,42 @@ def main() -> None:
         for p, d in hubs_sorted[:TOP_N]
     ]
 
-    # Distinguish "crawl-incomplete" pages (header missing, can't trust their
-    # outbound links) from real structural dead-ends.
-    crawl_incomplete = sorted(
-        p for p, n in nodes.items()
-        if n["headerPresent"] == 0 or n["decodedOk"] == 0
+    # Pages whose outbound link list is not provably complete. Truncated pages
+    # still contribute the links they did emit, but must not be treated as
+    # authoritative for dead-end / depth conclusions.
+    truncated_paths = sorted(
+        p for p, n in nodes.items() if n["linksStatus"] == LINK_STATUS_TRUNCATED
     )
-    crawl_incomplete_set = set(crawl_incomplete)
+    missing_paths = sorted(
+        p for p, n in nodes.items() if n["linksStatus"] == LINK_STATUS_MISSING
+    )
+    incomplete_reasons = Counter(
+        n["linksStatusReason"] for n in nodes.values()
+        if n["linksStatus"] != LINK_STATUS_COMPLETE
+    )
+    truncated_set = set(truncated_paths)
+    missing_set = set(missing_paths)
+    incomplete_set = truncated_set | missing_set
+    crawl_incomplete = sorted(incomplete_set)
+    inferred_status_pages = sorted(
+        p for p, n in nodes.items() if n["linksStatusInferred"]
+    )
+    omitted_link_total = sum(n["omittedLinks"] for n in nodes.values())
+    # Incomplete pages that look like dead ends only because their link data is
+    # partial. This is the overlap the report must call out explicitly.
+    dead_end_masked = sorted(
+        p for p in incomplete_set if out_deg[p] == 0
+    )
 
     orphan_paths = [p for p in nodes if in_deg[p] == 0 and p != "/"]
     dead_end_paths = [
         p for p in nodes
-        if out_deg[p] == 0 and p not in crawl_incomplete_set
+        if out_deg[p] == 0 and p not in incomplete_set
     ]
+    # Orphan judgements are at risk whenever any page could have held an
+    # omitted inbound link. Pages that are themselves incomplete are the
+    # clearest false-orphan candidates.
+    orphan_incomplete_pages = sorted(p for p in orphan_paths if p in incomplete_set)
 
     print("[4/6] Computing click depth from / ...", flush=True)
     depth_map = click_depth(out_edges, known, root="/")
@@ -470,6 +604,13 @@ def main() -> None:
         depth_dist[min(d, MAX_DEPTH_FOR_SCAN)] += 1
     deep_count = sum(c for d, c in depth_dist.items() if d >= 4)
     unreachable = sum(1 for p in nodes if p not in depth_map)
+    # Depth is a lower bound for any path that can only be reached through an
+    # incomplete page: that page may have emitted the missing shortcut.
+    depth_at_risk = sorted(
+        p for p in nodes
+        if p in incomplete_set or depth_map.get(p, 0) >= 4
+    )
+    depth_incomplete_unreachable = sorted(p for p in incomplete_set if p not in depth_map)
 
     print("[5/6] Computing equity, payload, clusters, anomalies ...", flush=True)
     in_values = list(in_deg.values())
@@ -506,7 +647,7 @@ def main() -> None:
         "meta": {
             "baseUrl": base_url,
             "inputFile": str(in_path),
-            "generatedAt": __import__("datetime").datetime.utcnow().isoformat() + "Z",
+            "generatedAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
             "totalNodes": len(nodes),
             "totalEdges": total_edges,
         },
@@ -518,6 +659,17 @@ def main() -> None:
             "headerPresent": sum(1 for n in nodes.values() if n["headerPresent"] > 0),
             "decodedOk": sum(1 for n in nodes.values() if n["decodedOk"] > 0),
             "avgElapsedMs": round(avg_elapsed, 2),
+            "linksStatusCounts": {
+                LINK_STATUS_COMPLETE: sum(
+                    1 for n in nodes.values() if n["linksStatus"] == LINK_STATUS_COMPLETE
+                ),
+                LINK_STATUS_TRUNCATED: len(truncated_paths),
+                LINK_STATUS_MISSING: len(missing_paths),
+            },
+            "linksStatusSources": {
+                "explicit": len(nodes) - len(inferred_status_pages),
+                "inferredFromLegacySummary": len(inferred_status_pages),
+            },
         },
         "headerPayload": {
             "maxBytes": max(payload_bytes) if payload_bytes else 0,
@@ -530,24 +682,55 @@ def main() -> None:
         "orphans": {
             "count": len(orphan_paths),
             "examples": orphan_paths[: args.top_orphans],
+            "incompleteDataRisk": {
+                "note": (
+                    "Orphan status is inferred from the links this crawl saw. Any page "
+                    "whose X-Internal-Links header was truncated or missing may have "
+                    "held an inbound link that this dataset never observed."
+                ),
+                "incompletePages": len(incomplete_set),
+                "orphansThatAreThemselvesIncomplete": len(orphan_incomplete_pages),
+                "examplesIncomplete": orphan_incomplete_pages[:100],
+            },
         },
         "deadEnds": {
             "count": len(dead_end_paths),
             "examples": dead_end_paths[: args.top_dead_ends],
+            "excludedIncomplete": len(incomplete_set),
         },
         "crawlIncomplete": {
             "count": len(crawl_incomplete),
+            "truncatedCount": len(truncated_paths),
+            "missingCount": len(missing_paths),
+            "truncatedLinksOmitted": omitted_link_total,
+            "deadEndsMaskedByIncompleteData": len(dead_end_masked),
             "note": (
-                "Pages where the X-Internal-Links header was missing / not decoded. "
-                "Their outbound links are unknown, so they were excluded from the "
-                "dead-end list. Re-crawl these to refine results."
+                "Pages whose outbound link data is not provably complete. "
+                "'truncated' pages emitted a partial link list (kept in the graph, "
+                "but edges may be missing); 'missing' pages emitted no decodable "
+                "list (decode failure or absent header). Neither is treated as a "
+                "dead end. Re-crawl these to refine results."
             ),
+            "reasons": dict(sorted(incomplete_reasons.items())),
+            "truncated": truncated_paths[: args.top_dead_ends or 200],
+            "missing": missing_paths[: args.top_dead_ends or 200],
             "examples": crawl_incomplete[:200],
         },
         "clickDepth": {
             "distribution": dict(sorted(depth_dist.items())),
             "deepCount": deep_count,
             "unreachable": unreachable,
+            "incompleteDataRisk": {
+                "note": (
+                    "Depths are lower bounds where the shortest path may run through "
+                    "an incomplete page. Pages listed here are incomplete themselves or "
+                    "sit at depth >= 4 and could be re-parented once data is complete."
+                ),
+                "incompletePages": len(incomplete_set),
+                "incompletePagesUnreachable": len(depth_incomplete_unreachable),
+                "atRiskCount": len(depth_at_risk),
+                "examplesAtRisk": depth_at_risk[:100],
+            },
         },
         "linkEquity": {
             "totalEdges": total_edges,
@@ -566,9 +749,12 @@ def main() -> None:
     json_path = out_dir / "seo-insights.json"
     md_path = out_dir / "seo-insights.md"
     recrawl_path = out_dir / "recrawl-list.txt"
-    json_path.write_text(json.dumps(report, indent=2))
-    md_path.write_text(render_markdown(report))
-    recrawl_path.write_text("\n".join(crawl_incomplete) + ("\n" if crawl_incomplete else ""))
+    json_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    md_path.write_text(render_markdown(report), encoding="utf-8")
+    recrawl_path.write_text(
+        "\n".join(crawl_incomplete) + ("\n" if crawl_incomplete else ""),
+        encoding="utf-8",
+    )
 
     # console summary -------------------------------------------------------
     print()
@@ -581,7 +767,8 @@ def main() -> None:
     print(f"  dead ends (no out)  : {fmt_int(len(dead_end_paths))}")
     print(f"  unreachable from /  : {fmt_int(unreachable)}")
     print(f"  pages depth >= 4    : {fmt_int(deep_count)}")
-    print(f"  crawl-incomplete    : {fmt_int(len(crawl_incomplete))} (header missing)")
+    print(f"  crawl-incomplete    : {fmt_int(len(crawl_incomplete))} "
+          f"(truncated {fmt_int(len(truncated_paths))}, missing {fmt_int(len(missing_paths))})")
     print(f"  reciprocal pairs    : {fmt_int(recip)}")
     print(f"  Gini (inbound)      : {report['linkEquity']['giniInDegree']:.3f}")
     print(f"  payload max         : {fmt_int(report['headerPayload']['maxBytes'])} B "

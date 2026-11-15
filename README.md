@@ -128,7 +128,17 @@ You get:
 
 - `seo-insights.md` (human-readable: hubs, orphans, dead-ends, click depth, clusters, equity Gini, payload risk, anomalies)
 - `seo-insights.json` (machine-readable)
-- `recrawl-list.txt` (URLs whose header was missing this run — re-crawl these to clean the dataset)
+- `recrawl-list.txt` (URLs whose link data was incomplete this run — either the header was truncated or it was missing/undecodable. Re-crawl these to clean the dataset)
+
+Each URL's crawl data is classified into one of three states, written to both `seo-header-report.csv` and `seo-header-summary.json` (`linksStatus`, plus aggregate `linksStatusCounts`):
+
+| Status | Meaning | Used for graph / dead ends? |
+|--------|---------|------------------------------|
+| `complete` | Full link list received | Yes — authoritative |
+| `truncated` | Origin clipped the payload (`X-Internal-Links-Truncated: 1`, `-Original` > `-Count`) | Emitted links kept in the graph, but never treated as zero-outbound |
+| `missing` | Header absent or undecodable | No outbound data; excluded from dead ends |
+
+Verify the classification end to end with `python3 scripts/test_link_status.py` (spins up a local fake origin with complete / truncated / missing / bad-base64 responses — no network needed).
 
 ## Production warning — read this before shipping it
 

@@ -24,9 +24,20 @@ from urllib.parse import urljoin, urlparse
 
 
 HEADER_NAME = "x-internal-links"
+TRUNCATED_HEADER_NAME = "x-internal-links-truncated"
+ORIGINAL_HEADER_NAME = "x-internal-links-original"
+COUNT_HEADER_NAME = "x-internal-links-count"
+BYTES_HEADER_NAME = "x-internal-links-bytes"
 DEFAULT_BASE_URL = "https://data.stateglobe.com"
 DEFAULT_USER_AGENT = "StateGlobeHeaderSEOProbe/0.1 (+https://data.stateglobe.com)"
 MAX_HEADER_READ_BYTES = 128 * 1024
+
+# Per-URL link-data status. "truncated" pages still have a decodable (partial)
+# link list; "missing" means the header was absent or could not be decoded.
+LINKS_STATUS_COMPLETE = "complete"
+LINKS_STATUS_TRUNCATED = "truncated"
+LINKS_STATUS_MISSING = "missing"
+LINKS_STATUSES = (LINKS_STATUS_COMPLETE, LINKS_STATUS_TRUNCATED, LINKS_STATUS_MISSING)
 
 
 @dataclass(slots=True)
@@ -40,6 +51,14 @@ class FetchResult:
     decoded: Any | None = None
     decoded_error: str | None = None
     attempts: int = 1
+    links_status: str = LINKS_STATUS_MISSING
+    links_status_reason: str | None = "unknown"
+    links_truncated: bool = False
+    truncated_reason: str | None = None
+    links_original: int | None = None
+    links_count: int | None = None
+    links_bytes: int | None = None
+    links_decoded_count: int | None = None
 
 
 @dataclass(slots=True)
@@ -54,12 +73,44 @@ class UrlStats:
     max_header_bytes: int = 0
     links: set[str] = field(default_factory=set)
     total_elapsed_ms: float = 0.0
+    links_status_hits: Counter[str] = field(default_factory=Counter)
+    missing_reasons: Counter[str] = field(default_factory=Counter)
+    truncated_reasons: Counter[str] = field(default_factory=Counter)
+    truncated_responses: int = 0
+    links_original: int | None = None
+    links_count: int | None = None
+    links_bytes: int | None = None
+    max_decoded_links: int | None = None
 
     @property
     def avg_elapsed_ms(self) -> float:
         if self.hits == 0:
             return 0.0
         return self.total_elapsed_ms / self.hits
+
+    @property
+    def links_status(self) -> str:
+        """Aggregate status across all observations of this URL.
+
+        A URL seen truncated at least once is reported as truncated even if a
+        later response was complete, because the retained graph may still be
+        missing edges. A URL with at least one complete/truncated payload but
+        no truncation is complete; otherwise its link data is unusable.
+        """
+        if self.links_status_hits.get(LINKS_STATUS_TRUNCATED):
+            return LINKS_STATUS_TRUNCATED
+        if self.links_status_hits.get(LINKS_STATUS_COMPLETE):
+            return LINKS_STATUS_COMPLETE
+        return LINKS_STATUS_MISSING
+
+    @property
+    def links_status_reason(self) -> str | None:
+        status = self.links_status
+        if status == LINKS_STATUS_COMPLETE:
+            return None
+        if status == LINKS_STATUS_TRUNCATED:
+            return most_common_key(self.truncated_reasons, "header_truncated")
+        return most_common_key(self.missing_reasons, "unknown")
 
 
 class ProbeState:
@@ -78,6 +129,11 @@ class ProbeState:
         self.errors: Counter[str] = Counter()
         self.decode_errors: Counter[str] = Counter()
         self.payload_shapes: Counter[str] = Counter()
+        self.links_statuses: Counter[str] = Counter()
+        self.truncated_responses = 0
+        self.missing_responses = 0
+        self.observed_missing_links = 0
+        self.observed_original_links = 0
 
     async def next_path(self) -> str | None:
         async with self.condition:
@@ -117,6 +173,32 @@ class ProbeState:
                 stats.header_present += 1
                 stats.max_header_bytes = max(stats.max_header_bytes, header_bytes)
 
+            status = result.links_status
+            stats.links_status_hits[status] += 1
+            self.links_statuses[status] += 1
+
+            if status == LINKS_STATUS_TRUNCATED:
+                stats.truncated_responses += 1
+                self.truncated_responses += 1
+                if result.truncated_reason:
+                    stats.truncated_reasons[result.truncated_reason] += 1
+            elif status == LINKS_STATUS_MISSING:
+                self.missing_responses += 1
+                if result.links_status_reason:
+                    stats.missing_reasons[result.links_status_reason] += 1
+
+            if result.links_original is not None:
+                stats.links_original = max(stats.links_original or 0, result.links_original)
+                self.observed_original_links = max(self.observed_original_links, result.links_original)
+            if result.links_count is not None:
+                stats.links_count = max(stats.links_count or 0, result.links_count)
+            if result.links_bytes is not None:
+                stats.links_bytes = max(stats.links_bytes or 0, result.links_bytes)
+            if result.links_decoded_count is not None:
+                stats.max_decoded_links = max(stats.max_decoded_links or 0, result.links_decoded_count)
+                if result.links_original is not None:
+                    self.observed_missing_links += max(0, result.links_original - result.links_decoded_count)
+
             if result.decoded is not None:
                 stats.decoded_ok += 1
                 shape, raw_links = extract_links(result.decoded)
@@ -152,6 +234,9 @@ class ProbeState:
                 "errors": dict(self.errors),
                 "decode_errors": dict(self.decode_errors),
                 "payload_shapes": dict(self.payload_shapes),
+                "links_statuses": dict(self.links_statuses),
+                "urls_truncated": sum(1 for s in self.stats.values() if s.links_status == LINKS_STATUS_TRUNCATED),
+                "urls_missing": sum(1 for s in self.stats.values() if s.links_status == LINKS_STATUS_MISSING),
                 "done": self.in_flight == 0 and not self.queue,
             }
 
@@ -228,6 +313,8 @@ async def worker(
             elif result.error is None and result.status is not None:
                 result.decoded_error = "missing_header"
 
+            classify_links_status(result)
+
             should_retry = (
                 attempt < max_attempts
                 and (
@@ -262,7 +349,10 @@ async def progress_reporter(state: ProbeState, started_at: float, interval: floa
             f"crawl_unique={snapshot['unique_queued_for_crawl']} "
             f"rps={rps:.2f} "
             f"statuses={snapshot['statuses']} "
-            f"decode_errors={snapshot['decode_errors']}",
+            f"decode_errors={snapshot['decode_errors']} "
+            f"links_status={snapshot['links_statuses']} "
+            f"truncated_urls={snapshot['urls_truncated']} "
+            f"missing_urls={snapshot['urls_missing']}",
             flush=True,
         )
 
@@ -491,6 +581,87 @@ def parse_header_block(raw_headers: bytes) -> tuple[int | None, dict[str, str]]:
     return status, headers
 
 
+def parse_int_header(value: str | None) -> int | None:
+    if value is None:
+        return None
+    try:
+        parsed = int(value.strip())
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed >= 0 else None
+
+
+def classify_links_status(result: FetchResult) -> None:
+    """Classify a single response's link payload as complete / truncated / missing.
+
+    The companion headers emitted by src/headers.ts are authoritative:
+      X-Internal-Links-Truncated: 1   -> payload was clipped
+      X-Internal-Links-Original: N   -> pre-truncation link count
+      X-Internal-Links-Count: N      -> emitted link count
+      X-Internal-Links-Bytes: N      -> encoded payload byte length
+    Older deployments omit the truncated flag, so we also infer truncation from
+    count < original or from a decoded list shorter than the advertised count.
+    """
+    headers = result.headers
+    result.links_truncated = False
+    result.truncated_reason = None
+    result.links_original = parse_int_header(headers.get(ORIGINAL_HEADER_NAME))
+    result.links_count = parse_int_header(headers.get(COUNT_HEADER_NAME))
+    result.links_bytes = parse_int_header(headers.get(BYTES_HEADER_NAME))
+    result.links_decoded_count = None
+
+    if result.decoded is None:
+        result.links_status = LINKS_STATUS_MISSING
+        if result.decoded_error and result.decoded_error != "missing_header":
+            result.links_status_reason = f"decode_error:{result.decoded_error}"
+        elif result.error:
+            result.links_status_reason = f"network_error:{result.error}"
+        elif result.status is None:
+            result.links_status_reason = "no_response"
+        elif result.links_count is not None or result.links_original is not None:
+            # Payload truncated to empty and the main header was omitted.
+            result.links_status_reason = "header_omitted_after_truncation"
+        else:
+            result.links_status_reason = "missing_header"
+        return
+
+    _, raw_links = extract_links(result.decoded)
+    if isinstance(raw_links, list):
+        result.links_decoded_count = len(raw_links)
+
+    truncated_flag = (headers.get(TRUNCATED_HEADER_NAME) or "").strip().lower()
+    if truncated_flag in {"1", "true", "yes"}:
+        reason = "truncated_flag"
+    elif (
+        result.links_original is not None
+        and result.links_count is not None
+        and result.links_count < result.links_original
+    ):
+        reason = "count_lt_original"
+    elif (
+        result.links_count is not None
+        and result.links_decoded_count is not None
+        and result.links_decoded_count < result.links_count
+    ):
+        reason = "decoded_lt_count"
+    else:
+        reason = None
+
+    if reason is not None:
+        result.links_status = LINKS_STATUS_TRUNCATED
+        result.links_truncated = True
+        result.truncated_reason = reason
+    else:
+        result.links_status = LINKS_STATUS_COMPLETE
+        result.links_status_reason = None
+
+
+def most_common_key(counter: Counter[str], default: str) -> str:
+    if not counter:
+        return default
+    return counter.most_common(1)[0][0]
+
+
 def decode_header(value: str) -> tuple[Any | None, str | None]:
     try:
         padded = value + ("=" * ((4 - len(value) % 4) % 4))
@@ -572,6 +743,12 @@ def write_reports(state: ProbeState, elapsed_s: float, out_dir: Path) -> None:
             "header_present",
             "decoded_ok",
             "decoded_failed",
+            "links_status",
+            "links_status_reason",
+            "links_truncated_responses",
+            "links_original",
+            "links_count",
+            "links_bytes",
             "max_header_bytes",
             "avg_elapsed_ms",
             "unique_links",
@@ -587,12 +764,21 @@ def write_reports(state: ProbeState, elapsed_s: float, out_dir: Path) -> None:
                 stats.header_present,
                 stats.decoded_ok,
                 stats.decoded_failed,
+                stats.links_status,
+                stats.links_status_reason or "",
+                stats.truncated_responses,
+                "" if stats.links_original is None else stats.links_original,
+                "" if stats.links_count is None else stats.links_count,
+                "" if stats.links_bytes is None else stats.links_bytes,
                 stats.max_header_bytes,
                 round(stats.avg_elapsed_ms, 2),
                 len(stats.links),
                 " ".join(sorted(stats.links)),
                 json.dumps(dict(stats.errors), sort_keys=True),
             ])
+
+    url_summaries = [url_summary(stats) for stats in rows]
+    status_counts = Counter(entry["linksStatus"] for entry in url_summaries)
 
     summary = {
         "baseUrl": state.base_url,
@@ -614,27 +800,45 @@ def write_reports(state: ProbeState, elapsed_s: float, out_dir: Path) -> None:
         "networkErrors": dict(state.errors),
         "decodeErrors": dict(state.decode_errors),
         "payloadShapes": dict(state.payload_shapes),
-        "urls": [
-            {
-                "url": stats.url,
-                "hits": stats.hits,
-                "statuses": dict(stats.statuses),
-                "headerPresent": stats.header_present,
-                "decodedOk": stats.decoded_ok,
-                "decodedFailed": stats.decoded_failed,
-                "maxHeaderBytes": stats.max_header_bytes,
-                "avgElapsedMs": round(stats.avg_elapsed_ms, 2),
-                "uniqueLinks": len(stats.links),
-                "links": sorted(stats.links),
-                "errors": dict(stats.errors),
-            }
-            for stats in rows
-        ],
+        "linksStatusCounts": {
+            LINKS_STATUS_COMPLETE: status_counts.get(LINKS_STATUS_COMPLETE, 0),
+            LINKS_STATUS_TRUNCATED: status_counts.get(LINKS_STATUS_TRUNCATED, 0),
+            LINKS_STATUS_MISSING: status_counts.get(LINKS_STATUS_MISSING, 0),
+        },
+        "linksStatusResponses": dict(state.links_statuses),
+        "truncatedResponses": state.truncated_responses,
+        "missingResponses": state.missing_responses,
+        "linksOmittedByTruncation": state.observed_missing_links,
+        "urls": url_summaries,
     }
 
     with (out_dir / "seo-header-summary.json").open("w", encoding="utf-8") as file:
         json.dump(summary, file, indent=2, sort_keys=True)
         file.write("\n")
+
+
+def url_summary(stats: UrlStats) -> dict[str, Any]:
+    return {
+        "url": stats.url,
+        "hits": stats.hits,
+        "statuses": dict(stats.statuses),
+        "headerPresent": stats.header_present,
+        "decodedOk": stats.decoded_ok,
+        "decodedFailed": stats.decoded_failed,
+        "linksStatus": stats.links_status,
+        "linksStatusReason": stats.links_status_reason,
+        "linksTruncated": stats.links_status == LINKS_STATUS_TRUNCATED,
+        "truncatedResponses": stats.truncated_responses,
+        "linksOriginal": stats.links_original,
+        "linksCount": stats.links_count,
+        "linksBytes": stats.links_bytes,
+        "maxDecodedLinks": stats.max_decoded_links,
+        "maxHeaderBytes": stats.max_header_bytes,
+        "avgElapsedMs": round(stats.avg_elapsed_ms, 2),
+        "uniqueLinks": len(stats.links),
+        "links": sorted(stats.links),
+        "errors": dict(stats.errors),
+    }
 
 
 def print_summary(state: ProbeState, elapsed_s: float, out_dir: Path) -> None:
@@ -654,6 +858,10 @@ def print_summary(state: ProbeState, elapsed_s: float, out_dir: Path) -> None:
     print(f"network_errors={dict(state.errors)}")
     print(f"decode_errors={dict(state.decode_errors)}")
     print(f"payload_shapes={dict(state.payload_shapes)}")
+    url_status_counts = Counter(s.links_status for s in state.stats.values())
+    print(f"links_status_urls={dict(url_status_counts)}")
+    print(f"links_status_responses={dict(state.links_statuses)}")
+    print(f"links_omitted_by_truncation={state.observed_missing_links}")
     print(f"csv={out_dir / 'seo-header-report.csv'}")
     print(f"json={out_dir / 'seo-header-summary.json'}")
 

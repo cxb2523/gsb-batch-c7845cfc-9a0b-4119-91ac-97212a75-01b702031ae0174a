@@ -27,7 +27,15 @@ import httpx
 
 
 HEADER_NAME = "x-internal-links"
+TRUNCATED_HEADER_NAME = "x-internal-links-truncated"
+ORIGINAL_HEADER_NAME = "x-internal-links-original"
+COUNT_HEADER_NAME = "x-internal-links-count"
+BYTES_HEADER_NAME = "x-internal-links-bytes"
 DEFAULT_USER_AGENT = "StateGlobeHeaderSEOProbe-Fast/0.1 (+https://data.stateglobe.com)"
+
+LINKS_STATUS_COMPLETE = "complete"
+LINKS_STATUS_TRUNCATED = "truncated"
+LINKS_STATUS_MISSING = "missing"
 
 
 @dataclass(slots=True)
@@ -41,6 +49,14 @@ class FetchResult:
     decoded_error: str | None = None
     error: str | None = None
     attempts: int = 1
+    links_status: str = LINKS_STATUS_MISSING
+    links_status_reason: str | None = "unknown"
+    links_truncated: bool = False
+    truncated_reason: str | None = None
+    links_original: int | None = None
+    links_count: int | None = None
+    links_bytes: int | None = None
+    links_decoded_count: int | None = None
 
 
 @dataclass(slots=True)
@@ -55,10 +71,41 @@ class UrlStats:
     max_header_bytes: int = 0
     links: set = field(default_factory=set)
     total_elapsed_ms: float = 0.0
+    links_status_hits: Counter = field(default_factory=Counter)
+    missing_reasons: Counter = field(default_factory=Counter)
+    truncated_reasons: Counter = field(default_factory=Counter)
+    truncated_responses: int = 0
+    links_original: int | None = None
+    links_count: int | None = None
+    links_bytes: int | None = None
+    max_decoded_links: int | None = None
 
     @property
     def avg_elapsed_ms(self) -> float:
         return (self.total_elapsed_ms / self.hits) if self.hits else 0.0
+
+    @property
+    def links_status(self) -> str:
+        if self.links_status_hits.get(LINKS_STATUS_TRUNCATED):
+            return LINKS_STATUS_TRUNCATED
+        if self.links_status_hits.get(LINKS_STATUS_COMPLETE):
+            return LINKS_STATUS_COMPLETE
+        return LINKS_STATUS_MISSING
+
+    @property
+    def links_status_reason(self) -> str | None:
+        status = self.links_status
+        if status == LINKS_STATUS_COMPLETE:
+            return None
+        if status == LINKS_STATUS_TRUNCATED:
+            return _most_common(self.truncated_reasons, "header_truncated")
+        return _most_common(self.missing_reasons, "unknown")
+
+
+def _most_common(counter: Counter, default: str) -> str:
+    if not counter:
+        return default
+    return counter.most_common(1)[0][0]
 
 
 class State:
@@ -78,6 +125,10 @@ class State:
         self.errors: Counter = Counter()
         self.decode_errors: Counter = Counter()
         self.payload_shapes: Counter = Counter()
+        self.links_statuses: Counter = Counter()
+        self.truncated_responses = 0
+        self.missing_responses = 0
+        self.observed_missing_links = 0
 
     def seed(self, paths: list[str]) -> None:
         for path in paths:
@@ -118,6 +169,31 @@ class State:
                 stats.max_header_bytes = max(stats.max_header_bytes, len(result.header.encode("ascii", errors="ignore")))
             if shape:
                 self.payload_shapes[shape] += 1
+
+            status = result.links_status
+            stats.links_status_hits[status] += 1
+            self.links_statuses[status] += 1
+            if status == LINKS_STATUS_TRUNCATED:
+                stats.truncated_responses += 1
+                self.truncated_responses += 1
+                if result.truncated_reason:
+                    stats.truncated_reasons[result.truncated_reason] += 1
+            elif status == LINKS_STATUS_MISSING:
+                self.missing_responses += 1
+                if result.links_status_reason:
+                    stats.missing_reasons[result.links_status_reason] += 1
+
+            if result.links_original is not None:
+                stats.links_original = max(stats.links_original or 0, result.links_original)
+            if result.links_count is not None:
+                stats.links_count = max(stats.links_count or 0, result.links_count)
+            if result.links_bytes is not None:
+                stats.links_bytes = max(stats.links_bytes or 0, result.links_bytes)
+            if result.links_decoded_count is not None:
+                stats.max_decoded_links = max(stats.max_decoded_links or 0, result.links_decoded_count)
+                if result.links_original is not None:
+                    self.observed_missing_links += max(0, result.links_original - result.links_decoded_count)
+
             if result.decoded is not None:
                 stats.decoded_ok += 1
             if result.decoded_error:
@@ -125,6 +201,7 @@ class State:
                 self.decode_errors[result.decoded_error] += 1
 
             for link in links:
+                stats.links.add(link)
                 if link not in self.discovery_seen:
                     self.discovery_seen.add(link)
                 if link not in self.crawl_seen and self.scheduled + len(self.queue) < self.max_requests:
@@ -286,11 +363,13 @@ async def fetch_once(
     status: int | None = None
     header_value: str | None = None
     error: str | None = None
+    response_headers: dict[str, str] = {}
 
     try:
         response = await client.get(target)
         status = response.status_code
         header_value = response.headers.get(HEADER_NAME)
+        response_headers = {key.lower(): value for key, value in response.headers.items()}
     except Exception as exc:  # noqa: BLE001
         error = exc.__class__.__name__
 
@@ -306,20 +385,88 @@ async def fetch_once(
     shape, raw_links = extract_links(decoded)
     links = normalize_links(base_url, raw_links)
 
-    return (
-        FetchResult(
-            path=urlparse(target).path or "/",
-            url=target,
-            status=status,
-            elapsed_ms=elapsed_ms,
-            header=header_value,
-            decoded=decoded,
-            decoded_error=decoded_error,
-            error=error,
-        ),
-        links,
-        shape if decoded is not None else None,
+    result = FetchResult(
+        path=urlparse(target).path or "/",
+        url=target,
+        status=status,
+        elapsed_ms=elapsed_ms,
+        header=header_value,
+        decoded=decoded,
+        decoded_error=decoded_error,
+        error=error,
     )
+    classify_links_status(result, response_headers)
+
+    return result, links, shape if decoded is not None else None
+
+
+def classify_links_status(result: FetchResult, headers: dict[str, str]) -> None:
+    """Classify a response's link payload as complete / truncated / missing.
+
+    Mirrors seo_header_probe.py: the X-Internal-Links-Truncated / -Original /
+    -Count companion headers are authoritative, with inference fallbacks for
+    older deployments that omit the flag.
+    """
+    result.links_truncated = False
+    result.truncated_reason = None
+    result.links_original = _parse_int(headers.get(ORIGINAL_HEADER_NAME))
+    result.links_count = _parse_int(headers.get(COUNT_HEADER_NAME))
+    result.links_bytes = _parse_int(headers.get(BYTES_HEADER_NAME))
+    result.links_decoded_count = None
+
+    if result.decoded is None:
+        result.links_status = LINKS_STATUS_MISSING
+        if result.decoded_error and result.decoded_error != "missing_header":
+            result.links_status_reason = f"decode_error:{result.decoded_error}"
+        elif result.error:
+            result.links_status_reason = f"network_error:{result.error}"
+        elif result.status is None:
+            result.links_status_reason = "no_response"
+        elif result.links_count is not None or result.links_original is not None:
+            result.links_status_reason = "header_omitted_after_truncation"
+        else:
+            result.links_status_reason = "missing_header"
+        return
+
+    _, raw_links = extract_links(result.decoded)
+    if isinstance(raw_links, list):
+        result.links_decoded_count = len(raw_links)
+
+    truncated_flag = (headers.get(TRUNCATED_HEADER_NAME) or "").strip().lower()
+    if truncated_flag in {"1", "true", "yes"}:
+        reason = "truncated_flag"
+    elif (
+        result.links_original is not None
+        and result.links_count is not None
+        and result.links_count < result.links_original
+    ):
+        reason = "count_lt_original"
+    elif (
+        result.links_count is not None
+        and result.links_decoded_count is not None
+        and result.links_decoded_count < result.links_count
+    ):
+        reason = "decoded_lt_count"
+    else:
+        reason = None
+
+    if reason is not None:
+        result.links_status = LINKS_STATUS_TRUNCATED
+        result.links_truncated = True
+        result.truncated_reason = reason
+    else:
+        result.links_status = LINKS_STATUS_COMPLETE
+        result.links_status_reason = None
+
+
+def _parse_int(value: str | None) -> int | None:
+    if value is None:
+        return None
+    try:
+        parsed = int(value.strip())
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed >= 0 else None
 
 
 def decode_header(value: str) -> tuple[Any | None, str | None]:
@@ -412,6 +559,8 @@ def write_reports(state: State, elapsed_s: float, out_dir: Path) -> None:
         writer = csv.writer(file)
         writer.writerow([
             "url", "hits", "statuses", "header_present", "decoded_ok", "decoded_failed",
+            "links_status", "links_status_reason", "links_truncated_responses",
+            "links_original", "links_count", "links_bytes",
             "max_header_bytes", "avg_elapsed_ms", "unique_links", "links", "errors",
         ])
         for stats in rows:
@@ -419,12 +568,19 @@ def write_reports(state: State, elapsed_s: float, out_dir: Path) -> None:
                 stats.url, stats.hits,
                 json.dumps(dict(stats.statuses), sort_keys=True),
                 stats.header_present, stats.decoded_ok, stats.decoded_failed,
+                stats.links_status, stats.links_status_reason or "",
+                stats.truncated_responses,
+                "" if stats.links_original is None else stats.links_original,
+                "" if stats.links_count is None else stats.links_count,
+                "" if stats.links_bytes is None else stats.links_bytes,
                 stats.max_header_bytes, round(stats.avg_elapsed_ms, 2),
                 len(stats.links), " ".join(sorted(stats.links)),
                 json.dumps(dict(stats.errors), sort_keys=True),
             ])
 
     rps = (state.completed / elapsed_s) if elapsed_s > 0 else 0
+    url_entries = [_url_summary(stats) for stats in rows]
+    status_counts = Counter(entry["linksStatus"] for entry in url_entries)
     summary = {
         "baseUrl": state.base_url,
         "requestsScheduled": state.scheduled,
@@ -439,27 +595,45 @@ def write_reports(state: State, elapsed_s: float, out_dir: Path) -> None:
         "networkErrors": dict(state.errors),
         "decodeErrors": dict(state.decode_errors),
         "payloadShapes": dict(state.payload_shapes),
+        "linksStatusCounts": {
+            LINKS_STATUS_COMPLETE: status_counts.get(LINKS_STATUS_COMPLETE, 0),
+            LINKS_STATUS_TRUNCATED: status_counts.get(LINKS_STATUS_TRUNCATED, 0),
+            LINKS_STATUS_MISSING: status_counts.get(LINKS_STATUS_MISSING, 0),
+        },
+        "linksStatusResponses": dict(state.links_statuses),
+        "truncatedResponses": state.truncated_responses,
+        "missingResponses": state.missing_responses,
+        "linksOmittedByTruncation": state.observed_missing_links,
         "estimatedTimeFor65000PagesAtCurrentRps": format_duration(65000 / rps) if rps > 0 else None,
         "estimatedTimeFor66000PagesAtCurrentRps": format_duration(66000 / rps) if rps > 0 else None,
-        "urls": [
-            {
-                "url": stats.url, "hits": stats.hits,
-                "statuses": dict(stats.statuses),
-                "headerPresent": stats.header_present,
-                "decodedOk": stats.decoded_ok, "decodedFailed": stats.decoded_failed,
-                "maxHeaderBytes": stats.max_header_bytes,
-                "avgElapsedMs": round(stats.avg_elapsed_ms, 2),
-                "uniqueLinks": len(stats.links),
-                "links": sorted(stats.links),
-                "errors": dict(stats.errors),
-            }
-            for stats in rows
-        ],
+        "urls": url_entries,
     }
 
     with (out_dir / "seo-header-summary.json").open("w", encoding="utf-8") as file:
         json.dump(summary, file, indent=2, sort_keys=True)
         file.write("\n")
+
+
+def _url_summary(stats: UrlStats) -> dict:
+    return {
+        "url": stats.url, "hits": stats.hits,
+        "statuses": dict(stats.statuses),
+        "headerPresent": stats.header_present,
+        "decodedOk": stats.decoded_ok, "decodedFailed": stats.decoded_failed,
+        "linksStatus": stats.links_status,
+        "linksStatusReason": stats.links_status_reason,
+        "linksTruncated": stats.links_status == LINKS_STATUS_TRUNCATED,
+        "truncatedResponses": stats.truncated_responses,
+        "linksOriginal": stats.links_original,
+        "linksCount": stats.links_count,
+        "linksBytes": stats.links_bytes,
+        "maxDecodedLinks": stats.max_decoded_links,
+        "maxHeaderBytes": stats.max_header_bytes,
+        "avgElapsedMs": round(stats.avg_elapsed_ms, 2),
+        "uniqueLinks": len(stats.links),
+        "links": sorted(stats.links),
+        "errors": dict(stats.errors),
+    }
 
 
 def print_summary(state: State, elapsed_s: float, out_dir: Path) -> None:
@@ -478,6 +652,9 @@ def print_summary(state: State, elapsed_s: float, out_dir: Path) -> None:
     print(f"network_errors={dict(state.errors)}")
     print(f"decode_errors={dict(state.decode_errors)}")
     print(f"payload_shapes={dict(state.payload_shapes)}")
+    print(f"links_status_urls={dict(Counter(s.links_status for s in state.stats.values()))}")
+    print(f"links_status_responses={dict(state.links_statuses)}")
+    print(f"links_omitted_by_truncation={state.observed_missing_links}")
     print(f"csv={out_dir / 'seo-header-report.csv'}")
     print(f"json={out_dir / 'seo-header-summary.json'}")
 
