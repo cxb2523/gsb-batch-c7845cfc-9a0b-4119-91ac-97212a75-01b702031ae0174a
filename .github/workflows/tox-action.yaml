@@ -1,0 +1,36 @@
+name: ToxTest
+
+on:
+  pull_request:
+
+  workflow_dispatch:
+
+jobs:
+  run_tox:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest]
+        python_version: [3.8,3.9,3.10.x,3.11.x]
+        rbf_version: [5.0.1,6.0,6.0.1,6.1.1]
+
+    steps:
+      - uses: actions/checkout@v3
+      - name: Setup Python ${{ matrix.python_version }}
+        uses: actions/setup-python@v3
+        with:
+          python-version: ${{ matrix.python_version }}
+      - name: install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install tox tox-gh-actions poetry robotframework==${{ matrix.rbf_version }}
+
+      - name: test with tox
+        run: tox
+
+      - name: Test Reporter
+        uses: actions/upload-artifact@v1
+        with:
+          name: rf-tests-report-${{ matrix.os }}-${{ matrix.python_version }}-${{ matrix.rbf_version }}
+          path: ./TEST_GeventLibrary.xml
+
