@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="X-UA-Compatible" content="ie=edge">
+    <title>test</title>
+    <style>
+        #input-wrapper {
+            display: flex;
+            height: 400px;
+        }
+        #input {
+            flex: 1;
+            box-sizing: border-box;
+            min-height: 100%;
+            max-height: 100%;
+            outline: none;
+        }
+        #output-wrapper {
+            flex: 1;
+            border: 1px #999 solid;
+            overflow: auto;
+        }
+    </style>
+    <script src="/puppeteer-service-client.js"></script>
+</head>
+<body>
+    <div id="input-wrapper">
+        <textarea id="input"></textarea>
+        <div id="output-wrapper">
+            <pre id="output"></pre>
+        </div>
+    </div>
+    <div id="control">
+        <button id="send">send</button><input id="api" type="text">
+    </div>
+    <script type="module">
+        import ServerConf from '/server.config.js';
+
+        const $ = function (sel = '') {
+            return document.querySelectorAll(sel);
+        };
+        const $input = $('#input')[0];
+        const $output = $('#output')[0];
+        const $send = $('#send')[0];
+        const $api = $('#api')[0];
+        $input.value = `{
+    url: 'https://www.sogou.com/',
+    run: async page => {
+        echo('hey ' + page.url());
+        const title = await page.title();
+        return {
+            title: title
+        };
+    }
+}`;
+        const serverHost = `http://${ServerConf.host || '127.0.0.1'}:${ServerConf.port}`;
+        $api.value = `${serverHost}/${ServerConf.apiName}`;
+
+        $send.addEventListener('click', function () {
+            PSC($api.value, eval('(' + $input.value + ')'), {
+                socket: data => {
+                    console.log('socket', data);
+                }
+            })
+                .then(data => {
+                    $output.innerHTML = JSON.stringify(data, null, 4);
+                }).catch(err => {
+                    console.error('Request error: ', err.message);
+                });
+        });
+    </script>
+</body>
+</html>
