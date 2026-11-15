@@ -4,7 +4,11 @@
     "stop": "node ./scripts/stop.js",
     "restart": "node ./scripts/restart.js",
     "debug": "node --inspect ./scripts/start.js",
-    "test": "node ./test/batch.js"
+    "test": "node ./test/batch.js",
+    "test:pool": "node ./test/pool.test.js",
+    "test:pool:e2e": "node ./test/pool.integration.js",
+    "test:pool:service": "node ./test/pool.service.js",
+    "lint": "eslint ./src/scheduler.js ./src/puppeteer.js ./test/pool.test.js ./test/pool.integration.js ./test/pool.service.js"
   },
   "dependencies": {
     "@koa/cors": "^2.2.1",

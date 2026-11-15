@@ -142,6 +142,42 @@ npm test -- -u http://127.0.0.1:3000/run # api url
 npm test -- -n 10 # batch number
 ```
 
+### Page pool tests
+
+Every crawl request borrows a page from a pool (`src/scheduler.js`) and returns
+it when it is done. The pool is capped at `poolLimit` pages (100 by default);
+once it is full, further requests queue and are woken in submission order. A
+page is returned whether the crawl succeeds, the navigation fails or the runner
+script throws — a failed crawl still answers with `{}`.
+
+Three levels of tests cover that behaviour, from cheapest to most realistic:
+
+```bash
+npm run test:pool            # unit tests, fake browser, no Chromium needed
+npm run test:pool:e2e        # real headless Chromium + local page server
+npm run test:pool:service    # real service, real concurrent POST /run requests
+```
+
+* `test/pool.test.js` — drives the broker with a fake browser. It can make a
+  reset fail, a page crash, `newPage()` hang, or `close()` be called twice, and
+  asserts the FIFO wake-up order, that a page is never lent twice at once, and
+  that capacity never shrinks after a failure.
+* `test/pool.integration.js` — starts a local HTTP server whose responses can be
+  held, delayed or aborted, then runs `Ppt.run()` concurrently against it with
+  `poolLimit: 2`. It checks that queued crawls are served in order, that
+  failures return `{}` and leave the pool at full capacity, and that a page
+  that dies while lent is replaced.
+* `test/pool.service.js` — boots the real Koa service and fires concurrent
+  `POST /run` requests at it, i.e. the same path a client uses.
+
+To build a failure sample by hand: point a request at a URL whose connection is
+dropped (`/boom` in the tests), or pass a runner that throws. To build a
+concurrency sample: set `poolLimit` to a small number and issue more requests
+than that at once — the extra ones queue until a page comes back.
+
+`CHROME_EXE=/path/to/chrome` can be set for the two Chromium-based tests to use
+a specific browser binary instead of the one bundled with `puppeteer`.
+
 ## License
 
 [MIT](http://opensource.org/licenses/MIT)

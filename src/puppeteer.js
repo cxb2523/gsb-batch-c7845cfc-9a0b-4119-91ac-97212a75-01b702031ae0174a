@@ -16,20 +16,25 @@ let pageBroker;
 
 const open = async (options = {}) => {
     if (status === 1) return 0;
+    // `poolLimit` configures the page pool; everything else is forwarded to
+    // puppeteer.launch() as before.
+    const { poolLimit, ...launchOptions } = options;
     browser = await puppeteer.launch({
         ...launch,
-        ...options
+        ...launchOptions
     });
     status = 1;
     pageBroker = PageBroker(browser, {
         pooling: usePagePool,
-        limit: pagePoolSize
+        limit: (typeof poolLimit === 'number' && poolLimit > 0) ? poolLimit : pagePoolSize
     });
     return 0;
 };
 
 const close = () => {
-    return browser.close().then(_ => {
+    const target = browser;
+    if (!target) return Promise.resolve(0);
+    return target.close().then(_ => {
         console.log('Chromium and all of its pages have been closed.');
         browser = null;
         status = 0;
@@ -40,21 +45,26 @@ const close = () => {
 };
 
 const run = async (url, fn, injection = {}) => {
-    let page, pageId, result;
+    let handle;
+    let result;
     try {
-        const pageman = await pageBroker.open();
-        page = pageman.page;
-        pageId = pageman.id;
+        handle = await pageBroker.open();
+        const page = handle.page;
         await page.goto(url);
         result = await evaluate(`(${fn})(page)`, { page, echo: injection.echo });
     } catch (e) {
         console.error(e);
         result = {};
+    } finally {
+        // The page must go back to the pool whether the crawl succeeded, the
+        // navigation failed or the runner script threw. Never let a failed
+        // release escape to the caller either.
+        try {
+            if (handle) await pageBroker.close(handle);
+        } catch (e) {
+            console.error(e);
+        }
     }
-    pageBroker.close({
-        page,
-        id: pageId
-    });
     return result || {};
 };
 
