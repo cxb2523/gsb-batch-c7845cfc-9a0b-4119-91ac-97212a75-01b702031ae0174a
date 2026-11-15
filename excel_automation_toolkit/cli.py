@@ -13,7 +13,12 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     run = subparsers.add_parser("run", help="Clean input data and generate an Excel report.")
-    run.add_argument("--input", required=True, type=Path, help="CSV or Excel file to process.")
+    run.add_argument(
+        "--input",
+        required=True,
+        type=Path,
+        help="CSV/Excel file to process, or a directory of files to merge.",
+    )
     run.add_argument(
         "--output",
         default=Path("data/processed/automation_report.xlsx"),

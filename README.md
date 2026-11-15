@@ -154,6 +154,13 @@ You can also run the module directly:
 python -m excel_automation_toolkit run --input data/raw/sample_sales.csv
 ```
 
+`--input` also accepts a directory: every supported file (`.csv`/`.xlsx`/`.xlsm`/`.xls`)
+is loaded in filename order, each row is tagged with its source file name, and the
+merged data flows through the same cleaning and summary pipeline. A file that fails
+to load is skipped and recorded in the `Metadata` sheet (with `status`/`error` and
+per-file row counts); the run only fails when no supported file exists or all files
+fail. The same directory handling is available from `build_report(...)`.
+
 ---
 
 ## 🧪 Tests
