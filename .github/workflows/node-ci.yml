@@ -1,0 +1,34 @@
+name: Node.js CI
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+    branches:
+      - master
+
+jobs:
+  ci:
+    name: Run Test Suites
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Source Files
+        uses: actions/checkout@v7
+
+      - name: Use Node.js from .nvmrc
+        uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      # engine-strict lives here rather than in .npmrc: this runner is a
+      # runtime we control, whereas a repo-level .npmrc also applies to
+      # Dependabot's runner and hard-fails every update job with EBADENGINE.
+      - name: Install Dependencies
+        run: npm ci
+        env:
+          npm_config_engine_strict: true
+
+      - name: Run Tests
+        run: npm run test
