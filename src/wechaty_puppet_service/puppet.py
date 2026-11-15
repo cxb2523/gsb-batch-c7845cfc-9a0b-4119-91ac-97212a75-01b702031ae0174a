@@ -20,8 +20,11 @@ limitations under the License.
 """
 from __future__ import annotations
 
+import asyncio
 import json
-from typing import Callable, Optional, List
+import time
+from collections import OrderedDict
+from typing import Any, Callable, Optional, List
 from dataclasses import asdict
 import requests
 
@@ -34,6 +37,10 @@ from wechaty_grpc.wechaty.puppet import (
 )
 # pylint: disable=E0401
 from grpclib.client import Channel
+# pylint: disable=E0401
+from grpclib.const import Status as GrpcStatus
+# pylint: disable=E0401
+from grpclib.exceptions import GRPCError, StreamTerminatedError
 # pylint: disable=E0401
 from pyee import AsyncIOEventEmitter
 from wechaty_puppet.schemas.types import PayloadType
@@ -160,11 +167,24 @@ def _map_message_type(message_payload: MessagePayload) -> MessagePayload:
     return message_payload
 
 
-# pylint: disable=R0904
+# pylint: disable=R0904,R0902
 class PuppetService(Puppet):
     """
     grpc wechaty puppet implementation
     """
+
+    #: how many times the event stream is reconnected before giving up
+    EVENT_STREAM_MAX_RECONNECT_ATTEMPTS: int = 5
+    #: the delay before the first reconnection attempt (in seconds)
+    EVENT_STREAM_RECONNECT_BASE_DELAY: float = 0.2
+    #: the upper bound of the (exponentially growing) reconnection delay
+    EVENT_STREAM_RECONNECT_MAX_DELAY: float = 2.0
+    #: how long stop() waits for the listener task to unwind (in seconds)
+    EVENT_STREAM_STOP_TIMEOUT: float = 5.0
+    #: how many event fingerprints are remembered to suppress replayed events
+    EVENT_STREAM_DEDUPE_CACHE_SIZE: int = 512
+    #: a stream which stayed alive for this long resets the reconnect budget
+    EVENT_STREAM_STABLE_CONNECTION_SECONDS: float = 30.0
 
     def __init__(self, options: PuppetOptions, name: str = 'puppet_service'):
         """init PuppetService from options or environment
@@ -212,6 +232,19 @@ class PuppetService(Puppet):
         self._event_stream: AsyncIOEventEmitter = AsyncIOEventEmitter()
 
         self.login_user_id: Optional[str] = None
+
+        # state for the event-stream reconnection loop
+        self._stopping: bool = False
+        # created lazily, on the loop which actually runs the event stream
+        self._stop_event: Optional[asyncio.Event] = None
+        self._event_listen_task: Optional[asyncio.Task] = None
+        # bounded fingerprint cache of the events which have been dispatched
+        # already, used to suppress the events replayed when a stream is
+        # re-opened after a disconnection
+        self._recent_event_keys: 'OrderedDict[str, None]' = OrderedDict()
+        # True while a re-opened stream is still replaying the events of the
+        # interrupted stream (see `_remember_event`)
+        self._replaying_prefix: bool = False
 
     @property
     def puppet_stub(self) -> PuppetStub:
@@ -912,27 +945,95 @@ class PuppetService(Puppet):
 
         log.info('starting the puppet ...')
 
+        # reset the state of the event-stream reconnection loop
+        self._stopping = False
+        self._stop_event = asyncio.Event()
+        self._recent_event_keys.clear()
+        self._replaying_prefix = False
+
         try:
             await self.puppet_stub.stop()
         finally:
             await self.puppet_stub.start()
 
         log.info('puppet has started ...')
-        await self._listen_for_event()
+
+        # the event stream runs in its own task, so that stop() can interrupt
+        # it (including a pending reconnection delay) without cancelling the
+        # task which called start()
+        listen_task = asyncio.ensure_future(self._listen_for_event())
+        self._event_listen_task = listen_task
+        try:
+            # `shield` keeps the listener alive if the caller of start() is
+            # cancelled; stop() cancels the listener explicitly
+            await asyncio.shield(listen_task)
+        except asyncio.CancelledError:
+            if self._stopping:
+                # stop() cancelled the listener: this is a normal stop of the
+                # puppet, not a cancellation of start()
+                if not listen_task.done():
+                    listen_task.cancel()
+                try:
+                    await listen_task
+                except asyncio.CancelledError:
+                    pass
+                return None
+            if not listen_task.done():
+                listen_task.cancel()
+            raise
         return None
 
     async def stop(self) -> None:
         """
         stop the grpc channel connection
+
+        It also interrupts a pending reconnection wait / an in-flight event
+        stream, so that no new connection is established after calling it.
         """
         log.info('stop()')
+
+        # 1. ask the event-stream loop to stop as soon as possible
+        self._stopping = True
+        if self._stop_event is not None:
+            self._stop_event.set()
+
+        # 2. interrupt and wait for the event-stream loop (including a pending
+        #    reconnection delay) before releasing the channel
+        event_listen_task = self._event_listen_task
+        self._event_listen_task = None
+        if event_listen_task is not None \
+                and event_listen_task is not asyncio.current_task() \
+                and not event_listen_task.done():
+            event_listen_task.cancel()
+            done, _ = await asyncio.wait(
+                {event_listen_task},
+                timeout=self.EVENT_STREAM_STOP_TIMEOUT
+            )
+            if not done:
+                log.warning(
+                    'the event stream did not stop within %.1fs',
+                    self.EVENT_STREAM_STOP_TIMEOUT
+                )
+            elif not event_listen_task.cancelled():
+                # retrieve the outcome, so that a failure of the listener
+                # task is not reported as "never retrieved"
+                event_listen_task.exception()
+
+        # 3. release the listener and the grpc connection
         self._event_stream.remove_all_listeners()
         if self._puppet_stub is not None:
-            await self._puppet_stub.stop()
-            self._puppet_stub = None
+            try:
+                await self._puppet_stub.stop()
+            # pylint: disable=W0703
+            except Exception as exception:
+                log.warning('stop() failed to stop the puppet stub: %s', exception)
+            finally:
+                self._puppet_stub = None
         if self.channel:
-            self.channel.close()
-            self.channel = None
+            try:
+                self.channel.close()
+            finally:
+                self.channel = None
 
     async def logout(self) -> None:
         """
@@ -972,121 +1073,389 @@ class PuppetService(Puppet):
 
         await self.puppet_stub.ding(data=data)
 
-    # pylint: disable=R0912,R0915
+    @staticmethod
+    def _is_connection_error(exception: BaseException) -> bool:
+        """
+        Whether the exception is a transport-level (connection) failure, i.e.
+        the kind of failure a reconnection can plausibly recover from.
+
+        Errors reported by the service server for a business reason (invalid
+        token, unknown method ...) are not connection errors: reconnecting
+        would only reproduce them, so they must not enter the retry loop.
+        """
+        # grpclib raises StreamTerminatedError when the HTTP/2 stream is reset
+        # by the peer: server restart, network glitch ...
+        if isinstance(exception, StreamTerminatedError):
+            return True
+
+        # Only the gRPC status codes describing an interrupted/unavailable
+        # transport qualify. UNAUTHENTICATED, INVALID_ARGUMENT, UNIMPLEMENTED
+        # ... are permanent failures.
+        if isinstance(exception, GRPCError):
+            return exception.status in (
+                GrpcStatus.UNAVAILABLE,
+                GrpcStatus.DEADLINE_EXCEEDED,
+                GrpcStatus.CANCELLED,
+                GrpcStatus.ABORTED,
+                GrpcStatus.INTERNAL,
+                GrpcStatus.UNKNOWN,
+            )
+
+        # low-level connection failures from asyncio/h2: ConnectionResetError,
+        # ConnectionRefusedError, BrokenPipeError (all OSError subclasses),
+        # EOFError/IncompleteReadError, and timeouts. `asyncio.TimeoutError`
+        # is listed explicitly for Python < 3.11 where it is not an `OSError`.
+        return isinstance(exception, (OSError, EOFError, asyncio.TimeoutError))
+
+    def _remember_event(self, response: Any) -> bool:
+        """
+        Decide whether the event response should be dispatched to listeners.
+
+        When a stream is re-opened after an interruption, the service server
+        replays the events of the interrupted stream (or at least its last
+        events) as a prefix of the new one. To never dispatch the very same
+        event twice, the fingerprints (`type` + raw payload) of the events
+        already dispatched are remembered: while the re-opened stream is still
+        replaying that prefix, a known fingerprint is suppressed. The first
+        unknown event ends the replay phase, after which every event is
+        forwarded as usual - a payload repeated later in the session is a
+        distinct, legitimate event.
+
+        *heartbeat* and *dong* events are pure liveness signals without an
+        identity: the server re-emits them on purpose when a stream is
+        (re)opened, so they are always forwarded.
+        """
+        # `response.type` is a betterproto enum, which behaves like an int
+        event_type = int(response.type)
+        if event_type in (
+                int(EventType.EVENT_TYPE_HEARTBEAT),
+                int(EventType.EVENT_TYPE_DONG)):
+            return True
+
+        event_key = f'{event_type}:{response.payload}'
+        if self._replaying_prefix and event_key in self._recent_event_keys:
+            log.debug('suppress the replayed event <%s>', event_key)
+            return False
+
+        # the first unseen event means the replay prefix is over
+        self._replaying_prefix = False
+
+        self._recent_event_keys[event_key] = None
+        while len(self._recent_event_keys) > self.EVENT_STREAM_DEDUPE_CACHE_SIZE:
+            self._recent_event_keys.popitem(last=False)
+        return True
+
+    def _forget_events_of_type(self, event_type: EventType) -> None:
+        """
+        Drop the remembered fingerprints of one event type.
+
+        It is used when a `logout` is dispatched: the `login` event of the
+        previous session must not suppress the `login` of the next one.
+        """
+        prefix = f'{int(event_type)}:'
+        for event_key in [
+                key for key in self._recent_event_keys if key.startswith(prefix)
+        ]:
+            del self._recent_event_keys[event_key]
+
+    def _dispatch_event(self, response: Any) -> None:
+        """
+        Convert a grpc event response into a payload and emit it on the
+        existing event stream.
+
+        The payload fields and types are unchanged compared with the original
+        implementation: this method is only the extraction of the former body
+        of the `async for` loop in `_listen_for_event`.
+        """
+        # pylint: disable=R0912,R0915
+        if response is None:
+            return
+
+        payload_data: dict = json.loads(response.payload)
+        if response.type == int(EventType.EVENT_TYPE_SCAN):
+            log.debug('receive scan info <%s>', payload_data)
+            # create qr_code
+            payload = EventScanPayload(
+                status=ScanStatus(payload_data['status']),
+                qrcode=payload_data.get('qrcode', None),
+                data=payload_data.get('data', None)
+            )
+            self._event_stream.emit('scan', payload)
+
+        elif response.type == int(EventType.EVENT_TYPE_DONG):
+            log.debug('receive dong info <%s>', payload_data)
+            payload = EventDongPayload(**payload_data)
+            self._event_stream.emit('dong', payload)
+
+        elif response.type == int(EventType.EVENT_TYPE_MESSAGE):
+            # payload = get_message_payload_from_response(response)
+            log.debug('receive message info <%s>', payload_data)
+            event_message_payload = EventMessagePayload(
+                message_id=payload_data['messageId'])
+            self._event_stream.emit('message', event_message_payload)
+
+        elif response.type == int(EventType.EVENT_TYPE_HEARTBEAT):
+            log.debug('receive heartbeat info <%s>', payload_data)
+            # Huan(202005) FIXME:
+            #   https://github.com/wechaty/python-wechaty-puppet/issues/6
+            #   Workaround for unexpected server json payload key: timeout
+            # if 'timeout' in payload_data:
+            #     del payload_data['timeout']
+            payload_data = {'data': payload_data['data']}
+            payload = EventHeartbeatPayload(**payload_data)
+            self._event_stream.emit('heartbeat', payload)
+
+        elif response.type == int(EventType.EVENT_TYPE_ERROR):
+            log.info('receive error info <%s>', payload_data)
+            payload = EventErrorPayload(**payload_data)
+            self._event_stream.emit('error', payload)
+
+        elif response.type == int(EventType.EVENT_TYPE_FRIENDSHIP):
+            log.debug('receive friendship info <%s>', payload_data)
+            payload = EventFriendshipPayload(
+                friendship_id=payload_data.get('friendshipId')
+            )
+            self._event_stream.emit('friendship', payload)
+
+        elif response.type == int(EventType.EVENT_TYPE_ROOM_JOIN):
+            log.debug('receive room-join info <%s>', payload_data)
+            payload = EventRoomJoinPayload(
+                invited_ids=payload_data.get('inviteeIdList', []),
+                inviter_id=payload_data.get('inviterId'),
+                room_id=payload_data.get('roomId'),
+                timestamp=payload_data.get('timestamp')
+            )
+            self._event_stream.emit('room-join', payload)
+
+        elif response.type == int(EventType.EVENT_TYPE_ROOM_INVITE):
+            log.debug('receive room-invite info <%s>', payload_data)
+            payload = EventRoomInvitePayload(
+                room_invitation_id=payload_data.get(
+                    'roomInvitationId', None)
+            )
+            self._event_stream.emit('room-invite', payload)
+
+        elif response.type == int(EventType.EVENT_TYPE_ROOM_LEAVE):
+            log.debug('receive room-leave info <%s>', payload_data)
+            payload = EventRoomLeavePayload(
+                removed_ids=payload_data.get('removeeIdList', []),
+                remover_id=payload_data.get('removerId'),
+                room_id=payload_data.get('roomId'),
+                timestamp=payload_data.get('timestamp')
+            )
+            self._event_stream.emit('room-leave', payload)
+
+        elif response.type == int(EventType.EVENT_TYPE_ROOM_TOPIC):
+            log.debug('receive room-topic info <%s>', payload_data)
+            payload = EventRoomTopicPayload(
+                changer_id=payload_data.get('changerId'),
+                new_topic=payload_data.get('newTopic'),
+                old_topic=payload_data.get('oldTopic'),
+                room_id=payload_data.get('roomId'),
+                timestamp=payload_data.get('timestamp')
+            )
+            self._event_stream.emit('room-topic', payload)
+
+        elif response.type == int(EventType.EVENT_TYPE_READY):
+            log.debug('receive ready info <%s>', payload_data)
+            payload = EventReadyPayload(**payload_data)
+            self._event_stream.emit('ready', payload)
+
+        elif response.type == int(EventType.EVENT_TYPE_LOGIN):
+            log.debug('receive login info <%s>', payload_data)
+            event_login_payload = EventLoginPayload(
+                contact_id=payload_data['contactId'])
+            self.login_user_id = payload_data.get('contactId', None)
+            self._event_stream.emit('login', event_login_payload)
+
+        elif response.type == int(EventType.EVENT_TYPE_LOGOUT):
+            log.debug('receive logout info <%s>', payload_data)
+            payload = EventLogoutPayload(
+                contact_id=payload_data['contactId'],
+                data=payload_data.get('data', None)
+            )
+            self.login_user_id = None
+            # the next session logs in again with the very same payload:
+            # forget the remembered login so that it is not suppressed then
+            self._forget_events_of_type(EventType.EVENT_TYPE_LOGIN)
+            self._event_stream.emit('logout', payload)
+
+        elif response.type == int(EventType.EVENT_TYPE_UNSPECIFIED):
+            pass
+
+    def _get_stop_event(self) -> asyncio.Event:
+        """
+        Get (and lazily create) the event which interrupts a reconnection wait.
+
+        It is created lazily so that it is bound to the event loop which
+        actually runs the event stream.
+        """
+        if self._stop_event is None:
+            self._stop_event = asyncio.Event()
+        return self._stop_event
+
+    async def _wait_before_reconnect(self, attempt: int) -> bool:
+        """
+        Wait for the (exponentially growing) delay before a reconnection.
+
+        The wait is interrupted as soon as `stop()` is called, so that the
+        reconnection loop never keeps running after the puppet is stopped.
+
+        Returns `False` when the wait was interrupted by `stop()`, in which
+        case no new connection must be created.
+        """
+        delay = min(
+            self.EVENT_STREAM_RECONNECT_BASE_DELAY * (2 ** attempt),
+            self.EVENT_STREAM_RECONNECT_MAX_DELAY
+        )
+        log.info(
+            'the event stream will be reconnected in %.2fs (attempt %s/%s) ...',
+            delay, attempt + 1, self.EVENT_STREAM_MAX_RECONNECT_ATTEMPTS
+        )
+
+        stop_event = self._get_stop_event()
+        if self._stopping or stop_event.is_set():
+            return False
+
+        try:
+            # the wait is interrupted as soon as stop() sets the event
+            await asyncio.wait_for(stop_event.wait(), timeout=delay)
+        except asyncio.TimeoutError:
+            # the delay elapsed normally: a reconnection can be attempted
+            return not self._stopping
+        # woken up by stop(): no new connection must be created
+        return False
+
+    async def _consume_event_stream(self) -> bool:
+        """
+        Consume one event stream until it ends or fails.
+
+        Returns `True` when the stream ended (the server closed it), `False`
+        when it was interrupted by a connection error. A non-connection error
+        raised by the stream is re-raised so that the caller reports it.
+
+        An error raised while handling a *single* event (malformed payload, a
+        failing listener ...) is reported through the `error` event and does
+        not tear the stream down: the remaining events keep being consumed.
+        """
+        # a freshly opened stream may replay the events of the stream it
+        # replaces: suppress that replay prefix
+        self._replaying_prefix = True
+        try:
+            async for response in self.puppet_stub.event():
+                if response is None:
+                    continue
+                # suppress the event replayed when a stream is re-opened
+                if not self._remember_event(response):
+                    continue
+                try:
+                    self._dispatch_event(response)
+                # pylint: disable=W0703
+                except Exception as exception:
+                    log.exception('failed to handle the event %r', response)
+                    self._emit_error(
+                        'failed to handle an event: '
+                        f'{exception.__class__.__name__}: {exception}'
+                    )
+        except asyncio.CancelledError:  # pylint: disable=try-except-raise
+            # Python 3.7: CancelledError derives from Exception, so it must be
+            # excluded explicitly from the retry handling below
+            raise
+        except Exception as exception:  # pylint: disable=W0703
+            if not self._is_connection_error(exception):
+                raise
+            log.warning('the event stream was interrupted: %r', exception)
+            return False
+        return True
+
     async def _listen_for_event(self) -> None:
         """
-        listen event from service server with heartbeat
+        Listen for the service server events, reconnecting the stream when it
+        is interrupted.
+
+        Compared with a plain `async for`, the loop:
+
+        - re-opens the stream after a normal end or a connection error, with
+          a bounded number of attempts and a growing delay;
+        - gives up as soon as `stop()` is called, and never opens a new
+          connection afterwards;
+        - reports an exhausted reconnection budget, or a non-connection
+          error, through the existing `error` event instead of exiting
+          silently.
         """
-        # listen event from grpclib
         log.info('listening the event from the puppet ...')
 
-        async for response in self.puppet_stub.event():
-            if response is not None:
-                payload_data: dict = json.loads(response.payload)
-                if response.type == int(EventType.EVENT_TYPE_SCAN):
-                    log.debug('receive scan info <%s>', payload_data)
-                    # create qr_code
-                    payload = EventScanPayload(
-                        status=ScanStatus(payload_data['status']),
-                        qrcode=payload_data.get('qrcode', None),
-                        data=payload_data.get('data', None)
+        # pylint: disable=W0703
+        consecutive_failures = 0
+        try:
+            while not self._stopping:
+                started_at = time.monotonic()
+                try:
+                    ended_cleanly = await self._consume_event_stream()
+                except asyncio.CancelledError:  # pylint: disable=try-except-raise
+                    raise
+                except Exception as exception:
+                    # a business-level failure: reconnecting would only
+                    # reproduce it, so report it and stop listening
+                    log.error(
+                        'the event stream failed with a non-connection error: %r',
+                        exception
                     )
-                    self._event_stream.emit('scan', payload)
-
-                elif response.type == int(EventType.EVENT_TYPE_DONG):
-                    log.debug('receive dong info <%s>', payload_data)
-                    payload = EventDongPayload(**payload_data)
-                    self._event_stream.emit('dong', payload)
-
-                elif response.type == int(EventType.EVENT_TYPE_MESSAGE):
-                    # payload = get_message_payload_from_response(response)
-                    log.debug('receive message info <%s>', payload_data)
-                    event_message_payload = EventMessagePayload(
-                        message_id=payload_data['messageId'])
-                    self._event_stream.emit('message', event_message_payload)
-
-                elif response.type == int(EventType.EVENT_TYPE_HEARTBEAT):
-                    log.debug('receive heartbeat info <%s>', payload_data)
-                    # Huan(202005) FIXME:
-                    #   https://github.com/wechaty/python-wechaty-puppet/issues/6
-                    #   Workaround for unexpected server json payload key: timeout
-                    # if 'timeout' in payload_data:
-                    #     del payload_data['timeout']
-                    payload_data = {'data': payload_data['data']}
-                    payload = EventHeartbeatPayload(**payload_data)
-                    self._event_stream.emit('heartbeat', payload)
-
-                elif response.type == int(EventType.EVENT_TYPE_ERROR):
-                    log.info('receive error info <%s>', payload_data)
-                    payload = EventErrorPayload(**payload_data)
-                    self._event_stream.emit('error', payload)
-
-                elif response.type == int(EventType.EVENT_TYPE_FRIENDSHIP):
-                    log.debug('receive friendship info <%s>', payload_data)
-                    payload = EventFriendshipPayload(
-                        friendship_id=payload_data.get('friendshipId')
+                    self._emit_error(
+                        'event stream failed: '
+                        f'{exception.__class__.__name__}: {exception}'
                     )
-                    self._event_stream.emit('friendship', payload)
+                    return
 
-                elif response.type == int(EventType.EVENT_TYPE_ROOM_JOIN):
-                    log.debug('receive room-join info <%s>', payload_data)
-                    payload = EventRoomJoinPayload(
-                        invited_ids=payload_data.get('inviteeIdList', []),
-                        inviter_id=payload_data.get('inviterId'),
-                        room_id=payload_data.get('roomId'),
-                        timestamp=payload_data.get('timestamp')
+                if self._stopping:
+                    break
+
+                # a stream which lived long enough was healthy: its end does
+                # not belong to the same failure burst
+                if time.monotonic() - started_at >= \
+                        self.EVENT_STREAM_STABLE_CONNECTION_SECONDS:
+                    consecutive_failures = 0
+
+                if consecutive_failures >= self.EVENT_STREAM_MAX_RECONNECT_ATTEMPTS:
+                    reason = (
+                        'the event stream has ended'
+                        if ended_cleanly else
+                        'the event stream keeps being interrupted'
                     )
-                    self._event_stream.emit('room-join', payload)
-
-                elif response.type == int(EventType.EVENT_TYPE_ROOM_INVITE):
-                    log.debug('receive room-invite info <%s>', payload_data)
-                    payload = EventRoomInvitePayload(
-                        room_invitation_id=payload_data.get(
-                            'roomInvitationId', None)
+                    log.error(
+                        '%s, and the %s reconnection attempts are exhausted',
+                        reason, self.EVENT_STREAM_MAX_RECONNECT_ATTEMPTS
                     )
-                    self._event_stream.emit('room-invite', payload)
-
-                elif response.type == int(EventType.EVENT_TYPE_ROOM_LEAVE):
-                    log.debug('receive room-leave info <%s>', payload_data)
-                    payload = EventRoomLeavePayload(
-                        removed_ids=payload_data.get('removeeIdList', []),
-                        remover_id=payload_data.get('removerId'),
-                        room_id=payload_data.get('roomId'),
-                        timestamp=payload_data.get('timestamp')
+                    self._emit_error(
+                        f'{reason}, reconnection attempts exhausted '
+                        f'({self.EVENT_STREAM_MAX_RECONNECT_ATTEMPTS})'
                     )
-                    self._event_stream.emit('room-leave', payload)
+                    return
 
-                elif response.type == int(EventType.EVENT_TYPE_ROOM_TOPIC):
-                    log.debug('receive room-topic info <%s>', payload_data)
-                    payload = EventRoomTopicPayload(
-                        changer_id=payload_data.get('changerId'),
-                        new_topic=payload_data.get('newTopic'),
-                        old_topic=payload_data.get('oldTopic'),
-                        room_id=payload_data.get('roomId'),
-                        timestamp=payload_data.get('timestamp')
-                    )
-                    self._event_stream.emit('room-topic', payload)
+                # wait for the growing delay; stop() interrupts it immediately
+                if not await self._wait_before_reconnect(consecutive_failures):
+                    log.info('the event stream reconnection was interrupted by stop()')
+                    return
 
-                elif response.type == int(EventType.EVENT_TYPE_READY):
-                    log.debug('receive ready info <%s>', payload_data)
-                    payload = EventReadyPayload(**payload_data)
-                    self._event_stream.emit('ready', payload)
+                consecutive_failures += 1
+                log.info(
+                    'reconnecting the event stream (attempt %s/%s) ...',
+                    consecutive_failures,
+                    self.EVENT_STREAM_MAX_RECONNECT_ATTEMPTS
+                )
+        finally:
+            if self._event_listen_task is asyncio.current_task():
+                self._event_listen_task = None
 
-                elif response.type == int(EventType.EVENT_TYPE_LOGIN):
-                    log.debug('receive login info <%s>', payload_data)
-                    event_login_payload = EventLoginPayload(
-                        contact_id=payload_data['contactId'])
-                    self.login_user_id = payload_data.get('contactId', None)
-                    self._event_stream.emit('login', event_login_payload)
-
-                elif response.type == int(EventType.EVENT_TYPE_LOGOUT):
-                    log.debug('receive logout info <%s>', payload_data)
-                    payload = EventLogoutPayload(
-                        contact_id=payload_data['contactId'],
-                        data=payload_data.get('data', None)
-                    )
-                    self.login_user_id = None
-                    self._event_stream.emit('logout', payload)
-
-                elif response.type == int(EventType.EVENT_TYPE_UNSPECIFIED):
-                    pass
+    def _emit_error(self, message: str) -> None:
+        """
+        Report a fatal event-stream failure through the existing error event.
+        """
+        log.error('reporting the event stream failure: %s', message)
+        try:
+            self._event_stream.emit('error', EventErrorPayload(data=message))
+        # pylint: disable=W0703
+        except Exception as exception:
+            # pyee re-raises the error when no listener is attached to the
+            # `error` event: do not let that break the listening loop
+            log.warning('no listener consumed the event stream error: %s', exception)
