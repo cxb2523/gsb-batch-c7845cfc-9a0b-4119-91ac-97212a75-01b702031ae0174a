@@ -4,7 +4,9 @@ Sofascore service module
 
 from __future__ import annotations
 
-from ..exceptions import SourceBlocked
+import threading
+
+from ..exceptions import SourceBlocked, SourceError
 from ..logger import get_logger
 from ..utils import (
     BrowserSession,
@@ -79,6 +81,9 @@ class SofascoreService:
         self.headless = headless
         self.endpoints = SofascoreEndpoints()
         self._cache = TTLCache(ttl=_CACHE_TTL, maxsize=256)
+        # Serializes access to the shared browser: Playwright's sync API is
+        # not thread-safe, so only one thread may drive it at a time.
+        self._browser_lock = threading.Lock()
         self._browser = (
             BrowserSession(chrome_path, proxies, headless) if use_playwright else None
         )
@@ -97,24 +102,50 @@ class SofascoreService:
 
     def _get_json(self, url: str) -> dict:
         """Fetch JSON from a Sofascore endpoint, falling back to Playwright."""
+        data, _source = self._get_json_with_source(url)
+        return data
+
+    def _get_json_with_source(self, url: str) -> tuple[dict, str]:
+        """
+        Fetch JSON from a Sofascore endpoint and report how it was obtained.
+
+        Returns a ``(data, source)`` tuple where ``source`` is ``"curl_cffi"``
+        or ``"playwright"``. Cache hits report the source of the original
+        fetch. Browser fallbacks are serialized on ``self._browser_lock``
+        because the shared browser session is not thread-safe.
+
+        Raises:
+            SourceBlocked: If curl_cffi is blocked and the browser fallback
+                is disabled.
+            SourceError: If the browser fallback returns no data. The empty
+                result is never cached, so the next call retries the fetch.
+        """
         cached = self._cache.get(url)
         if cached is not None:
             return cached
         try:
             data = get_api_json(url, proxies=self.proxies)
+            source = "curl_cffi"
         except SourceBlocked:
             if not self.use_playwright:
                 raise
-            data = get_json_playwright(
-                url,
-                self.chrome_path,
-                self.proxies,
-                headless=self.headless,
-                session=self._browser,
-            )
+            with self._browser_lock:
+                data = get_json_playwright(
+                    url,
+                    self.chrome_path,
+                    self.proxies,
+                    headless=self.headless,
+                    session=self._browser,
+                )
+            source = "playwright"
+            if not data:
+                raise SourceError(
+                    f"Playwright fallback returned no data for {url}. "
+                    "The browser session may have failed the bot challenge."
+                )
         if data:
-            self._cache.set(url, data)
-        return data
+            self._cache.set(url, (data, source))
+        return data, source
 
     def get_event(self, event_id: int) -> Event:
         _logger.debug("get_event(event_id=%s)", event_id)
