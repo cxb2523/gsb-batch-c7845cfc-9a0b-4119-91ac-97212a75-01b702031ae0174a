@@ -20,6 +20,19 @@ This script helps you scrape product details from Amazon product pages. It extra
 - Fetches product details from a single Amazon product URL or a list of URLs in a file.
 - Writes extracted data to JSON files for easy storage and processing.
 - Optionally downloads product images along with details.
+- Settles every URL independently: an invalid domain, request error or page
+  without a product title only marks that URL as failed and the remaining URLs
+  keep processing.
+- Downloads images one by one with per-image fault tolerance: a broken image is
+  recorded with its reason while the other images still download, and already
+  written `product-info.json` files and images are always kept.
+- Never destructively reuses an output directory when the same product id
+  (ASIN) appears several times in one batch: the first occurrence uses
+  `<output-dir>/<ASIN>` and later occurrences get numbered directories
+  (`<ASIN>_2`, `<ASIN>_3`, ...).
+- Writes a `batch-summary.json` into the output directory after every run and
+  logs the success/failure counts, so the outcome of each URL can be read
+  directly instead of reconstructed from logs.
 
 ### Installation
 
@@ -121,6 +134,66 @@ Scrape details for two products from a file named "products.txt" and download im
    ```
 
 This will process both URLs in the file, scrape details, create separate output directories for each product, and download images.
+
+Blank lines and leading/trailing whitespace in the URL list are ignored, so an empty line is never treated as a URL.
+
+### Batch summary
+
+After each run a `batch-summary.json` is written to the output directory. It contains overall counts and one entry per input URL, in input order:
+
+```json
+{
+  "total_urls": 2,
+  "succeeded": 1,
+  "failed": 1,
+  "images_succeeded": 2,
+  "images_failed": 1,
+  "duplicate_product_ids": {
+    "B000DUP01": [
+      "https://www.amazon.com/dp/B000DUP01",
+      "https://www.amazon.in/dp/B000DUP01"
+    ]
+  },
+  "entries": [
+    {
+      "url": "https://www.amazon.com/dp/B000DUP01",
+      "status": "success",
+      "product_id": "B000DUP01",
+      "output_dir": "output/B000DUP01",
+      "error": null,
+      "images": {
+        "succeeded": 2,
+        "failed": 1,
+        "failures": [
+          {
+            "url": "https://m.media-amazon.com/images/broken.jpg",
+            "file_name": "image_2.jpg",
+            "reason": "500 Server Error"
+          }
+        ]
+      }
+    },
+    {
+      "url": "https://example.com/not-amazon",
+      "status": "failed",
+      "product_id": null,
+      "output_dir": null,
+      "error": "Invalid amazon product URL",
+      "images": { "succeeded": 0, "failed": 0, "failures": [] }
+    }
+  ]
+}
+```
+
+`duplicate_product_ids` lists every product id reached by more than one URL together with those URLs. A failed URL never removes entries for the other URLs from the summary.
+
+### Running the tests
+
+The test suite uses locally constructed HTML pages and stubbed network calls, so it never contacts real Amazon endpoints:
+
+```bash
+python -m pytest tests/
+```
 
 ### Disclaimer
 

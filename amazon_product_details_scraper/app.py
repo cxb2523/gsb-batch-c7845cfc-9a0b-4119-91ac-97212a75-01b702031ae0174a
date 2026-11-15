@@ -3,20 +3,17 @@ import logging
 import argparse
 
 from amazon_product_details_scraper.config import DEFAULT_LOG_LEVEL
-from amazon_product_details_scraper.core.utils import create_folder, read_file
-from amazon_product_details_scraper.core.scraper import (
-    download_product_images,
-    get_product_detail,
-    write_product_details,
-)
+from amazon_product_details_scraper.core.utils import read_file
+from amazon_product_details_scraper.core.batch import process_url_batch
 
 
 def main():
     """Main function for the script.
 
     This function parses command-line arguments, reads product URLs,
-    fetches product details for each URL, writes details to JSON files,
-    and optionally downloads product images.
+    processes each URL independently through the batch pipeline (which
+    writes per-product details, optional images and a batch summary), and
+    logs the resulting counts.
     """
 
     logging.basicConfig(level=DEFAULT_LOG_LEVEL)
@@ -60,11 +57,12 @@ def main():
 
     input_url = args.url
     url_list_path = args.url_list
-    output_dir = args.output_dir
+    output_dir = os.path.normpath(args.output_dir)
     download_image = args.download_image
 
     if input_url:
-        url_list = [input_url]
+        # Trim surrounding whitespace and ignore an effectively empty URL.
+        url_list = [input_url.strip()] if input_url.strip() else []
     else:
         try:
             url_list_path = os.path.normpath(url_list_path)
@@ -73,31 +71,7 @@ def main():
             logging.error(f"Error: URL list file not found: {url_list_path}")
             exit(1)
 
-    # Process each product URL
-    for url in url_list:
-        try:
-            product_details = get_product_detail(url)
-
-            if product_details:
-                logging.info(f"Fetched Data for url {url}")
-                # Log details with indentation for readability
-                # logging.info(json.dumps(product_details, indent=2))
-
-                output_dir = os.path.normpath(output_dir)
-                product_output_dir = os.path.join(output_dir, product_details["id"])
-                create_folder(product_output_dir, overwrite=True)
-
-                write_product_details(product_details, product_output_dir)
-
-                if download_image:
-                    image_urls = product_details.get(
-                        "image_urls", []
-                    )  # Handle potential absence of image_urls key
-                    download_product_images(image_urls, product_output_dir)
-            else:
-                logging.error(f"Failed to fetch product details for {url}")
-        except Exception as e:
-            logging.error(f"Failed to fetch product details for {url}: {e}")
+    process_url_batch(url_list, output_dir, download_image=download_image)
 
 
 if __name__ == "__main__":

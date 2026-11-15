@@ -1,4 +1,5 @@
 from amazon_product_details_scraper.config.config import (
+    BATCH_SUMMARY_FILENAME,
     DEFAULT_LOG_LEVEL,
     DEFAULT_OUTPUT_FILENAME,
     DEFAULT_OUTPUT_FOLDER,
@@ -7,8 +8,8 @@ from amazon_product_details_scraper.config.config import (
 
 
 __all__ = [
+    "BATCH_SUMMARY_FILENAME",
     "DEFAULT_LOG_LEVEL",
     "DEFAULT_OUTPUT_FILENAME",
-    "DEFAULT_OUTPUT_FOLDER",
     "VALID_DOMAIN_NAMES",
 ]

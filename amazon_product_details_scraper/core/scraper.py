@@ -13,31 +13,52 @@ from amazon_product_details_scraper.config import (
     DEFAULT_OUTPUT_FILENAME,
     VALID_DOMAIN_NAMES,
 )
-from amazon_product_details_scraper.core.utils import create_folder, download_image, extract_image_extension
+from amazon_product_details_scraper.core.utils import (
+    download_image,
+    ensure_folder,
+    extract_image_extension,
+)
+
+
+class ScraperError(Exception):
+    """Base class for all scraper-related errors."""
+
+
+class InvalidURLError(ScraperError):
+    """Raised when a URL is malformed or does not point to a supported Amazon domain."""
+
+
+class ProductTitleNotFoundError(ScraperError):
+    """Raised when the fetched page does not contain a product title."""
 
 
 def get_product_detail(url):
     """Extracts product data from an Amazon product page URL.
 
-    This function scrapes the product title, description, and image URLs from a given Amazon product page URL.
+    This function scrapes the product title, description, and image URLs
+    from a given Amazon product page URL.
 
     Args:
         url (str): The URL of the Amazon product page.
 
     Returns:
         dict: A dictionary containing the extracted data, including:
+            - id (str): The product ASIN (or a generated UUID as fallback).
             - title (str): The product title.
             - description (str): The product description.
             - image_urls (list): A list of image URLs for the product.
 
     Raises:
-        Exception: An exception may be raised if there's an issue fetching or parsing the product details.
+        InvalidURLError: If the URL is malformed or its domain is not a
+            supported Amazon domain.
+        requests.exceptions.RequestException: If the HTTP request fails.
+        ProductTitleNotFoundError: If the page contains no product title.
     """
     if not is_valid_url(url):
-        raise Exception("Invalid amazon product URL")
+        raise InvalidURLError("Invalid amazon product URL")
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" +
-        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/111.0.0.0 Safari/537.36"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+        + "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/111.0.0.0 Safari/537.36"
     }
 
     response = requests.get(url, headers=headers, timeout=10000)
@@ -50,6 +71,11 @@ def get_product_detail(url):
 
     title_element = soup.find("span", id="productTitle")
     title = title_element.text.strip() if title_element else None
+
+    if not title:
+        raise ProductTitleNotFoundError(
+            f"Product title not found on page for url {url}"
+        )
 
     description_element = soup.find("div", id="feature-bullets")
     description = description_element.text.strip() if description_element else None
@@ -75,11 +101,12 @@ def get_product_detail(url):
 def write_product_details(product_details, output_dir):
     """Writes product details to a JSON file.
 
-    This function takes a dictionary containing product details and writes them to a JSON file
-    in the specified output directory.
+    This function takes a dictionary containing product details and writes
+    them to a JSON file in the specified output directory.
 
     Args:
-        product_details (dict): A dictionary containing product data as returned by `get_product_detail`.
+        product_details (dict): A dictionary containing product data as
+            returned by `get_product_detail`.
         output_dir (str): The path to the output directory.
     """
 
@@ -89,27 +116,60 @@ def write_product_details(product_details, output_dir):
 
 
 def download_product_images(image_urls, output_dir):
-    """Downloads product images from the provided URLs.
+    """Downloads product images from the provided URLs, one image at a time.
 
-    This function downloads images from a list of URLs and saves them to a subdirectory named "images"
-    within the specified output directory.
+    Each image is handled independently: a failure downloading one image is
+    recorded and the remaining images are still attempted. Images already
+    written to disk are kept.
 
     Args:
         image_urls (list): A list of image URLs for the product.
-        output_dir (str): The path to the output directory.
+        output_dir (str): The path to the product output directory. Images
+            are saved in an "images" subdirectory inside it.
+
+    Returns:
+        dict: A dictionary with the keys:
+            - succeeded (int): Number of images downloaded successfully.
+            - failed (int): Number of images that failed to download.
+            - failures (list[dict]): One entry per failed image, each with
+              "url", "file_name" and "reason" keys.
     """
 
-    output_dir = os.path.join(output_dir, "images")
-    create_folder(output_dir)
+    images_dir = os.path.join(output_dir, "images")
+    ensure_folder(images_dir)
+
+    result = {"succeeded": 0, "failed": 0, "failures": []}
+
     for i, image_url in enumerate(image_urls, start=1):
         file_name = f"image_{i}.{extract_image_extension(image_url)}"
-        download_image(image_url, output_dir, file_name)
+        try:
+            download_image(image_url, images_dir, file_name)
+            result["succeeded"] += 1
+        except Exception as e:  # pylint: disable=broad-exception-caught
+            # A single broken image must not abort the remaining downloads.
+            logging.error(
+                "Failed to download image %s for product directory %s: %s",
+                image_url,
+                output_dir,
+                e,
+            )
+            result["failed"] += 1
+            result["failures"].append(
+                {
+                    "url": image_url,
+                    "file_name": file_name,
+                    "reason": str(e) or e.__class__.__name__,
+                }
+            )
+
+    return result
 
 
 def is_valid_url(url):
     """Validates the provided URL.
 
-    This function validates the URL and checks if the hostname is a valid domain name.
+    This function validates the URL and checks if the hostname is a valid
+    domain name.
 
     Args:
         url (str): The URL to validate.

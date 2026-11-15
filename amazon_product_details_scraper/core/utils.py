@@ -30,6 +30,31 @@ def create_folder(path: str, overwrite: bool = False) -> None:
     os.makedirs(path)
 
 
+def ensure_folder(path: str) -> None:
+    """Creates a folder at the specified path, keeping existing contents intact.
+
+    Unlike :func:`create_folder`, this never removes an existing directory,
+    so it is safe to reuse an output directory (e.g. when several URLs point
+    to the same product).
+
+    Args:
+        path: The path to the directory to create. Must be a string.
+
+    Raises:
+        TypeError: If the 'path' argument is not a string.
+        ValueError: If the 'path' argument is empty.
+        OSError: If there's an error creating the directory (e.g. permission issues).
+    """
+
+    if not isinstance(path, str):
+        raise TypeError("Path must be a string.")
+
+    if not path:
+        raise ValueError("Path cannot be empty.")
+
+    os.makedirs(path, exist_ok=True)
+
+
 def extract_image_extension(url: str) -> str:
     """Extracts the image file extension from a URL, handling query params and unknown extensions.
 
@@ -82,10 +107,17 @@ def download_image(
 
 
 def read_file(file_path: str) -> list[str]:
-    """Reads a text file and returns a list of its lines.
+    """Reads a text file and returns the non-empty URL lines it contains.
+
+    Leading and trailing whitespace is stripped from every line and blank
+    lines (including lines containing only whitespace) are skipped, so an
+    empty line is never treated as a URL.
 
     Args:
         file_path: The path to the text file to read.
+
+    Returns:
+        A list of trimmed, non-empty lines from the file.
 
     Raises:
         OSError: If there's an error opening the file.
@@ -97,4 +129,4 @@ def read_file(file_path: str) -> list[str]:
 
     with open(file_path, "r") as f:
         # Read lines from the file directly within the 'with' block
-        return f.readlines()
+        return [line.strip() for line in f if line.strip()]
