@@ -1,0 +1,23 @@
+# Social Data Pipeline - GPU Image
+# Used for: ml profile (transformer classifiers with ONNX Runtime)
+#
+# Uses NVIDIA PyTorch image for pre-built CUDA environment with numpy/scipy/transformers.
+# See: https://catalog.ngc.nvidia.com/orgs/nvidia/containers/pytorch/tags
+FROM nvcr.io/nvidia/pytorch:25.03-py3
+
+WORKDIR /app
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install packages from requirements file
+# numpy, scipy, transformers are already in the base image
+COPY requirements-gpu.txt .
+RUN pip install --no-cache-dir -r requirements-gpu.txt
+
+# Copy application code
+COPY social_data_pipeline/ ./social_data_pipeline/
+COPY config/ ./config/
+
+# Create directories
+RUN mkdir -p /data/dumps /data/extracted /data/parsed /data/output
+
+CMD ["python", "-m", "social_data_pipeline.orchestrators.ml"]

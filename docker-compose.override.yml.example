@@ -1,0 +1,15 @@
+# Docker Compose override file for user-specific settings.
+# Compose merges docker-compose.override.yml automatically with docker-compose.yml.
+#
+# Tablespace support: run `python setup.py` to auto-generate this file with the
+# correct volume mounts and tablespace assignments in config/postgres/user.yaml.
+#
+# Manual setup: copy this file to docker-compose.override.yml and edit.
+# Each volume maps a host directory (on a separate disk) to /data/tablespace/<name>.
+# The container path is used by CREATE TABLESPACE inside PostgreSQL.
+
+services:
+  postgres:
+    volumes:
+      # - /mnt/nvme/pg-tablespace:/data/tablespace/nvme
+      # - /mnt/hdd/pg-tablespace:/data/tablespace/hdd

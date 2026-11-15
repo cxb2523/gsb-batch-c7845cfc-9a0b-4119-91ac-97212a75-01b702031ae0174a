@@ -1,0 +1,32 @@
+# PostgreSQL database profile pipeline configuration
+# Host paths configured in .env
+
+database:
+  host: postgres             # Docker service name
+  port: 5432                 # Override with POSTGRES_PORT env var
+  name: datasets             # Override with DB_NAME env var
+  schema: null               # Set via platform config (db_schema) or user.yaml
+  user: postgres
+
+processing:
+  data_types: []             # Override in user.yaml or set via platform config
+  parallel_mode: false       # If true: extract all -> parse parallel -> ingest all
+  parallel_ingestion: true   # If true: ingest submissions and comments concurrently (requires parallel_mode = true)
+  parse_workers: 12          # Number of parallel workers for CSV parsing
+  check_duplicates: true     # Handle duplicate IDs during ingestion
+  create_indexes: true       # Create indexes after ingestion
+  parallel_index_workers: 8  # max_parallel_maintenance_workers per index build
+  cleanup_temp: false        # Delete intermediate files after ingestion
+  watch_interval: 0          # check for new files every N minutes (0 = run once)
+  prefer_lingua: true        # If true: ingest lingua-enriched files only (from lingua output dir). If false: ingest the original parsed files. Strict either/or — no automatic fallback; if true and no lingua output exists, ingest finds zero files.
+
+# Index configuration (only used if create_indexes is true)
+# Override in user.yaml with platform-specific index fields
+indexes: {}  # Example for Reddit: {submissions: [dataset, author, subreddit], comments: [dataset, author, link_id]}
+
+# Tablespace configuration (for multi-disk setups)
+# tablespaces: map of name -> host path (e.g. {nvme1: /mnt/nvme1/pg-tablespace})
+# table_tablespaces: map of data_type -> tablespace name (e.g. {submissions: nvme1, comments: nvme2})
+# Use "pgdata" to keep a table in the default PostgreSQL data directory.
+tablespaces: {}
+table_tablespaces: {}

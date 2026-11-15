@@ -1,0 +1,215 @@
+# Reddit platform configuration
+# Everything about Reddit data: schema, patterns, fields, types, indexes
+
+# Database schema for this platform
+db_schema: reddit
+
+# Data types available for this platform
+data_types:
+  - submissions
+  - comments
+
+# File patterns for detecting input files
+# Each data type has patterns for different file formats
+# 'dump' matches any compressed format; 'zst' is kept for backward compatibility
+file_patterns:
+  submissions:
+    dump: '^RS_(\d{4}-\d{2})\..+$'        # Any compressed dump file
+    zst: '^RS_(\d{4}-\d{2})\.zst$'       # Legacy: .zst only
+    json: '^RS_(\d{4}-\d{2})$'           # Decompressed JSON files
+    csv: '^RS_(\d{4}-\d{2})\.csv$'       # Parsed CSV files
+    parquet: '^RS_(\d{4}-\d{2})\.parquet$'  # Parsed Parquet files
+    prefix: 'RS_'                         # File prefix for this data type
+  comments:
+    dump: '^RC_(\d{4}-\d{2})\..+$'
+    zst: '^RC_(\d{4}-\d{2})\.zst$'
+    json: '^RC_(\d{4}-\d{2})$'
+    csv: '^RC_(\d{4}-\d{2})\.csv$'
+    parquet: '^RC_(\d{4}-\d{2})\.parquet$'  # Parsed Parquet files
+    prefix: 'RC_'
+
+# Default index fields for PostgreSQL tables
+indexes:
+  submissions:
+    - dataset
+    - author
+    - subreddit
+    - domain
+  comments:
+    - dataset
+    - author
+    - subreddit
+    - link_id
+
+# MongoDB settings (used by mongo_ingest profile)
+mongo_collection_strategy: per_file   # per_file: one collection per input file (monthly dumps)
+                                      # per_data_type: all files of a type merge into one collection
+mongo_db_name_template: "{platform}_{data_type}"  # Supports {platform} and {data_type} placeholders
+
+# MongoDB index fields (used by mongo_ingest profile)
+mongo_indexes:
+  submissions:
+    - id
+    - author
+    - subreddit
+    - domain
+  comments:
+    - id
+    - author
+    - subreddit
+    - link_id
+
+# StarRocks tablets per table. Applied uniformly to submissions and comments.
+# Override at 'sdp source add'. May also be a dict {data_type: N} for per-type
+# overrides, but the default is a single int applied to all tables in the source.
+sr_buckets: 256
+
+# Mandatory fields: always prepended to column list (before fields listed per data_type).
+# Must match MANDATORY_FIELDS in platforms/reddit/parser.py (plus 'dataset' which the
+# parser prepends explicitly) — listing the same field here AND in `fields` below
+# produces a duplicate column in the CSV header that breaks PG COPY.
+#
+# `retrieved_utc` is intentionally NOT mandatory: it goes in `fields:` per
+# data_type instead, so the DB column stays nullable. Pre-2010 Arctic Shift
+# dumps lack retrieval timestamps; forcing NOT NULL there causes COPY to
+# reject every row.
+mandatory_fields:
+  - dataset
+  - id
+
+# Primary key column (used for deduplication, ON CONFLICT, and table constraints)
+primary_key: id
+
+# Column used for ordering during upsert conflict resolution (keeps highest value).
+# Set to null or omit if not applicable.
+upsert_order_field: retrieved_utc
+
+# Column used for tracking which files have been ingested (for state recovery from database).
+# Must contain a value derived from the source filename (e.g., "2023-01" from RS_2023-01).
+state_field: dataset
+
+# Field type definitions
+# Used for data type enforcement during CSV parsing and database schema generation
+field_types:
+  dataset: ['char', 7]
+  id: ['varchar', 7]
+  retrieved_utc: integer
+  created_utc: integer
+  author_created_utc: integer
+  score: integer
+  stickied: boolean
+  distinguished: text
+  gilded: integer
+  is_submitter: boolean
+  controversiality: integer
+  total_awards_received: integer
+  link_id: ['varchar', 10]
+  parent_id: ['varchar', 10]
+  author: text
+  author_flair_text: text
+  subreddit: text
+  body: text
+  comment_karma: integer
+  link_karma: integer
+  profile_over_18: boolean
+  active: boolean
+  is_deleted: boolean
+  removal_type: text
+  num_comments: integer
+  upvote_ratio: float
+  num_crossposts: integer
+  subreddit_subscribers: integer
+  locked: boolean
+  quarantine: boolean
+  over_18: boolean
+  link_flair_text: text
+  domain: text
+  url: text
+  title: text
+  selftext: text
+  id10: bigint
+  # Lingua language detection fields (added by lingua profile)
+  lang: ['varchar', 2]         # ISO 639-1 language code (e.g., 'en', 'de', 'es')
+  lang_prob: float             # Confidence probability for primary language (0.0-1.0)
+  lang2: ['varchar', 2]        # ISO 639-1 code for second most likely language
+  lang2_prob: float            # Confidence probability for secondary language
+  lang_chars: integer          # Character count of cleaned text used for language detection
+
+# Fields to extract per data type
+# Each field name maps directly to a JSON key in the dump files
+# Nested fields use dot notation: e.g., "_meta.removal_type" accesses data["_meta"]["removal_type"]
+# The order here determines column order in CSV and database tables
+# Field types are defined in field_types above
+#
+# Mandatory fields (always included, not listed here):
+#   - dataset: derived from filename (e.g., RS_2023-01 -> "2023-01")
+#   - id: Reddit's unique identifier for the post/comment
+#
+# Auto-populated fields (parser fills these from source data with fallbacks,
+# but they are listed in `fields:` below so the DB column stays nullable):
+#   - retrieved_utc: retrieved_utc → retrieved_on → _meta.retrieved_2nd_on;
+#     null on pre-2010 Arctic Shift dumps that lack any retrieval timestamp
+#
+# Special fields with automatic handling:
+#   - is_deleted: computed via waterfall algorithm (see platforms/reddit/parser.py)
+#   - removal_type: canonical values (deleted, moderator, reddit, automod_filtered, etc.)
+#   - id10: Reddit ID converted from base 36 to base 10 (bigint)
+#   - subreddit, author: automatically lowercased
+fields:
+  submissions:
+  # core
+    - retrieved_utc
+    - created_utc
+    - id10
+    - score
+    - upvote_ratio
+    - num_comments
+    - num_crossposts
+    - total_awards_received
+  # subreddit
+    - subreddit
+    - subreddit_subscribers
+  # status and flags
+    - stickied
+    - gilded
+    - distinguished
+    - locked
+    - quarantine
+    - over_18
+    - is_deleted
+    - removal_type
+  # author
+    - author
+    - author_flair_text
+    - author_created_utc
+  # content
+    - link_flair_text
+    - domain
+    - url
+    - title
+    - selftext
+
+  comments:
+  # core
+    - retrieved_utc
+    - created_utc
+    - link_id
+    - parent_id
+    - score
+    - controversiality
+    - total_awards_received
+  # subreddit
+    - subreddit
+  # status and flags
+    - stickied
+    - gilded
+    - distinguished
+    - is_deleted
+    - removal_type
+  # author
+    - author
+    - author_flair_text
+    - author_created_utc
+    - is_submitter
+  # content
+    - body

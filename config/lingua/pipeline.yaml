@@ -1,0 +1,12 @@
+# Lingua profile pipeline configuration
+# Host paths configured in .env
+
+processing:
+  data_types:                # Which data types to process
+    - submissions
+    - comments
+  watch_interval: 0          # Check for new files every N minutes (0 = run once)
+
+# CPU classifiers to run (from cpu_classifiers.yaml)
+cpu_classifiers:
+  - lingua

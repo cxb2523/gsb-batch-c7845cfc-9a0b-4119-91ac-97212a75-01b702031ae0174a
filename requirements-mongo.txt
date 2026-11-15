@@ -1,0 +1,6 @@
+# Social Data Pipeline - MongoDB Dependencies
+# Used by: mongo_ingest profile
+
+pyyaml>=6.0
+pymongo>=4.6.0
+pyarrow>=15.0.0

@@ -1,0 +1,11 @@
+# Pre-baked override for the Codespace demo. Mounts the jobs scheduler's
+# result_root into postgres and starrocks (the two backends that write
+# export files server-side). Mongo writes from the runner, so no mount.
+
+services:
+  postgres:
+    volumes:
+      - ./data/jobs-results:/jobs_export:rw
+  starrocks:
+    volumes:
+      - ./data/jobs-results:/jobs_export:rw

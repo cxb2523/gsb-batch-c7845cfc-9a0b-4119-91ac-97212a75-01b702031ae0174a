@@ -1,0 +1,25 @@
+# StarRocks ML ingestion overrides (optional).
+#
+# What runs and the per-classifier `suffix` come from the source's ml/lingua
+# profile config (config/sources/<name>/ml.yaml + config/ml/gpu_classifiers.yaml,
+# and config/sources/<name>/lingua.yaml + config/lingua/cpu_classifiers.yaml).
+# Source ml.yaml is authoritative — if a classifier isn't listed there,
+# it isn't ingested.
+#
+# This file (and config/sources/<name>/sr_ml.yaml) is for ingestion-only
+# tweaks that don't belong in the ml profile:
+#
+#   classifiers:
+#     toxic_roberta:
+#       enabled: false              # ran in ml profile, but skip ingestion
+#     go_emotions:
+#       source_dir: custom_outputs  # non-default output directory
+#       column_overrides:           # force specific column types
+#         confidence: DOUBLE
+#     lingua:
+#       source_dir_ingest: lingua_ingest   # used when prefer_lingua=false
+#
+# Empty classifiers block = no overrides; everything is derived from the ml
+# and lingua profiles.
+
+classifiers: {}

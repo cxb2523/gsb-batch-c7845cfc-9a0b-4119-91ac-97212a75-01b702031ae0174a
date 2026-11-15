@@ -1,0 +1,13 @@
+# Social Data Pipeline - CPU Dependencies
+# Used by: parse, lingua, postgres_ingest, postgres_ml profiles
+
+# Core
+pyyaml>=6.0
+polars>=1.0.0
+pyarrow>=15.0.0
+
+# Language detection (lingua profile)
+lingua-language-detector>=2.0.0
+
+# PostgreSQL (postgres_ingest, postgres_ml profiles)
+psycopg[binary]>=3.1.0

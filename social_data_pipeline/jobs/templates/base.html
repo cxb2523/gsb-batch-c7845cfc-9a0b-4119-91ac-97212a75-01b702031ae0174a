@@ -1,0 +1,318 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>{% block title %}SDP Jobs{% endblock %}</title>
+  <script>
+    (function () {
+      var saved = null;
+      try { saved = localStorage.getItem('sdp-theme'); } catch (_) {}
+      var prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+      var theme = (saved === 'dark' || saved === 'light') ? saved : (prefersDark ? 'dark' : 'light');
+      document.documentElement.setAttribute('data-theme', theme);
+      window.__sdpInitialTheme = theme;
+    })();
+  </script>
+  <link rel="stylesheet" href="/static/pico.min.css">
+  <link rel="stylesheet" id="prism-css" href="/static/prism.min.css">
+  <script>
+    if (window.__sdpInitialTheme === 'dark') {
+      document.getElementById('prism-css').href = '/static/prism-tomorrow.min.css';
+    }
+  </script>
+  <script src="/static/htmx.min.js" defer></script>
+  <script src="/static/prism-core.min.js" defer></script>
+  <script src="/static/prism-sql.min.js" defer></script>
+  <script src="/static/prism-json.min.js" defer></script>
+  <style>
+    :root { --pico-font-size: 90%; }
+    main.container { max-width: 1400px; padding-top: 1rem; padding-bottom: 2rem; }
+    nav.topnav { border-bottom: 1px solid var(--pico-muted-border-color); margin-bottom: 1rem; }
+    nav.topnav ul { padding: 0.5rem 0; }
+    nav.topnav a { text-decoration: none; padding: 0.25rem 0.5rem; border-radius: 4px; }
+    nav.topnav a.active { background: var(--pico-primary-background); color: var(--pico-primary-inverse); }
+    nav.topnav .nav-stat { color: var(--pico-muted-color); padding: 0.25rem 0.5rem; }
+    table { font-size: 0.9rem; }
+    table td, table th { vertical-align: top; padding: 0.5rem 0.6rem; }
+    td.sql, td.sqlprev { font-family: var(--pico-font-family-monospace); font-size: 0.82rem; color: var(--pico-color); }
+    td.sqlprev { max-width: 38rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .status-pending { color: var(--pico-color-amber-600); }
+    .status-approved { color: var(--pico-primary); }
+    .status-running { color: var(--pico-color-cyan-600); font-weight: 600; }
+    .status-done { color: var(--pico-color-jade-600); }
+    .status-failed, .status-cancelled { color: var(--pico-color-red-600); }
+    .status-rejected { color: var(--pico-muted-color); }
+    .muted { color: var(--pico-muted-color); font-size: 0.85rem; }
+    .row-actions { white-space: nowrap; }
+    .row-actions button, .row-actions form { display: inline-block; margin: 0 0.2rem 0 0; }
+    .row-actions form { margin-bottom: 0; }
+    .row-actions button { font-size: 0.75rem; padding: 0.2rem 0.5rem; margin-bottom: 0; }
+    .error-box { background: var(--pico-color-red-50); color: var(--pico-color-red-800); padding: 0.5rem; border-radius: 4px; font-family: var(--pico-font-family-monospace); font-size: 0.82rem; white-space: pre-wrap; }
+    .empty-state { text-align: center; color: var(--pico-muted-color); padding: 3rem 0; }
+    .summary-bar { display: flex; gap: 2rem; margin: 0.5rem 0 1rem; color: var(--pico-muted-color); font-size: 0.88rem; }
+    code.copyable { cursor: pointer; border-radius: 3px; padding: 0.05rem 0.3rem; transition: background 0.15s; }
+    code.copyable:hover { background: var(--pico-primary-focus); }
+    code.copyable.copied { background: var(--pico-color-jade-200); color: var(--pico-color-jade-800); }
+    .copy-cell { display: inline-flex; gap: 0.25rem; align-items: center; }
+    button.copy-icon { background: transparent; border: 0; padding: 0.1rem 0.25rem; margin: 0; line-height: 1; color: var(--pico-muted-color); cursor: pointer; border-radius: 3px; }
+    button.copy-icon:hover { color: var(--pico-primary); background: var(--pico-primary-focus); }
+    button.copy-icon.copied { color: var(--pico-color-jade-700); background: var(--pico-color-jade-200); }
+    button.copy-icon svg { display: block; }
+    tr.row-expandable { cursor: pointer; }
+    tr.row-expandable:hover { background: var(--pico-code-background-color); }
+    tr.row-expandable.expanded { background: var(--pico-code-background-color); }
+    tr.row-expandable .caret { display: inline-block; width: 1em; color: var(--pico-muted-color); user-select: none; }
+    tr.row-expandable.expanded .caret { color: var(--pico-primary); }
+    tr.row-details { display: none; }
+    tr.row-details.open { display: table-row; }
+    tr.row-details > td { border-top: none; padding: 0 0.6rem 0.8rem 0.6rem; background: var(--pico-code-background-color); }
+    tr.row-details pre { margin: 0; padding: 0.6rem; background: var(--pico-background-color); border-radius: 4px; overflow-x: auto; white-space: pre-wrap; font-size: 0.82rem; }
+    tr.row-details pre code { background: transparent; padding: 0; font-size: inherit; text-shadow: none; }
+    .row-details-split { display: grid; grid-template-columns: 1fr 1fr; gap: 0.8rem; align-items: start; }
+    .detail-panel { min-width: 0; }
+    .detail-panel .panel-label { color: var(--pico-muted-color); font-size: 0.78rem; margin-bottom: 0.2rem; text-transform: uppercase; letter-spacing: 0.05em; }
+    .detail-panel .panel-content { max-height: 24rem; overflow: auto; background: var(--pico-background-color); border-radius: 4px; padding: 0.5rem; font-size: 0.82rem; }
+    .detail-panel .panel-content pre { margin: 0; padding: 0; background: transparent; white-space: pre-wrap; word-break: break-word; }
+    .detail-panel .panel-actions { display: flex; gap: 0.4rem; margin-bottom: 0.3rem; }
+    .detail-panel .panel-actions button { margin: 0; font-size: 0.75rem; padding: 0.2rem 0.5rem; }
+    table.preview-table { font-size: 0.78rem; border-collapse: collapse; width: auto; margin: 0; }
+    table.preview-table th, table.preview-table td { border: 1px solid var(--pico-muted-border-color); padding: 0.2rem 0.4rem; vertical-align: top; max-width: 18rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    table.preview-table th { background: var(--pico-code-background-color); }
+    td.description { max-width: 22em; font-size: 0.85rem; line-height: 1.3; }
+    td.description:empty::before { content: "—"; color: var(--pico-muted-color); }
+    .auto-accept-slot { float: right; position: relative; margin: 0.15rem 0 0 0; }
+    details.auto-accept-panel { display: inline-block; }
+    details.auto-accept-panel > summary[role="button"] { list-style: none !important; user-select: none; padding: 0.2rem 0.6rem !important; font-size: 0.75rem !important; line-height: 1 !important; width: auto !important; text-align: center !important; }
+    details.auto-accept-panel > summary[role="button"]::-webkit-details-marker { display: none !important; }
+    details.auto-accept-panel > summary[role="button"]::marker { content: '' !important; }
+    details.auto-accept-panel > summary[role="button"]::after { display: none !important; content: none !important; background: none !important; width: 0 !important; height: 0 !important; margin: 0 !important; padding: 0 !important; }
+    details.auto-accept-panel[open] > summary[role="button"] { margin-bottom: 0 !important; }
+    .auto-accept-body { position: absolute; top: calc(100% + 0.4rem); right: 0; z-index: 10; min-width: 360px; max-width: 480px; padding: 0.7rem 0.9rem; background: var(--pico-card-background-color); border: 1px solid var(--pico-muted-border-color); border-radius: 8px; box-shadow: 0 6px 20px rgba(0,0,0,0.12); text-align: left; }
+    .auto-accept-targets { display: grid; grid-template-columns: minmax(0, 1fr) minmax(140px, 2fr) max-content max-content; gap: 0.45rem 0.8rem; align-items: center; font-size: 0.82rem; }
+    .auto-accept-targets .target-name { font-weight: 600; }
+    .auto-accept-targets .target-meta { color: var(--pico-muted-color); font-size: 0.72rem; }
+    .auto-accept-targets input[type="range"] { width: 100%; margin: 0; }
+    .auto-accept-targets input[type="checkbox"] { margin: 0; }
+    .auto-accept-targets output { font-variant-numeric: tabular-nums; min-width: 1.5em; text-align: right; color: var(--pico-muted-color); }
+    .auto-accept-empty { color: var(--pico-muted-color); font-size: 0.85rem; padding: 0.4rem 0; }
+    button.theme-toggle { background: transparent; border: 0; padding: 0.25rem 0.5rem; margin: 0; color: var(--pico-muted-color); cursor: pointer; border-radius: 4px; line-height: 1; }
+    button.theme-toggle:hover { color: var(--pico-primary); background: var(--pico-primary-focus); }
+    button.theme-toggle svg { display: block; width: 1.1em; height: 1.1em; }
+    [data-theme=dark] button.theme-toggle .theme-icon-moon,
+    [data-theme=light] button.theme-toggle .theme-icon-sun { display: none; }
+    [data-theme=dark] .error-box { background: var(--pico-color-red-900); color: var(--pico-color-red-100); }
+    [data-theme=dark] code.copyable.copied { background: var(--pico-color-jade-800); color: var(--pico-color-jade-100); }
+    [data-theme=dark] button.copy-icon.copied { background: var(--pico-color-jade-800); color: var(--pico-color-jade-200); }
+    [data-theme=dark] .auto-accept-body { box-shadow: 0 6px 20px rgba(0, 0, 0, 0.45); }
+  </style>
+</head>
+<body>
+  <main class="container">
+    <nav class="topnav">
+      <ul>
+        <li><strong>SDP Jobs</strong></li>
+      </ul>
+      <ul>
+        {% set d = disk_stat() %}
+        {% if d %}
+        <li class="nav-stat" title="Size of stored job results · free space on the results volume">{{ human_bytes(d.results_bytes) }} used · {{ human_bytes(d.free_bytes) }} free</li>
+        {% endif %}
+        <li><a href="/pending" class="{% if tab == 'pending' %}active{% endif %}">Pending <span class="muted">({{ counts.pending }})</span></a></li>
+        <li><a href="/running" class="{% if tab == 'running' %}active{% endif %}">Running <span class="muted">({{ counts.running }})</span></a></li>
+        <li><a href="/history" class="{% if tab == 'history' %}active{% endif %}">History</a></li>
+        <li>
+          <button type="button" class="theme-toggle" data-theme-toggle aria-label="Toggle dark mode" title="Toggle dark mode">
+            <svg class="theme-icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
+            <svg class="theme-icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/></svg>
+          </button>
+        </li>
+        {% if auth_enabled %}
+        <li>
+          <form method="post" action="/logout" style="display:inline; margin:0;">
+            <button type="submit" class="secondary outline" style="font-size: 0.75rem; padding: 0.2rem 0.6rem; margin:0;">Log out</button>
+          </form>
+        </li>
+        {% endif %}
+      </ul>
+    </nav>
+    <div class="auto-accept-slot"
+         hx-get="/fragments/auto_accept"
+         hx-trigger="load"
+         hx-swap="innerHTML">
+      <noscript>Auto-accept requires JavaScript.</noscript>
+    </div>
+    {% block content %}{% endblock %}
+  </main>
+  <script>
+    // Copy-on-click for <code class="copyable">. Uses navigator.clipboard
+    // when available (HTTPS or localhost) and falls back to a hidden
+    // textarea + execCommand('copy') for plain-HTTP contexts like Tailscale.
+    (function () {
+      function copyText(text) {
+        if (navigator.clipboard && window.isSecureContext) {
+          return navigator.clipboard.writeText(text);
+        }
+        return new Promise(function (resolve) {
+          var ta = document.createElement('textarea');
+          ta.value = text;
+          ta.setAttribute('readonly', '');
+          ta.style.position = 'fixed';
+          ta.style.opacity = '0';
+          document.body.appendChild(ta);
+          ta.select();
+          try { document.execCommand('copy'); } catch (_) {}
+          document.body.removeChild(ta);
+          resolve();
+        });
+      }
+      document.addEventListener('click', function (ev) {
+        var el = ev.target.closest('code.copyable');
+        if (!el) return;
+        ev.stopPropagation();
+        copyText(el.textContent).then(function () {
+          el.classList.add('copied');
+          var prev = el.getAttribute('title');
+          el.setAttribute('title', 'Copied!');
+          setTimeout(function () {
+            el.classList.remove('copied');
+            if (prev) el.setAttribute('title', prev);
+          }, 900);
+        });
+      });
+
+      // Copy-icon button: copy the text of the nearest preceding <code> in
+      // the same .copy-cell wrapper.
+      document.addEventListener('click', function (ev) {
+        var btn = ev.target.closest('button.copy-icon');
+        if (!btn) return;
+        ev.preventDefault();
+        ev.stopPropagation();
+        var cell = btn.closest('.copy-cell') || btn.parentElement;
+        var code = cell ? cell.querySelector('code') : null;
+        if (!code) return;
+        copyText(code.textContent).then(function () {
+          btn.classList.add('copied');
+          setTimeout(function () { btn.classList.remove('copied'); }, 900);
+        });
+      });
+
+      // Reject form: prompt for an optional reason on submit, store it in
+      // the hidden `reason` input, then re-submit. Cancelling the prompt
+      // aborts the rejection entirely.
+      document.addEventListener('submit', function (ev) {
+        var form = ev.target.closest('form[data-reject-form]');
+        if (!form) return;
+        if (form.dataset.confirmed === '1') return;
+        ev.preventDefault();
+        var reason = window.prompt('Reject reason (optional):', '');
+        if (reason === null) return;
+        var input = form.querySelector('input[name="reason"]');
+        if (input) input.value = reason;
+        form.dataset.confirmed = '1';
+        form.submit();
+      });
+
+      // Re-run Prism highlighting after htmx swaps in new content
+      // (e.g. the running-rows fragment refreshes every 2s).
+      document.body.addEventListener('htmx:afterSwap', function () {
+        if (window.Prism) window.Prism.highlightAll();
+      });
+
+      // Per-target switch / slider handlers. Plain fetch + URLSearchParams
+      // is the unambiguous form-urlencoded path FastAPI's request.form()
+      // expects; we swap the response HTML into the slot and re-wire.
+      window.aaPostTarget = function (el, formValues) {
+        var slot = el.closest('.auto-accept-slot');
+        if (!slot) return;
+        var name = el.dataset.aaTarget;
+        var body = new URLSearchParams(formValues).toString();
+        var d = slot.querySelector('details.auto-accept-panel');
+        var wasOpen = d ? d.open : false;
+        fetch('/actions/auto_accept/target/' + encodeURIComponent(name), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: body,
+          credentials: 'same-origin',
+        }).then(function (resp) {
+          if (!resp.ok) throw new Error('auto-accept POST ' + resp.status);
+          return resp.text();
+        }).then(function (html) {
+          slot.innerHTML = html;
+          var d2 = slot.querySelector('details.auto-accept-panel');
+          if (d2 && wasOpen) d2.open = true;
+          window.aaWireSlot(slot);
+        }).catch(function (err) { console.error('[aa]', err); });
+      };
+      window.aaToggle = function (el) {
+        window.aaPostTarget(el, { enabled: el.checked ? 'on' : '' });
+      };
+      window.aaSlider = function (el) {
+        var out = document.getElementById('aa-limit-out-' + el.dataset.aaTarget);
+        if (out) out.value = el.value;
+        window.aaPostTarget(el, { limit: el.value });
+      };
+      // Wires switches/sliders inside the auto-accept slot. Idempotent
+      // via _aaWired so re-calling after a fragment swap is safe. The
+      // `input` listener on the range only updates the visible <output>;
+      // the network call fires on `change` (drag end), not every pixel.
+      window.aaWireSlot = function (slot) {
+        if (!slot) return;
+        slot.querySelectorAll('input[type="checkbox"][data-aa-target]').forEach(function (cb) {
+          if (cb._aaWired) return;
+          cb._aaWired = true;
+          cb.addEventListener('change', function () { window.aaToggle(cb); });
+        });
+        slot.querySelectorAll('input[type="range"][data-aa-target]').forEach(function (rg) {
+          if (rg._aaWired) return;
+          rg._aaWired = true;
+          rg.addEventListener('input', function () {
+            var out = document.getElementById('aa-limit-out-' + rg.dataset.aaTarget);
+            if (out) out.value = rg.value;
+          });
+          rg.addEventListener('change', function () { window.aaSlider(rg); });
+        });
+      };
+      // Wire the initial fragment after htmx loads it.
+      document.body.addEventListener('htmx:afterSwap', function (e) {
+        if (e.target && e.target.classList && e.target.classList.contains('auto-accept-slot')) {
+          window.aaWireSlot(e.target);
+        }
+      });
+
+      // Theme toggle: flip data-theme on <html>, persist in localStorage,
+      // swap the Prism stylesheet to its dark variant, and re-highlight any
+      // code that's already on the page so it picks up the new colors.
+      document.addEventListener('click', function (ev) {
+        var btn = ev.target.closest('button[data-theme-toggle]');
+        if (!btn) return;
+        ev.preventDefault();
+        var root = document.documentElement;
+        var next = root.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
+        root.setAttribute('data-theme', next);
+        try { localStorage.setItem('sdp-theme', next); } catch (_) {}
+        var prism = document.getElementById('prism-css');
+        if (prism) {
+          prism.href = next === 'dark' ? '/static/prism-tomorrow.min.css' : '/static/prism.min.css';
+        }
+        if (window.Prism) window.Prism.highlightAll();
+      });
+
+      // Click an expandable row to reveal its SQL/error details row below.
+      // Ignore clicks on interactive children so Approve/Reject/Kill and
+      // copy-on-click continue to work normally.
+      document.addEventListener('click', function (ev) {
+        if (ev.target.closest('form, button, input, a, code.copyable, details, summary')) return;
+        var row = ev.target.closest('tr.row-expandable');
+        if (!row) return;
+        var next = row.nextElementSibling;
+        if (!next || !next.classList.contains('row-details')) return;
+        next.classList.toggle('open');
+        row.classList.toggle('expanded');
+        var caret = row.querySelector('.caret');
+        if (caret) caret.textContent = next.classList.contains('open') ? '▾' : '▸';
+      });
+    })();
+  </script>
+</body>
+</html>

@@ -1,0 +1,484 @@
+# Social Data Pipeline - Docker Compose
+# 
+# Profiles:
+#   parse           - Extract .zst and parse to CSV
+#   lingua          - Run Lingua language detection (CPU only)
+#   ml              - Run GPU transformer classifiers
+#   postgres        - PostgreSQL database server only
+#   postgres_ingest - Base table ingestion (requires postgres running)
+#   postgres_ml     - ML classifier table ingestion (requires postgres running)
+#   postgres_mcp    - PostgreSQL MCP server (requires postgres running)
+#   mongo_mcp       - MongoDB MCP server (requires mongo running)
+#
+# Platform selection (for parse profile):
+#   PLATFORM=reddit docker compose --profile parse up         # Default
+#   PLATFORM=custom/mydata docker compose --profile parse up  # Custom platform
+#
+# Usage:
+#   docker compose --profile parse up
+#   docker compose --profile lingua up
+#   docker compose --profile ml up
+#   
+#   # Database workflow: start postgres first, then run ingestion pipelines
+#   docker compose --profile postgres up -d
+#   docker compose --profile postgres_ingest up
+#   docker compose --profile postgres_ml up
+#   # Postgres keeps running for queries
+#   docker compose --profile postgres down
+
+name: sdp
+
+services:
+  # ==========================================================================
+  # Profile: parse - Decompress and parse to CSV
+  # Platform selection: PLATFORM=reddit (default) | custom/<name>
+  # ==========================================================================
+  parse:
+    profiles: [parse]
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["bash", "-c", "umask 0000 && exec python -m social_data_pipeline.orchestrators.parse"]
+    volumes:
+      - ${DUMPS_PATH:-./data/dumps}:/data/dumps:ro
+      - ${EXTRACTED_PATH:-./data/extracted}:/data/extracted
+      - ${PARSED_PATH:-./data/parsed}:/data/parsed
+      - ${OUTPUT_PATH:-./data/output}:/data/output
+      - ./config:/app/config:ro
+    environment:
+      - PLATFORM=${PLATFORM:-reddit}
+      - SOURCE=${SOURCE:-}
+      - FILE_FILTER=${FILE_FILTER:-}
+      - SKIP_LINGUA_FILES=${SKIP_LINGUA_FILES:-}
+      - PYTHONUNBUFFERED=1
+
+  # ==========================================================================
+  # Profile: lingua - Language detection with Lingua (CPU)
+  # ==========================================================================
+  lingua:
+    profiles: [lingua]
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["bash", "-c", "umask 0000 && exec python -m social_data_pipeline.orchestrators.ml"]
+    environment:
+      - PROFILE=lingua
+      - SOURCE=${SOURCE:-}
+      - FILE_FILTER=${FILE_FILTER:-}
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - ${PARSED_PATH:-./data/parsed}:/data/parsed:ro
+      - ${OUTPUT_PATH:-./data/output}:/data/output
+      - ./config:/app/config:ro
+
+  # ==========================================================================
+  # Profile: ml - GPU transformer classifiers
+  # ==========================================================================
+  ml-gpu:
+    profiles: [ml]
+    build:
+      context: .
+      dockerfile: Dockerfile.gpu
+    command: ["bash", "-c", "umask 0000 && exec python -m social_data_pipeline.orchestrators.ml"]
+    ipc: host  # Required for PyTorch/CUDA shared memory
+    environment:
+      - PROFILE=ml
+      - SOURCE=${SOURCE:-}
+      - CLASSIFIER=${CLASSIFIER:-}
+      - FILE_FILTER=${FILE_FILTER:-}
+      - PYTHONUNBUFFERED=1
+      - HF_TOKEN=${HF_TOKEN:-}
+    volumes:
+      - ${PARSED_PATH:-./data/parsed}:/data/parsed:ro
+      - ${OUTPUT_PATH:-./data/output}:/data/output
+      - ./config:/app/config:ro
+      - ${HF_HOME:-~/.cache/huggingface}:/root/.cache/huggingface
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  # ==========================================================================
+  # Profile: postgres - PostgreSQL database server
+  # ==========================================================================
+  postgres:
+    profiles: [postgres]
+    build:
+      context: .
+      dockerfile: Dockerfile.postgres
+    ipc: host  # Fixes 64MB shared memory limit from default Docker IPC
+    mem_limit: ${POSTGRES_MEM_LIMIT:-0}
+    restart: "no"
+    stop_grace_period: 10m
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${DB_NAME:-datasets}
+      POSTGRES_AUTH_ENABLED: ${POSTGRES_AUTH_ENABLED:-}
+      POSTGRES_RO_USER: ${POSTGRES_RO_USER:-}
+      POSTGRES_PORT: ${POSTGRES_PORT:-5432}
+    ports:
+      - "${POSTGRES_PORT:-5432}:${POSTGRES_PORT:-5432}"
+    volumes:
+      - ${PGDATA_PATH:-./data/database/postgres}/pgdata:/var/lib/postgresql
+      # Parent mounts cover sources whose parsed/output paths live under
+      # ${PARSED_PATH}/${OUTPUT_PATH} (the default-disk case) — no restart
+      # needed when adding a source under these. Sources on a different
+      # filesystem still get per-source mounts in docker-compose.override.yml
+      # via 'sdp db start' (and the source-add drift warning fires if the
+      # user adds one of those out-of-parent sources to a running DB).
+      - ${PARSED_PATH:-./data/parsed}:/data/parsed:ro
+      - ${OUTPUT_PATH:-./data/output}:/data/output:ro
+      - ${PGDATA_PATH:-./data/database/postgres}:/data/database
+      - ${DB_EXPORT_PATH:-./data/export}:/export
+      - ./config/postgres:/etc/postgresql/config:ro
+    entrypoint: ["bash", "/etc/postgresql/config/entrypoint-wrapper.sh"]
+    # Healthcheck: liveness via pg_isready, plus an RO-user probe under auth.
+    # The RO probe ensures `service_healthy` only holds when the RO role
+    # actually exists in the DB and authenticates — otherwise dependent
+    # services (MCP) would boot against broken auth and silently fail.
+    # Logic lives in the sibling script to avoid compose's $$/`${}` escape maze.
+    healthcheck:
+      test: ["CMD", "bash", "/etc/postgresql/config/healthcheck.sh"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ==========================================================================
+  # Profile: postgres_ingest - Base table ingestion
+  # Requires: postgres profile to be running
+  # ==========================================================================
+  postgres-ingest:
+    profiles: [postgres_ingest]
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["bash", "-c", "umask 0000 && exec python -m social_data_pipeline.orchestrators.postgres_ingest"]
+    environment:
+      - PYTHONUNBUFFERED=1
+      - PLATFORM=${PLATFORM:-reddit}
+      - SOURCE=${SOURCE:-}
+      - FILE_FILTER=${FILE_FILTER:-}
+      - POSTGRES_PORT=${POSTGRES_PORT:-5432}
+      - DB_NAME=${DB_NAME:-datasets}
+      - PGDATA_PATH=/data/database
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-}
+    volumes:
+      - ${DUMPS_PATH:-./data/dumps}:/data/dumps:ro
+      - ${EXTRACTED_PATH:-./data/extracted}:/data/extracted
+      - ${PARSED_PATH:-./data/parsed}:/data/parsed
+      - ${OUTPUT_PATH:-./data/output}:/data/output:ro
+      - ${PGDATA_PATH:-./data/database/postgres}:/data/database
+      - ./config:/app/config:ro
+
+  # ==========================================================================
+  # Profile: postgres_ml - ML classifier table ingestion from ML outputs
+  # Requires: postgres profile to be running
+  # ==========================================================================
+  postgres-ml:
+    profiles: [postgres_ml]
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["bash", "-c", "umask 0000 && exec python -m social_data_pipeline.orchestrators.postgres_ml"]
+    environment:
+      - PYTHONUNBUFFERED=1
+      - PLATFORM=${PLATFORM:-reddit}
+      - SOURCE=${SOURCE:-}
+      - FILE_FILTER=${FILE_FILTER:-}
+      - POSTGRES_PORT=${POSTGRES_PORT:-5432}
+      - DB_NAME=${DB_NAME:-datasets}
+      - PGDATA_PATH=/data/database
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-}
+    volumes:
+      - ${OUTPUT_PATH:-./data/output}:/data/output:ro
+      - ${PGDATA_PATH:-./data/database/postgres}:/data/database
+      - ./config:/app/config:ro
+
+  # ==========================================================================
+  # Profile: mongo - MongoDB server
+  # ==========================================================================
+  mongo:
+    profiles: [mongo]
+    image: mongo:8
+    mem_limit: ${MONGO_MEM_LIMIT:-0}
+    restart: "no"
+    stop_grace_period: 5m
+    ulimits:
+      nofile:
+        soft: 64000
+        hard: 64000
+    ports:
+      - "${MONGO_PORT:-27017}:27017"
+    volumes:
+      - ${MONGO_DATA_PATH:-./data/database/mongo}/db:/data/db
+      - ${MONGO_DATA_PATH:-./data/database/mongo}:/data/mongo:ro
+      - ${DB_EXPORT_PATH:-./data/export}:/export
+      - ./config/mongo:/etc/mongo/config:ro
+    environment:
+      # WORKAROUND: MongoDB 8.x crashes deterministically with exit 139 ~30s
+      # after start on Linux kernel 6.19+ (e.g. Ubuntu 26.04 / kernel 7.0).
+      # Root cause: mongo's vendored tcmalloc relied on an undocumented RSEQ
+      # kernel behavior that was changed in commit 39a167560a61 ("rseq:
+      # Optimize event setting"); tcmalloc now segfaults during the first
+      # WiredTiger background allocation. The fix is to force GLIBC to claim
+      # RSEQ first, starving tcmalloc into its safe per-thread cache fallback.
+      # Counterintuitively, rseq=1 (NOT =0) is the working value: =0 lets
+      # tcmalloc grab RSEQ and crash, =1 makes glibc grab it instead. Remove
+      # this line once mongo upstream merges the vendored tcmalloc fix.
+      # Refs: MongoDB 8.0/8.2 release notes; stoatchat/self-hosted#268;
+      # arch-linux GitLab#185; docker-library/mongo#747.
+      GLIBC_TUNABLES: "glibc.pthread.rseq=1"
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ADMIN_USER:-}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ADMIN_PASSWORD:-}
+      MONGO_ADMIN_USER: ${MONGO_ADMIN_USER:-admin}
+      MONGO_AUTH_ENABLED: ${MONGO_AUTH_ENABLED:-}
+      MONGO_RO_USER: ${MONGO_RO_USER:-}
+      MONGO_CACHE_SIZE_GB: ${MONGO_CACHE_SIZE_GB:-2}
+    entrypoint: ["bash", "/etc/mongo/config/entrypoint-wrapper.sh"]
+    # Healthcheck: liveness via adminCommand ping, plus an RO-user probe
+    # under auth. The RO probe ensures `service_healthy` only holds when
+    # the RO user actually authenticates — otherwise dependent MCP would
+    # boot against broken auth and silently fail.
+    # Logic lives in the sibling script to avoid compose's $$/`${}` escape maze.
+    healthcheck:
+      test: ["CMD", "bash", "/etc/mongo/config/healthcheck.sh"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ==========================================================================
+  # Profile: starrocks - StarRocks OLAP database server (FE + BE all-in-one)
+  # ==========================================================================
+  starrocks:
+    profiles: [starrocks]
+    image: starrocks/allin1-ubuntu
+    init: true
+    restart: "no"
+    stop_grace_period: 5m
+    mem_limit: ${STARROCKS_MEM_LIMIT:-0}
+    entrypoint: ["bash", "/etc/starrocks/config/entrypoint-wrapper.sh"]
+    environment:
+      STARROCKS_ROOT_PASSWORD: ${STARROCKS_ROOT_PASSWORD:-}
+      STARROCKS_AUTH_ENABLED: ${STARROCKS_AUTH_ENABLED:-}
+      STARROCKS_RO_USER: ${STARROCKS_RO_USER:-}
+      MYSQL_PWD: ${STARROCKS_ROOT_PASSWORD:-}
+    ports:
+      - "${STARROCKS_PORT:-9030}:9030"          # MySQL protocol
+      - "${STARROCKS_FE_HTTP_PORT:-8030}:8030"   # FE HTTP (admin, Stream Load)
+      - "8040:8040"                               # BE HTTP
+    volumes:
+      - ${STARROCKS_DATA_PATH:-./data/database/starrocks}:/data/starrocks
+      - ${STARROCKS_DATA_PATH:-./data/database/starrocks}/fe/meta:/data/deploy/starrocks/fe/meta
+      - ${STARROCKS_DATA_PATH:-./data/database/starrocks}/be/storage:/data/deploy/starrocks/be/storage
+      # Parent mounts cover sources whose parsed/output paths live under
+      # ${PARSED_PATH}/${OUTPUT_PATH}; same dual-mount pattern as postgres.
+      # Out-of-parent sources still get per-source mounts in
+      # docker-compose.override.yml via 'sdp db start'.
+      - ${PARSED_PATH:-./data/parsed}:/data/parsed:ro
+      - ${OUTPUT_PATH:-./data/output}:/data/output:ro
+      - ./config/starrocks/fe.local.conf:/etc/starrocks/config/fe.local.conf:ro
+      - ./config/starrocks/be.local.conf:/etc/starrocks/config/be.local.conf:ro
+      - ./config/starrocks/entrypoint-wrapper.sh:/etc/starrocks/config/entrypoint-wrapper.sh:ro
+      - ./config/starrocks/healthcheck.sh:/etc/starrocks/config/healthcheck.sh:ro
+      - ${JOBS_RESULT_ROOT:-./data/jobs/results}:/jobs_export
+    # Healthcheck: liveness via SHOW BACKENDS (BE alive), plus an RO-user
+    # probe under auth. The RO probe ensures `service_healthy` only holds
+    # when the RO user actually authenticates — otherwise dependent MCP
+    # would boot against broken auth and silently fail.
+    # Logic lives in the sibling script to avoid compose's $$/`${}` escape maze.
+    healthcheck:
+      test: ["CMD", "bash", "/etc/starrocks/config/healthcheck.sh"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 90s
+
+  # ==========================================================================
+  # Profile: sr_ingest - StarRocks base table ingestion
+  # Requires: starrocks profile to be running
+  # ==========================================================================
+  sr-ingest:
+    profiles: [sr_ingest]
+    build:
+      context: .
+      dockerfile: Dockerfile.starrocks
+    command: ["bash", "-c", "umask 0000 && exec python -m social_data_pipeline.orchestrators.sr_ingest"]
+    environment:
+      - PYTHONUNBUFFERED=1
+      - PLATFORM=${PLATFORM:-reddit}
+      - SOURCE=${SOURCE:-}
+      - STARROCKS_PORT=${STARROCKS_PORT:-9030}
+      - STARROCKS_ROOT_PASSWORD=${STARROCKS_ROOT_PASSWORD:-}
+    volumes:
+      - ${PARSED_PATH:-./data/parsed}:/data/parsed:ro
+      - ${OUTPUT_PATH:-./data/output}:/data/output:ro
+      - ${STARROCKS_DATA_PATH:-./data/database/starrocks}:/data/database
+      - ./config:/app/config:ro
+
+  # ==========================================================================
+  # Profile: sr_ml - StarRocks ML classifier table ingestion
+  # Requires: starrocks profile to be running
+  # ==========================================================================
+  sr-ml:
+    profiles: [sr_ml]
+    build:
+      context: .
+      dockerfile: Dockerfile.starrocks
+    command: ["bash", "-c", "umask 0000 && exec python -m social_data_pipeline.orchestrators.sr_ml"]
+    environment:
+      - PYTHONUNBUFFERED=1
+      - PLATFORM=${PLATFORM:-reddit}
+      - SOURCE=${SOURCE:-}
+      - STARROCKS_PORT=${STARROCKS_PORT:-9030}
+      - STARROCKS_ROOT_PASSWORD=${STARROCKS_ROOT_PASSWORD:-}
+    volumes:
+      - ${OUTPUT_PATH:-./data/output}:/data/output:ro
+      - ${STARROCKS_DATA_PATH:-./data/database/starrocks}:/data/database
+      - ./config:/app/config:ro
+
+  # ==========================================================================
+  # Profile: postgres_mcp - PostgreSQL MCP server (SSE)
+  # RO user is created/synced by the postgres entrypoint, not here.
+  # ==========================================================================
+  postgres-mcp:
+    profiles: [postgres_mcp]
+    image: crystaldba/postgres-mcp
+    restart: "no"
+    entrypoint: ["sh", "/mcp-config/entrypoint-postgres.sh"]
+    command: >-
+      --access-mode=${POSTGRES_MCP_ACCESS_MODE:-restricted}
+      --transport=sse
+    environment:
+      DATABASE_URI: postgresql://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:${POSTGRES_PORT:-5432}/${DB_NAME:-datasets}
+      POSTGRES_MCP_USER: ${POSTGRES_MCP_USER:-}
+      POSTGRES_PORT: ${POSTGRES_PORT:-5432}
+      DB_NAME: ${DB_NAME:-datasets}
+    volumes:
+      - ${PGDATA_PATH:-./data/database/postgres}:/data/database:ro
+      - ./config/mcp:/mcp-config:ro
+    ports:
+      - "${POSTGRES_MCP_PORT:-8000}:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # ==========================================================================
+  # Profile: mongo_mcp - MongoDB MCP server (Streamable HTTP)
+  # RO user is created/synced by the mongo entrypoint, not here.
+  # ==========================================================================
+  mongo-mcp:
+    profiles: [mongo_mcp]
+    build:
+      context: .
+      dockerfile: Dockerfile.mcp-mongo
+    restart: "no"
+    environment:
+      MCP_MONGODB_URI: mongodb://mongo:27017
+      MCP_MONGODB_READONLY: "${MONGO_MCP_READ_ONLY:-true}"
+      MCP_PORT: "3000"
+      MCP_MONGODB_USER: ${MONGO_MCP_USER:-}
+    volumes:
+      - ${MONGO_DATA_PATH:-./data/database/mongo}:/data/mongo:ro
+    ports:
+      - "${MONGO_MCP_PORT:-3000}:3000"
+    depends_on:
+      mongo:
+        condition: service_healthy
+    # Note: internal port is always 3000 (set via MCP_PORT -> --port in entrypoint).
+    # MONGO_MCP_PORT only changes the host-side mapping.
+
+  # ==========================================================================
+  # Profile: starrocks_mcp - StarRocks MCP server (Streamable HTTP)
+  # RO user is created/synced by the starrocks entrypoint, not here.
+  # ==========================================================================
+  starrocks-mcp:
+    profiles: [starrocks_mcp]
+    build:
+      context: .
+      dockerfile: Dockerfile.mcp-starrocks
+    restart: "no"
+    environment:
+      STARROCKS_HOST: starrocks
+      STARROCKS_PORT: "9030"
+      STARROCKS_MYSQL_AUTH_PLUGIN: mysql_clear_password
+      MCP_PORT: "9000"
+      STARROCKS_MCP_USER: ${STARROCKS_MCP_USER:-}
+    volumes:
+      - ${STARROCKS_DATA_PATH:-./data/database/starrocks}:/data/starrocks:ro
+    ports:
+      - "${STARROCKS_MCP_PORT:-9000}:9000"
+    depends_on:
+      starrocks:
+        condition: service_healthy
+    # Note: internal port is always 9000 (set via MCP_PORT -> --port in entrypoint).
+    # STARROCKS_MCP_PORT only changes the host-side mapping.
+
+  # ==========================================================================
+  # Profile: jobs - Query scheduler (web UI + MCP + runner)
+  # Single-container service. Admin credentials flow from the parent
+  # `sdp db start` via POSTGRES_PASSWORD / STARROCKS_ROOT_PASSWORD —
+  # never stored on disk. Web UI binds to 127.0.0.1 by default.
+  # ==========================================================================
+  jobs:
+    profiles: [jobs]
+    build:
+      context: .
+      dockerfile: Dockerfile.jobs
+    restart: "no"
+    entrypoint: ["sh", "/etc/jobs-config/entrypoint.sh"]
+    environment:
+      - PYTHONUNBUFFERED=1
+      - JOBS_PORT=${JOBS_PORT:-8050}
+      - JOBS_DIR=/data/jobs
+      - JOBS_RESULT_ROOT=${JOBS_RESULT_ROOT:-./data/jobs/results}
+      - POSTGRES_PORT=${POSTGRES_PORT:-5432}
+      - STARROCKS_PORT=${STARROCKS_PORT:-9030}
+      - MONGO_PORT=${MONGO_PORT:-27017}
+      - POSTGRES_AUTH_ENABLED=${POSTGRES_AUTH_ENABLED:-}
+      - STARROCKS_AUTH_ENABLED=${STARROCKS_AUTH_ENABLED:-}
+      - MONGO_AUTH_ENABLED=${MONGO_AUTH_ENABLED:-}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-}
+      - STARROCKS_ROOT_PASSWORD=${STARROCKS_ROOT_PASSWORD:-}
+      - MONGO_ADMIN_PASSWORD=${MONGO_ADMIN_PASSWORD:-}
+    volumes:
+      - ./data/jobs:/data/jobs
+      - ${JOBS_RESULT_ROOT:-./data/jobs/results}:/data/jobs/results
+      - ./config:/app/config:ro
+      - ./config/jobs/entrypoint.sh:/etc/jobs-config/entrypoint.sh:ro
+    ports:
+      - "${JOBS_PORT:-8050}:${JOBS_PORT:-8050}"
+    # Depends_on intentionally omitted: ordering is handled by `sdp db start`,
+    # which brings DBs up with --wait before starting the jobs profile.
+
+  # ==========================================================================
+  # Profile: mongo_ingest - Raw JSON ingestion to MongoDB
+  # Requires: mongo profile to be running
+  # ==========================================================================
+  mongo-ingest:
+    profiles: [mongo_ingest]
+    build:
+      context: .
+      dockerfile: Dockerfile.mongo
+    ulimits:
+      nofile:
+        soft: 64000
+        hard: 64000
+    command: ["bash", "-c", "umask 0000 && exec python -m social_data_pipeline.orchestrators.mongo_ingest"]
+    environment:
+      - PYTHONUNBUFFERED=1
+      - PLATFORM=${PLATFORM:-reddit}
+      - SOURCE=${SOURCE:-}
+      - FILE_FILTER=${FILE_FILTER:-}
+      - MONGO_PORT=${MONGO_PORT:-27017}
+      - MONGO_DATA_PATH=/data/mongo
+      - MONGO_ADMIN_USER=${MONGO_ADMIN_USER:-}
+      - MONGO_ADMIN_PASSWORD=${MONGO_ADMIN_PASSWORD:-}
+    volumes:
+      - ${DUMPS_PATH:-./data/dumps}:/data/dumps:ro
+      - ${EXTRACTED_PATH:-./data/extracted}:/data/extracted
+      - ${MONGO_DATA_PATH:-./data/database/mongo}:/data/mongo
+      - ./config:/app/config:ro

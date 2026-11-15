@@ -1,0 +1,14 @@
+platform: reddit
+data_types:
+- submissions
+- comments
+databases:
+- postgres
+- mongo
+profiles:
+- parse
+- lingua
+- ml
+- postgres_ingest
+- postgres_ml
+- mongo_ingest
