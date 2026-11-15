@@ -1,0 +1,85 @@
+{
+  "name": "browser-as-a-service",
+  "description": "A web browser hosted as a service, to render your JavaScript web pages as HTML",
+  "version": "0.0.0",
+  "engines": {
+    "node": ">= 10.11"
+  },
+  "author": "Hugo Freire <hugo@exec.sh>",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hfreire/browser-as-a-service.git"
+  },
+  "bugs": {
+    "url": "https://github.com/hfreire/browser-as-a-service/issues"
+  },
+  "homepage": "https://github.com/hfreire/browser-as-a-service#readme",
+  "dependencies": {
+    "health-checkup": "1.0.44",
+    "lodash": "4.17.20",
+    "modern-logger": "1.5.83",
+    "puppeteer-core": "5.5.0",
+    "random-http-useragent": "1.1.32",
+    "serverful": "1.4.89"
+  },
+  "devDependencies": {
+    "eslint": "6.8.0",
+    "eslint-config-hfreire": "3.0.58",
+    "jest": "26.6.3",
+    "npm-merge-driver": "2.3.6",
+    "pre-git": "3.17.1",
+    "prettier": "2.2.1",
+    "semantic-release": "17.3.7",
+    "snyk": "1.439.3"
+  },
+  "config": {
+    "pre-git": {
+      "commit-msg": "conventional",
+      "allow-untracked-files": true
+    }
+  },
+  "snyk": true,
+  "jest": {
+    "testEnvironment": "node",
+    "setupTestFrameworkScriptFile": "./test/helper.js",
+    "testMatch": [
+      "<rootDir>/test/**/*.js"
+    ],
+    "testPathIgnorePatterns": [
+      "/node_modules/",
+      "./test/helper.js"
+    ],
+    "collectCoverage": true,
+    "collectCoverageFrom": [
+      "src/**/*.js"
+    ]
+  },
+  "release": {
+    "publish": [
+      {
+        "path": "@semantic-release/npm",
+        "npmPublish": false
+      },
+      "@semantic-release/github"
+    ]
+  },
+  "scripts": {
+    "eslint": "./node_modules/.bin/eslint --ext .json --ext .js .",
+    "jest": "./node_modules/.bin/jest",
+    "snyk:test": "./node_modules/.bin/snyk test",
+    "snyk:protect": "./node_modules/.bin/snyk protect",
+    "docker:build": "DOCKER_REPO=hfreire NAME=$npm_package_name ./share/docker/scripts/build",
+    "docker:push": "DOCKER_REPO=hfreire NAME=$npm_package_name ./share/docker/scripts/push",
+    "docker:test": "DOCKER_REPO=hfreire NAME=$npm_package_name ./share/docker/scripts/test",
+    "terraform:deploy": "DOCKER_REPO=hfreire NAME=$npm_package_name ./share/terraform/scripts/deploy",
+    "semantic-release": "./node_modules/.bin/semantic-release",
+    "clean": "rm -rf coverage",
+    "lint": "npm run eslint",
+    "prepare": "npm run snyk:protect",
+    "test": "npm run clean && npm run lint && npm run jest",
+    "commit": "./node_modules/.bin/commit-wizard",
+    "deploy": "npm run terraform:deploy",
+    "start": "node src/app.js"
+  }
+}
