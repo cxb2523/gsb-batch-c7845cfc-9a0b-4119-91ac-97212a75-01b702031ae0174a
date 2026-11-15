@@ -1,0 +1,731 @@
+"""
+KPLC Self-Service Portal Scraper
+
+Isolated module: input is a meter number, output is a list of ScrapedToken records.
+All portal-specific logic lives here — if KPLC changes their page, only this file needs updating.
+
+The KPLC self-service portal typically shows the last 6-8 token purchases
+for a given meter number via a search form. This module replicates that
+search and parses the result table.
+
+NOTE: The exact portal URL, form fields, and HTML structure may change.
+This implementation is based on the common KPLC self-service portal pattern
+and includes defensive parsing to handle structural changes gracefully.
+"""
+
+import asyncio
+import logging
+from datetime import datetime
+from typing import Optional
+from dataclasses import dataclass
+
+import aiohttp
+from bs4 import BeautifulSoup
+
+from app.config import get_settings
+from app.schemas import ScrapedToken
+
+logger = logging.getLogger(__name__)
+settings = get_settings()
+
+
+@dataclass
+class ScrapResult:
+    """Result of a scrape attempt."""
+    tokens: list[ScrapedToken]
+    tariff: Optional[str]
+    success: bool
+    error: Optional[str] = None
+    account_reference: Optional[str] = None  # KPLC's accountReference, stored for future queries
+
+
+async def scrape_meter_tokens(
+    meter_number: str,
+    account_number: Optional[str] = None,
+    session: Optional[aiohttp.ClientSession] = None,
+) -> ScrapResult:
+    """
+    Fetch and parse KPLC self-service portal for a given meter number.
+
+    Returns a ScrapResult with parsed token records and tariff info.
+    Fails gracefully — returns empty list and error message on failure.
+    """
+    close_session = False
+    if session is None:
+        session = aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=settings.KPLC_TIMEOUT),
+            headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                              "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.5",
+            },
+        )
+        close_session = True
+
+    try:
+        tokens, tariff, account_reference = await _fetch_and_parse(session, meter_number, account_number)
+        return ScrapResult(
+            tokens=tokens,
+            tariff=tariff or (tokens[0].tariff if tokens else None),
+            success=True,
+            account_reference=account_reference,
+        )
+    except Exception as exc:
+        logger.warning("KPLC sync: meter %s returned error (%s)", meter_number, exc)
+        return ScrapResult(tokens=[], tariff=None, success=False, error=str(exc))
+    finally:
+        if close_session:
+            await session.close()
+
+
+# Production credentials from KPLC selfservice portal's appConfig.json + JS bundle
+PROD_BASIC_AUTH = "Basic aVBXZkZTZTI2NkF2eVZHc2xpWk45Nl8yTzVzYTp3R3lRZEFFa3MzRm9lSkZHU0ZZUndFMERUdGNh"
+PROD_BASE_URL = "https://selfservice.kplc.co.ke/api"
+APP_CONFIG_URL = "https://selfservice.kplc.co.ke/data/config/appConfig.json"
+
+# Fallback scope if config fetch fails
+FALLBACK_SCOPE = (
+    "token_public accounts_public attributes_public customers_public documents_public "
+    "listData_public rccs_public sectorSupplies_public selfReads_public serviceRequests_public "
+    "services_public streets_public supplies_public users_public workRequests_public "
+    "publicData_public juaforsure_public calculator_public sscalculator_public"
+)
+
+# Cache scope in memory to avoid re-fetching
+_cached_scope: Optional[str] = None
+
+
+async def _get_public_scope(session: aiohttp.ClientSession) -> str:
+    global _cached_scope
+    if _cached_scope:
+        return _cached_scope
+    try:
+        async with session.get(APP_CONFIG_URL, ssl=False) as resp:
+            if resp.status == 200:
+                cfg = await resp.json()
+                _cached_scope = cfg.get("data", {}).get("publicScope", FALLBACK_SCOPE)
+                return _cached_scope
+    except Exception as e:
+        logger.debug("Could not fetch appConfig: %s", e)
+    return FALLBACK_SCOPE
+
+
+async def _get_kplc_bearer_token(session: aiohttp.ClientSession) -> Optional[str]:
+    """Request OAuth bearer token from KPLC production API gateway."""
+    scope = await _get_public_scope(session)
+    token_url = f"{PROD_BASE_URL}/token"
+    headers = {
+        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+        "Authorization": PROD_BASIC_AUTH,
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Origin": "https://selfservice.kplc.co.ke",
+        "Referer": "https://selfservice.kplc.co.ke/public/",
+    }
+    try:
+        async with session.post(token_url, data=f"grant_type=client_credentials&scope={scope}", headers=headers, ssl=False) as resp:
+            if resp.status == 200:
+                res_json = await resp.json()
+                return res_json.get("access_token")
+    except Exception as e:
+        logger.debug("Token request failed: %s", e)
+    return None
+
+
+async def _fetch_and_parse(
+    session: aiohttp.ClientSession,
+    meter_number: str,
+    account_number: Optional[str],
+) -> tuple[list[ScrapedToken], Optional[str], Optional[str]]:
+    """
+    Query KPLC production API for token purchase history and contract info.
+    Returns (tokens, tariff, account_reference).
+    """
+    # Try KPLC REST API (the real endpoint the KPLC website uses)
+    try:
+        bearer = await _get_kplc_bearer_token(session)
+        if bearer:
+            tokens, tariff, account_reference = await _query_kplc_api(session, bearer, meter_number, account_number)
+            if tokens or tariff:
+                return tokens, tariff, account_reference
+    except Exception as e:
+        logger.warning("KPLC API query failed for meter %s: %s", meter_number, e)
+
+    # Fallback: Try HTML search form scraping
+    html = await _try_search(session, meter_number, account_number)
+    if html:
+        parsed = _parse_html(html)
+        if parsed:
+            return parsed, (parsed[0].tariff if parsed else None), None
+
+    return [], None, None
+
+
+async def _query_kplc_api(
+    session: aiohttp.ClientSession,
+    bearer_token: str,
+    meter_number: str,
+    account_number: Optional[str],
+) -> tuple[list[ScrapedToken], Optional[str], Optional[str]]:
+    """Query KPLC production API for token purchase history (same endpoint the website uses).
+    
+    Queries by both serialNumberMeter and accountReference (if available) then deduplicates,
+    because KPLC's API hard-caps at 4 records per query and the two endpoints can return
+    different windows of the transaction history.
+    
+    Returns (tokens, tariff, account_reference).
+    """
+    headers = {
+        "Authorization": f"Bearer {bearer_token}",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Accept": "application/json",
+        "Origin": "https://selfservice.kplc.co.ke",
+        "Referer": "https://selfservice.kplc.co.ke/public/",
+    }
+    all_tokens: list[ScrapedToken] = []
+    tariff: Optional[str] = None
+    discovered_account_ref: Optional[str] = None
+
+    async def _fetch_one(url: str) -> list[ScrapedToken]:
+        """Fetch colPrepayment from a single URL, updating shared state."""
+        nonlocal tariff, discovered_account_ref
+        fetched: list[ScrapedToken] = []
+        try:
+            async with session.get(url, headers=headers, ssl=False) as resp:
+                if resp.status == 200:
+                    body = await resp.json()
+                    data = body.get("data", []) if isinstance(body, dict) else body
+                    if data and isinstance(data, list) and len(data) > 0:
+                        record = data[0]
+                        # Capture accountReference for future queries
+                        if not discovered_account_ref:
+                            discovered_account_ref = record.get("accountReference")
+                        col_prepayment = record.get("colPrepayment") or []
+                        logger.info(
+                            "KPLC returned %d prepayment records for meter %s (url: ...%s)",
+                            len(col_prepayment), meter_number, url[-60:],
+                        )
+                        for item in col_prepayment:
+                            tok = _parse_col_prepayment_item(item)
+                            if tok:
+                                fetched.append(tok)
+                        if fetched and not tariff:
+                            tariff = fetched[0].tariff
+                elif resp.status in (422, 404):
+                    body_text = await resp.text()
+                    logger.warning(
+                        "KPLC returned %d for meter %s: %s", resp.status, meter_number, body_text[:200]
+                    )
+        except Exception as e:
+            logger.debug("KPLC query error for %s: %s", url[-60:], e)
+        return fetched
+
+    # Primary: query by serial number
+    serial_url = f"{PROD_BASE_URL}/publicData/4/newContractList?serialNumberMeter={meter_number}"
+    serial_tokens = await _fetch_one(serial_url)
+    all_tokens.extend(serial_tokens)
+
+    # If caller supplied an account_number, also query by it
+    if account_number and account_number != discovered_account_ref:
+        acc_url = f"{PROD_BASE_URL}/publicData/4/newContractList?accountReference={account_number}"
+        acc_tokens = await _fetch_one(acc_url)
+        all_tokens.extend(acc_tokens)
+
+    # If API told us an accountReference different from what we already queried, use it too
+    if discovered_account_ref:
+        # Only query if not already done above
+        already_queried_acc = account_number == discovered_account_ref
+        if not already_queried_acc:
+            acc_url2 = f"{PROD_BASE_URL}/publicData/4/newContractList?accountReference={discovered_account_ref}"
+            acc_tokens2 = await _fetch_one(acc_url2)
+            all_tokens.extend(acc_tokens2)
+
+    # Deduplicate by token_number (preserving order, earliest entry wins)
+    seen: set[str] = set()
+    unique_tokens: list[ScrapedToken] = []
+    for tok in all_tokens:
+        if tok.token_number not in seen:
+            seen.add(tok.token_number)
+            unique_tokens.append(tok)
+
+    logger.info(
+        "KPLC combined query for meter %s: %d unique tokens (from %d raw)",
+        meter_number, len(unique_tokens), len(all_tokens),
+    )
+
+    return unique_tokens, tariff, discovered_account_ref
+
+
+def _parse_col_prepayment_item(item: dict) -> Optional[ScrapedToken]:
+    """
+    Parse a single colPrepayment entry from KPLC's newContractList response.
+    
+    Fields from live API:
+      tokenNo, trnTimestamp (ms), trnUnits, trnAmount, pMethod, tariff, recptNo, msno
+    """
+    token_number = str(item.get("tokenNo") or "").strip().replace(" ", "").replace("-", "")
+    logger.debug("KPLC prepayment item raw: tokenNo=%r -> normalized=%r, ts=%r, units=%r, amount=%r",
+                 item.get("tokenNo"), token_number, item.get("trnTimestamp"),
+                 item.get("trnUnits"), item.get("trnAmount"))
+    if not token_number or len(token_number) < 10:
+        return None
+
+    units = None
+    try:
+        units = float(item["trnUnits"]) if item.get("trnUnits") is not None else None
+    except (ValueError, TypeError):
+        pass
+
+    amount = None
+    try:
+        amount = float(item["trnAmount"]) if item.get("trnAmount") is not None else None
+    except (ValueError, TypeError):
+        pass
+
+    purchased_at = None
+    ts = item.get("trnTimestamp")
+    if ts is not None:
+        try:
+            # trnTimestamp is in milliseconds
+            purchased_at = datetime.fromtimestamp(int(ts) / 1000)
+        except (ValueError, TypeError, OSError):
+            pass
+
+    payment_mode = item.get("pMethod") or "M-PESA"
+    tariff = item.get("tariff")
+
+    return ScrapedToken(
+        token_number=token_number,
+        units=units,
+        amount=amount,
+        payment_mode=payment_mode,
+        purchased_at=purchased_at,
+        tariff=tariff,
+    )
+
+
+def _parse_kplc_api_json(data: dict | list) -> list[ScrapedToken]:
+    """Parse JSON responses from KPLC APIM."""
+    tokens: list[ScrapedToken] = []
+    if isinstance(data, dict):
+        items = data.get("data") or data.get("colPrepayment") or data.get("tokens") or []
+        if isinstance(items, dict):
+            items = [items]
+    elif isinstance(data, list):
+        items = data
+    else:
+        return []
+
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        # Extract token number
+        tok_num = (
+            item.get("token")
+            or item.get("tokenNumber")
+            or item.get("token_number")
+            or item.get("colPrepayment")
+        )
+        if not tok_num and "serialNumberMeter" in item:
+            for sub in item.get("colPrepayment") or []:
+                if isinstance(sub, dict):
+                    t = _dict_to_scraped_token(sub)
+                    if t:
+                        tokens.append(t)
+            continue
+
+        token_obj = _dict_to_scraped_token(item)
+        if token_obj:
+            tokens.append(token_obj)
+
+    return tokens
+
+
+def _dict_to_scraped_token(item: dict) -> Optional[ScrapedToken]:
+    """Convert a dictionary to ScrapedToken."""
+    tok_num = str(
+        item.get("token")
+        or item.get("tokenNumber")
+        or item.get("token_number")
+        or item.get("idToken")
+        or ""
+    ).strip().replace(" ", "").replace("-", "")
+
+    if not tok_num or len(tok_num) < 10:
+        return None
+
+    units = None
+    for k in ["units", "unit", "kwh", "unitsKwh", "totalUnits"]:
+        if k in item and item[k] is not None:
+            try:
+                units = float(item[k])
+                break
+            except (ValueError, TypeError):
+                pass
+
+    amount = None
+    for k in ["amount", "cost", "totalAmount", "amountPaid", "ksh"]:
+        if k in item and item[k] is not None:
+            try:
+                amount = float(item[k])
+                break
+            except (ValueError, TypeError):
+                pass
+
+    purchased_at = None
+    date_val = item.get("date") or item.get("purchaseDate") or item.get("created_at") or item.get("emissionDate")
+    if date_val:
+        if isinstance(date_val, (int, float)):
+            try:
+                purchased_at = datetime.fromtimestamp(date_val / 1000 if date_val > 1e11 else date_val)
+            except Exception:
+                pass
+        elif isinstance(date_val, str):
+            purchased_at = _parse_date(date_val)
+
+    return ScrapedToken(
+        token_number=tok_num,
+        units=units,
+        amount=amount,
+        payment_mode=item.get("paymentMode") or item.get("payment_mode") or "M-PESA",
+        purchased_at=purchased_at,
+        tariff=item.get("tariff"),
+    )
+
+
+async def _try_search(
+    session: aiohttp.ClientSession,
+    meter_number: str,
+    account_number: Optional[str],
+) -> Optional[str]:
+    """
+    Try multiple known KPLC self-service URL/form patterns.
+    Returns the response HTML on success, None on all failures.
+    """
+    base_url = settings.KPLC_SEARCH_URL.rstrip("/")
+
+    # Pattern 1: Direct search GET with query param
+    search_urls = [
+        f"{base_url}/?meter={meter_number}",
+        f"{base_url}/search?meterNumber={meter_number}",
+        f"{base_url}/paybill/token-history?meter={meter_number}",
+    ]
+
+    for url in search_urls:
+        try:
+            async with session.get(url, ssl=False) as resp:
+                if resp.status == 200:
+                    text = await resp.text()
+                    if _looks_like_results(text):
+                        return text
+                    # Might need to submit a form on this page
+                    form_action = _extract_form_action(text, meter_number, account_number)
+                    if form_action:
+                        post_html = await _submit_form(session, base_url, form_action,
+                                                       meter_number, account_number, text)
+                        if post_html and _looks_like_results(post_html):
+                            return post_html
+        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+            logger.debug("Search pattern failed for %s: %s", url, e)
+            continue
+
+    # Pattern 2: POST to likely search endpoints
+    post_endpoints = [
+        f"{base_url}/search",
+        f"{base_url}/api/tokens",
+        f"{base_url}/Token/GetTokenHistory",
+    ]
+
+    for endpoint in post_endpoints:
+        try:
+            payload = {"meterNumber": meter_number}
+            if account_number:
+                payload["accountNumber"] = account_number
+
+            async with session.post(endpoint, data=payload, ssl=False) as resp:
+                if resp.status == 200:
+                    text = await resp.text()
+                    if _looks_like_results(text):
+                        return text
+        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+            logger.debug("POST pattern failed for %s: %s", endpoint, e)
+            continue
+
+    return None
+
+
+async def _submit_form(
+    session: aiohttp.ClientSession,
+    base_url: str,
+    action: str,
+    meter_number: str,
+    account_number: Optional[str],
+    page_html: str,
+) -> Optional[str]:
+    """Submit a form found on the page."""
+    try:
+        url = action if action.startswith("http") else f"{base_url}/{action.lstrip('/')}"
+        payload = {"meterNumber": meter_number}
+        if account_number:
+            payload["accountNumber"] = account_number
+
+        # Extract any hidden fields from the form
+        soup = BeautifulSoup(page_html, "lxml")
+        for inp in soup.select("form input[type='hidden']"):
+            name = inp.get("name")
+            if name:
+                payload[name] = inp.get("value", "")
+
+        async with session.post(url, data=payload, ssl=False) as resp:
+            if resp.status == 200:
+                return await resp.text()
+    except Exception as e:
+        logger.debug("Form submission failed: %s", e)
+    return None
+
+
+def _extract_form_action(
+    html: str, meter_number: str, account_number: Optional[str]
+) -> Optional[str]:
+    """Look for a search form in the page and return its action URL."""
+    soup = BeautifulSoup(html, "lxml")
+    form = soup.find("form")
+    if form and form.get("action"):
+        return form["action"]
+    return None
+
+
+def _looks_like_results(html: str) -> bool:
+    """Heuristic: does this HTML look like it contains token purchase results?"""
+    indicators = [
+        "token", "units", "kwh", "meter", "purchase", "amount",
+        "<table", "tokenNumber", "token_number", "Token No",
+    ]
+    lower = html.lower()
+    matches = sum(1 for ind in indicators if ind.lower() in lower)
+    return matches >= 2
+
+
+def _parse_html(html: str) -> list[ScrapedToken]:
+    """
+    Parse token purchase records from KPLC portal HTML.
+
+    Looks for tabular data containing token purchase information.
+    Tries multiple table structures and column name patterns.
+    """
+    soup = BeautifulSoup(html, "lxml")
+    tokens: list[ScrapedToken] = []
+
+    # Strategy 1: Look for a data table with token info
+    tokens = _parse_table(soup)
+    if tokens:
+        return tokens
+
+    # Strategy 2: Look for structured list/card items
+    tokens = _parse_cards(soup)
+    if tokens:
+        return tokens
+
+    # Strategy 3: Regex-based extraction from any text content
+    tokens = _parse_text_fallback(html)
+    return tokens
+
+
+def _parse_table(soup: BeautifulSoup) -> list[ScrapedToken]:
+    """Parse token data from HTML tables."""
+    tokens: list[ScrapedToken] = []
+
+    for table in soup.find_all("table"):
+        rows = table.find_all("tr")
+        if len(rows) < 2:
+            continue
+
+        # Detect header row and map column indices
+        header_cells = [cell.get_text(strip=True).lower() for cell in rows[0].find_all(["th", "td"])]
+        col_map = _map_columns(header_cells)
+        if not col_map:
+            # Try second row as header
+            if len(rows) > 2:
+                header_cells = [cell.get_text(strip=True).lower() for cell in rows[1].find_all(["th", "td"])]
+                col_map = _map_columns(header_cells)
+                data_start = 2
+            else:
+                continue
+        else:
+            data_start = 1
+
+        for row in rows[data_start:]:
+            cells = row.find_all("td")
+            if len(cells) < 2:
+                continue
+
+            cell_texts = [cell.get_text(strip=True) for cell in cells]
+
+            token = _row_to_token(cell_texts, col_map)
+            if token and token.token_number:
+                tokens.append(token)
+
+        if tokens:
+            break  # Found data in this table
+
+    return tokens
+
+
+def _map_columns(headers: list[str]) -> dict[str, int]:
+    """Map standard column names to their indices."""
+    col_map = {}
+    patterns = {
+        "token": ["token", "token no", "token number", "token_number", "tokenno"],
+        "units": ["units", "kwh", "unit", "kwh purchased", "units(kwh)"],
+        "amount": ["amount", "ksh", "kshs", "price", "cost", "value", "total"],
+        "date": ["date", "purchase date", "transaction date", "date/time", "time",
+                    "purchased at", "transaction date/time", "date & time"],
+        "payment_mode": ["payment", "mode", "payment mode", "pay mode", "method",
+                           "payment method", "source", "channel"],
+        "tariff": ["tariff", "tariff name", "rate"],
+    }
+
+    for key, aliases in patterns.items():
+        for i, header in enumerate(headers):
+            if any(alias in header for alias in aliases):
+                col_map[key] = i
+                break
+
+    # Require at least a token column to consider this a valid table
+    return col_map if "token" in col_map else {}
+
+
+def _row_to_token(cell_texts: list[str], col_map: dict[str, int]) -> Optional[ScrapedToken]:
+    """Convert a table row's cell texts to a ScrapedToken."""
+    def get(key: str) -> str:
+        idx = col_map.get(key)
+        return cell_texts[idx] if idx is not None and idx < len(cell_texts) else ""
+
+    token_number = get("token").strip()
+    if not token_number:
+        return None
+
+    # Clean token number: remove spaces, dashes
+    token_number = token_number.replace(" ", "").replace("-", "")
+    if not token_number.isdigit() and len(token_number) < 10:
+        return None
+
+    units = _parse_float(get("units"))
+    amount = _parse_float(get("amount"))
+    purchased_at = _parse_date(get("date"))
+    payment_mode = get("payment_mode") or None
+    tariff = get("tariff") or None
+
+    return ScrapedToken(
+        token_number=token_number,
+        units=units,
+        amount=amount,
+        payment_mode=payment_mode,
+        purchased_at=purchased_at,
+        tariff=tariff,
+    )
+
+
+def _parse_cards(soup: BeautifulSoup) -> list[ScrapedToken]:
+    """Parse token data from card/list structures (non-table layouts)."""
+    tokens: list[ScrapedToken] = []
+
+    # Look for common card/container patterns
+    cards = soup.select(".token-card, .transaction, .purchase-record, .history-item")
+    if not cards:
+        # Try generic repeating containers
+        cards = soup.find_all("div", class_=lambda c: c and any(
+            word in (c or "").lower() for word in ["token", "transaction", "purchase", "history"]
+        ))
+
+    for card in cards:
+        text = card.get_text(separator=" | ", strip=True)
+        token_number = _extract_token_from_text(text)
+        if not token_number:
+            continue
+
+        tokens.append(ScrapedToken(
+            token_number=token_number,
+            units=_parse_float(text),
+            amount=None,
+            payment_mode=None,
+            purchased_at=None,
+            tariff=None,
+        ))
+
+    return tokens
+
+
+def _parse_text_fallback(html: str) -> list[ScrapedToken]:
+    """Last-resort: try to extract token numbers from raw text using regex."""
+    import re
+
+    tokens: list[ScrapedToken] = []
+    # KPLC tokens are typically 20-digit numbers
+    pattern = r'\b(\d{20})\b'
+    seen = set()
+
+    for match in re.finditer(pattern, html):
+        num = match.group(1)
+        if num not in seen:
+            seen.add(num)
+            tokens.append(ScrapedToken(
+                token_number=num,
+                units=None,
+                amount=None,
+                payment_mode=None,
+                purchased_at=None,
+                tariff=None,
+            ))
+
+    return tokens
+
+
+def _extract_token_from_text(text: str) -> Optional[str]:
+    """Try to find a 20-digit token number in free text."""
+    import re
+    match = re.search(r'\b(\d{20})\b', text)
+    return match.group(1) if match else None
+
+
+def _parse_float(text: str) -> Optional[float]:
+    """Extract a float from text, ignoring currency symbols and commas."""
+    import re
+    cleaned = re.sub(r'[^\d.]', '', text.replace(',', ''))
+    try:
+        val = float(cleaned)
+        return val if val > 0 else None
+    except (ValueError, IndexError):
+        return None
+
+
+def _parse_date(text: str) -> Optional[datetime]:
+    """
+    Parse a date from text. Tries common date formats.
+    KPLC typically uses DD/MM/YYYY or DD-MM-YYYY formats.
+    """
+    if not text or not text.strip():
+        return None
+
+    text = text.strip()
+    formats = [
+        "%d/%m/%Y %H:%M:%S",
+        "%d/%m/%Y %H:%M",
+        "%d/%m/%Y",
+        "%d-%m-%Y %H:%M:%S",
+        "%d-%m-%Y %H:%M",
+        "%d-%m-%Y",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d %H:%M",
+        "%Y-%m-%d",
+        "%d/%m/%y %H:%M",
+        "%d/%m/%y",
+    ]
+
+    for fmt in formats:
+        try:
+            return datetime.strptime(text, fmt)
+        except ValueError:
+            continue
+
+    return None

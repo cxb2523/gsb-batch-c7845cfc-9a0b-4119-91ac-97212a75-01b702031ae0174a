@@ -1,0 +1,30 @@
+name: KPLC Cloud Token Auto-Sync
+
+on:
+  schedule:
+    # Run every 30 minutes automatically in the background
+    - cron: '*/30 * * * *'
+  workflow_dispatch:
+
+jobs:
+  sync:
+    name: Sync KPLC Meter Tokens
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Run Background Token Sync
+        env:
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+          METERS: ${{ secrets.METERS || vars.METERS }}
+        run: |
+          cd "STATIC VERSION" || true
+          node cloud-sync.js
