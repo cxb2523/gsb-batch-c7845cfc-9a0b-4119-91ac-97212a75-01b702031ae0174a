@@ -1003,4 +1003,127 @@ describe('Metafetch: Optimized Tests', () => {
 			expect(res.meta!['ld:name']).to.equal('T');
 		});
 	});
+
+	describe('Collection Status', () => {
+		let statusServer: Server;
+		let manifestHits: number;
+		const STATUS_URL = `http://127.0.0.1:${PORT + 4}`;
+
+		before((done) => {
+			manifestHits = 0;
+			const pageCounts = new Map<string, number>();
+
+			statusServer = http.createServer((req, res) => {
+				const url = req.url || '/';
+
+				if (url === '/flaky') {
+					const count = pageCounts.get(url) || 0;
+					pageCounts.set(url, count + 1);
+					if (count < 1) {
+						res.writeHead(500).end();
+					} else {
+						res.setHeader('Content-Type', 'text/html').end('<html><head><title>Recovered</title></head></html>');
+					}
+					return;
+				}
+
+				switch (url) {
+					case '/manifest-ok-page':
+						res.setHeader('Content-Type', 'text/html')
+							.end('<html><head><title>OK</title><link rel="manifest" href="/manifest.json"></head></html>');
+						return;
+					case '/manifest.json':
+						manifestHits++;
+						res.setHeader('Content-Type', 'application/manifest+json')
+							.end(JSON.stringify({ name: 'Status App' }));
+						return;
+					case '/manifest-404-page':
+						res.setHeader('Content-Type', 'text/html')
+							.end('<html><head><title>OK</title><link rel="manifest" href="/missing.json"></head></html>');
+						return;
+					case '/missing.json':
+						manifestHits++;
+						res.writeHead(404).end();
+						return;
+					case '/no-manifest':
+						res.setHeader('Content-Type', 'text/html')
+							.end('<html><head><title>Plain</title></head></html>');
+						return;
+					case '/manifest-echo-page':
+						res.setHeader('Content-Type', 'text/html')
+							.end('<html><head><link rel="manifest" href="/manifest-echo.json"></head></html>');
+						return;
+					case '/manifest-echo.json':
+						manifestHits++;
+						res.setHeader('Content-Type', 'application/manifest+json')
+							.end(JSON.stringify({
+								name: 'Echo',
+								ua: req.headers['user-agent'] || '',
+								custom: req.headers['x-custom-header'] || '',
+							}));
+						return;
+					default:
+						res.writeHead(404).end();
+				}
+			}).listen(PORT + 4, '127.0.0.1', done);
+		});
+
+		after(() => {
+			statusServer.close();
+		});
+
+		it('should record the number of attempts when a retry succeeds', async () => {
+			const res = await new Metafetch().fetch(`${STATUS_URL}/flaky`, { retries: 2, retryDelay: 10 });
+			expect(res.title).to.equal('Recovered');
+			expect(res.status).to.exist;
+			expect(res.status!.attempts).to.equal(2);
+		});
+
+		it('should record a single attempt on immediate success', async () => {
+			const res = await new Metafetch().fetch(`${STATUS_URL}/no-manifest`);
+			expect(res.status).to.exist;
+			expect(res.status!.attempts).to.equal(1);
+		});
+
+		it('should report manifest outcome as fetched on success', async () => {
+			const res = await new Metafetch().fetch(`${STATUS_URL}/manifest-ok-page`);
+			expect(res.manifest).to.be.an('object');
+			expect(res.manifest!.name).to.equal('Status App');
+			expect(res.status!.manifest).to.equal('fetched');
+		});
+
+		it('should report manifest outcome as failed without failing the main fetch', async () => {
+			const res = await new Metafetch().fetch(`${STATUS_URL}/manifest-404-page`);
+			expect(res.title).to.equal('OK');
+			expect(res.manifest).to.be.undefined;
+			expect(res.status!.manifest).to.equal('failed');
+		});
+
+		it('should report manifest outcome as not-declared when the page has no manifest link', async () => {
+			const res = await new Metafetch().fetch(`${STATUS_URL}/no-manifest`);
+			expect(res.manifest).to.be.undefined;
+			expect(res.status!.manifest).to.equal('not-declared');
+		});
+
+		it('should not request the manifest when the manifest flag is disabled', async () => {
+			const hitsBefore = manifestHits;
+			const res = await new Metafetch().fetch(`${STATUS_URL}/manifest-ok-page`, {
+				flags: { manifest: false }
+			});
+			expect(res.manifest).to.be.undefined;
+			expect(res.status).to.exist;
+			expect(res.status!.manifest).to.be.undefined;
+			expect(manifestHits).to.equal(hitsBefore);
+		});
+
+		it('should forward the user agent and custom headers to the manifest request', async () => {
+			const res = await new Metafetch().fetch(`${STATUS_URL}/manifest-echo-page`, {
+				userAgent: 'StatusUA/1.0',
+				fetch: { headers: { 'X-Custom-Header': 'custom-value' } },
+			});
+			expect(res.status!.manifest).to.equal('fetched');
+			expect(res.manifest!.ua).to.equal('StatusUA/1.0');
+			expect(res.manifest!.custom).to.equal('custom-value');
+		});
+	});
 });

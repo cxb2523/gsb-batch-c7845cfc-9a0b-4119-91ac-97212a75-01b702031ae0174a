@@ -2,6 +2,25 @@ import { parseHTML } from 'linkedom';
 import type { Document } from 'linkedom';
 
 /**
+ * The outcome of the Web App Manifest sub-request.
+ * - `not-declared`: the page did not declare a manifest link.
+ * - `fetched`: the manifest was fetched and parsed successfully.
+ * - `failed`: the page declared a manifest but fetching/parsing it failed.
+ */
+export type ManifestOutcome = 'not-declared' | 'fetched' | 'failed';
+
+/**
+ * Collection status describing how a fetch was performed.
+ * Each field is only present when the corresponding information exists.
+ */
+export interface MetafetchStatus {
+	/** Number of attempts made to fetch the main page (including the successful one). */
+	attempts?: number;
+	/** Outcome of the manifest sub-request. Absent when the manifest flag is disabled. */
+	manifest?: ManifestOutcome;
+}
+
+/**
  * The shape of the response object returned by Metafetch.
  */
 export interface MetafetchResponse {
@@ -28,6 +47,7 @@ export interface MetafetchResponse {
 	microdata?: Record<string, any>[];
 	rdfa?: Record<string, any>[];
 	manifest?: Record<string, any>;
+	status?: MetafetchStatus;
 }
 
 type FlagOptions = {
@@ -276,10 +296,16 @@ export class Metafetch {
 				this._extractMicrodata(document, result, flags);
 				this._extractRdfa(document, result, flags);
 
-				await this._extractManifest(document, result, flags, {
+				const manifestOutcome = await this._extractManifest(document, result, flags, {
 					userAgent: options.userAgent || this.#userAgent,
 					headers: options.fetch?.headers as Record<string, string>
 				});
+
+				const status: MetafetchStatus = { attempts: attempt + 1 };
+				if (manifestOutcome !== undefined) {
+					status.manifest = manifestOutcome;
+				}
+				result.status = status;
 
 				if (flags.headers) {
 					result.headers = responseHeaders;
@@ -792,14 +818,14 @@ export class Metafetch {
 		if (items.length > 0) result.rdfa = items;
 	}
 
-	private async _extractManifest(doc: Document, result: MetafetchResponse, flags: ResolvedFlags, options: { userAgent: string, headers?: Record<string, string> }) {
-		if (!flags.manifest) return;
+	private async _extractManifest(doc: Document, result: MetafetchResponse, flags: ResolvedFlags, options: { userAgent: string, headers?: Record<string, string> }): Promise<ManifestOutcome | undefined> {
+		if (!flags.manifest) return undefined;
 
 		const manifestLink = doc.querySelector<HTMLLinkElement>('link[rel="manifest"]');
-		if (!manifestLink) return;
+		if (!manifestLink) return 'not-declared';
 
 		const href = manifestLink.getAttribute('href');
-		if (!href) return;
+		if (!href) return 'not-declared';
 
 		const baseUrl = result.url || result.originalURL!;
 		const manifestUrl = new URL(href, baseUrl).href;
@@ -815,9 +841,12 @@ export class Metafetch {
 			if (response.ok) {
 				const json = await response.json();
 				result.manifest = json;
+				return 'fetched';
 			}
+			return 'failed';
 		} catch (e) {
-			// Silent fail for manifest fetching
+			// Manifest failures must not affect the main result.
+			return 'failed';
 		}
 	}
 }
