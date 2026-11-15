@@ -68,8 +68,11 @@ class DownloadHandler(object):
 
     def _fetch_dynamic(self, request, url):
         self.logger.info("processing dynamic page %s", url)
+        # acquire outside try/finally so that only a permit actually held by
+        # this call can ever be released
+        self.driver_sem.acquire()
+        acquired = True
         try:
-            self.driver_sem.acquire()
             if request.cookiejar:
                 cookies = _get_cookies_from_cookiejar(request.cookiejar)
                 cookies = self._covert_cookies_to_dict(cookies)
@@ -89,10 +92,10 @@ class DownloadHandler(object):
             url = self.driver.current_url
             html = self.driver.page_source
 
-            # generate cookies
+            # generate cookies. cookies are only collected after every browser
+            # action above has succeeded, so a failure never produces a
+            # half-baked cookiejar for the request.
             all_cookies = self.driver.get_cookies()
-            self.driver.delete_all_cookies()
-            self.driver_sem.release()
 
             all_cookies = self._to_byte(all_cookies)
             cookies = [self._make_cookie(**d) for d in all_cookies]
@@ -106,7 +109,27 @@ class DownloadHandler(object):
             raise TimeoutException(e.message)
         except Exception as e:
             self.logger.error("download error: %s", str(e), exc_info=True)
-            raise e
+            raise
+        finally:
+            # always wipe cookies left in the shared browser by this request,
+            # even when the page load or a browser action failed
+            self._clear_driver_cookies()
+            # exactly one release per successful acquire, on every path
+            if acquired:
+                self.driver_sem.release()
+                acquired = False
+
+    def _clear_driver_cookies(self):
+        """Remove every cookie left in the shared browser.
+
+        Failures while clearing cookies must not mask the original
+        download error, so they are swallowed after being logged.
+        """
+        try:
+            self.driver.delete_all_cookies()
+        except Exception as e:
+            self.logger.error("clear driver cookies error: %s",
+                              str(e), exc_info=True)
 
     def _removed_first_dot_in_front_of_domain(self, cookies):
         for cookie in cookies:
