@@ -30,12 +30,17 @@ class Logger:
         formatter = logging.Formatter(
                 "%(asctime)s - %(levelname)s - %(message)s")
         my_logger = logging.getLogger('TorSpider')
-        os.makedirs(os.path.join(script_dir, 'logs'), exist_ok=True)
-        filehandler = TimedRotatingFileHandler(
-            os.path.join(script_dir, 'logs', 'TorSpider.log'),
-            when='midnight', backupCount=7, interval=1)
-        filehandler.setFormatter(formatter)
-        my_logger.addHandler(filehandler)
+        try:
+            os.makedirs(os.path.join(script_dir, 'logs'), exist_ok=True)
+            filehandler = TimedRotatingFileHandler(
+                os.path.join(script_dir, 'logs', 'TorSpider.log'),
+                when='midnight', backupCount=7, interval=1)
+            filehandler.setFormatter(formatter)
+            my_logger.addHandler(filehandler)
+        except Exception:
+            # Logging to a file is best-effort (for example, when the script
+            # directory is read-only). The crawler should still run.
+            pass
         if log_to_console:
             consolehandler = logging.StreamHandler()
             consolehandler.setFormatter(formatter)

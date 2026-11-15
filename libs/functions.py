@@ -10,8 +10,13 @@ from urllib.parse import urlsplit, urlunsplit
 agent = 'Mozilla/5.0 (Windows NT 6.1; rv:52.0) Gecko/20100101 Firefox/52.0'
 
 # Just to prevent some SSL errors.
-requests.packages.urllib3.util.ssl_.DEFAULT_CIPHERS += \
-    ':ECDHE-ECDSA-AES128-GCM-SHA256'
+# Newer urllib3 releases no longer expose DEFAULT_CIPHERS; skip the tweak
+# when it is unavailable instead of failing at import time.
+try:
+    requests.packages.urllib3.util.ssl_.DEFAULT_CIPHERS += \
+        ':ECDHE-ECDSA-AES128-GCM-SHA256'
+except AttributeError:
+    pass
 
 
 def merge_titles(title1, title2):
@@ -29,8 +34,8 @@ def merge_urls(url1, url2):
     # Split up url1 and url into their component parts.
     (ascheme, anetloc, apath, aquery, afragment) = urlsplit(url1)
     (uscheme, unetloc, upath, uquery, ufragment) = urlsplit(url2)
-    scheme = ascheme if ascheme is not '' else uscheme
-    netloc = anetloc if anetloc is not '' else unetloc
+    scheme = ascheme if ascheme != '' else uscheme
+    netloc = anetloc if anetloc != '' else unetloc
     try:
         if apath[0] == '/':
             # The path starts at root.
@@ -86,9 +91,24 @@ def get_tor_session():
 
 def get_type(headers):
     # What's the content type of the page we're checking?
+    # Header lookups are case-insensitive where the mapping supports it, with a
+    # manual fallback for plain dicts used by tests or by unusual transports.
+    value = None
     try:
-        return headers['Content-Type'].split('/')[0]
-    except Exception as e:
+        value = headers['Content-Type']
+    except Exception:
+        try:
+            for key, item in headers.items():
+                if str(key).lower() == 'content-type':
+                    value = item
+                    break
+        except Exception:
+            return None
+    if value is None:
+        return None
+    try:
+        return value.split('/')[0].strip().lower()
+    except Exception:
         return None
 
 

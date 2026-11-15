@@ -229,10 +229,10 @@ def get_links(data, url):
             # Split the link into its component parts.
             (scheme, netloc, path, query, fragment) = urlsplit(link)
             # Fill in empty schemes.
-            scheme = 'http' if scheme is '' else scheme
+            scheme = 'http' if scheme == '' else scheme
             # Fill in empty paths.
-            path = '/' if path is '' else path
-            if netloc is '' and '.onion' in path.split('/')[0]:
+            path = '/' if path == '' else path
+            if netloc == '' and '.onion' in path.split('/')[0]:
                 # The urlparser mistook the domain as part of the path.
                 netloc = path.split('/')[0]
                 try:
@@ -240,7 +240,7 @@ def get_links(data, url):
                 except Exception as e:
                     path = '/'
             # Fill in empty domains.
-            netloc = domain if netloc is '' else netloc
+            netloc = domain if netloc == '' else netloc
             fragment = ''
             if '.onion' not in netloc or '.onion.' in netloc:
                 # We are only interested in links to other .onion domains,
