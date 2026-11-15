@@ -1,0 +1,7 @@
+node_modules
+coverage
+log.txt
+pages.json
+*.pages.json
+*.png
+*.sitemap.json

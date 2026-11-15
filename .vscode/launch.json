@@ -1,0 +1,26 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "type": "node",
+            "request": "launch",
+            "name": "Launch Program",
+            "args": [
+                "-u", // url
+                "https://frankmtaylor.com/sitemap.xml",
+                "-l", // limit. raise or lower for more pages AND screenshots
+                "10",
+                "-c", // screengrabs. 
+                "-s", // the selector
+                "h1"
+            ],
+            "skipFiles": [
+                "<node_internals>/**"
+            ],
+            "program": "${workspaceFolder}/cli.js"
+        }
+    ]
+}
