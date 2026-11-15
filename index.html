@@ -385,7 +385,7 @@
                         style="flex:1;min-width:200px;padding:8px 12px;font-size:13px;border-radius:8px">
                     <button class="btn okc" style="padding:8px 14px;font-size:12px" onclick="browserGo()"><i
                             data-lucide="arrow-right"></i> Go</button>
-                    <button class="btn" style="padding:8px 14px;font-size:12px" onclick="browserScrape()"><i
+                    <button class="btn" id="browser-scrape-btn" style="padding:8px 14px;font-size:12px" onclick="browserScrape()" title="Extract title and visible text of the loaded page into /workspace/scrape_result.txt"><i
                             data-lucide="scan-text"></i> Scrape</button>
                     <button class="btn primary" style="padding:8px 14px;font-size:12px" onclick="browserScreenshot()"><i
                             data-lucide="camera"></i> Screenshot</button>
@@ -437,14 +437,14 @@
     </div>
 
     <div id="toast-container" class="toast-container"></div>
-    <script src="js/core/state.js?v=4" defer></script>
-    <script src="js/core/vfs.js?v=4" defer></script>
-    <script src="js/core/webllm.js?v=4" defer></script>
-    <script src="js/core/memory.js?v=4" defer></script>
-    <script src="js/core/ai.js?v=4" defer></script>
-    <script src="js/core/telegram.js?v=4" defer></script>
-    <script src="js/ui/app.js?v=4" defer></script>
-    <script src="js/ui/browser.js?v=4" defer></script>
+    <script src="js/core/state.js?v=5" defer></script>
+    <script src="js/core/vfs.js?v=5" defer></script>
+    <script src="js/core/webllm.js?v=5" defer></script>
+    <script src="js/core/memory.js?v=5" defer></script>
+    <script src="js/core/ai.js?v=5" defer></script>
+    <script src="js/core/telegram.js?v=5" defer></script>
+    <script src="js/ui/app.js?v=5" defer></script>
+    <script src="js/ui/browser.js?v=5" defer></script>
     <script src="js/global.js" defer></script>
 </body>
 

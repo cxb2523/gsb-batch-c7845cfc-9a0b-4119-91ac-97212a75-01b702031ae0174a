@@ -4,6 +4,19 @@ All notable changes to **KREASYS** are documented in this file.
 
 ---
 
+## [0.4.1] - 2026-11-16
+
+### Changed
+- **Page Scrape is now a task with an explicit outcome** (`js/ui/browser.js`):
+  - `browserScrape()` always terminates in `success`, `degraded`, or `failed`. Same-origin pages are read directly; when the same-origin policy blocks the document, the panel first tries a script executed inside the iframe, then a CORS `fetch` + `DOMParser` fallback whose `Note` header states the text came from the network copy, not the rendered frame.
+  - `/workspace/scrape_result.txt` is rewritten on every run — including failures — with an outcome header containing the source URL, title, content length and ISO scrape time. A failure overwrites a previous success so stale data can no longer be mistaken for a fresh scrape.
+  - Partial data is preserved on failure (the URL and, when known, the title), alongside a `Failure Reason` line describing what each fallback reported.
+  - A scrape already in progress rejects new triggers with an "in progress" console line, system log entry and toast; the Scrape button is disabled while a run is active, so concurrent writes can no longer overwrite each other.
+  - Each run emits exactly one matching pair of records: a `[scrape]` line in the Browser panel console and a `SYS`/`ERR` entry in the system log, both tagged with the outcome.
+- **`index.html`**: the Scrape button gained `id="browser-scrape-btn"` and a tooltip describing the destination file. Existing buttons and the `<browser_open>` / `<browser_js>` / `<browser_screenshot>` AI entry points are unchanged; the script cache-buster was bumped to `?v=5`.
+
+---
+
 ## [0.4.0] - 2026-03-08
 
 ### Added

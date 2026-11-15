@@ -1,4 +1,4 @@
-const CACHE_NAME = 'kreasys-v2';
+const CACHE_NAME = 'kreasys-v3';
 const STATIC_ASSETS = [
     '/',
     '/index.html',

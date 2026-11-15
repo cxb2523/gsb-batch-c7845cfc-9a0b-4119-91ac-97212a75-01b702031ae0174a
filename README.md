@@ -204,7 +204,7 @@ Provides the Browser tab UI logic and exposes functions callable by the AI via `
 **Key functions:**
 - `browserGo()` — Navigates to URL or renders HTML blob in the `#browser-frame` iframe.
 - `browserRunJs()` — Evaluates code from `#browser-js-in` in the iframe's `contentWindow`, logs result.
-- `browserScrape()` — Extracts `document.title` + `body.innerText` from the iframe and writes to `/workspace/scrape_result.txt`.
+- `browserScrape()` — Runs one scrape task that always ends in exactly one of three outcomes: `success` (same-origin DOM read), `degraded` (cross-origin fallback via a script executed inside the iframe, then a CORS `fetch` + `DOMParser`; the `Method`/`Note` header lines state which, and the fetch path is flagged as the network copy rather than the rendered frame), or `failed`. The outcome, source URL, title, content length and ISO timestamp are written to `/workspace/scrape_result.txt`, replacing any previous result so a failure never leaves stale-looking data behind. Re-invoking while a scrape is still running is rejected with an "in progress" notice instead of racing the write.
 - `browserScreenshot(outPath, tgChatId)` — Captures the iframe using `html2canvas`, saves to VFS, and optionally dispatches to Telegram via `tgSendDoc`.
 - `browserOpenUrl(url)` — Public hook called by the `<browser_open>` tag parser in `vfs.js`; activates the Browser tab automatically.
 
