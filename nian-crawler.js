@@ -100,7 +100,10 @@ let nc_shell;
 
 let nc_dream_object;
 let nc_images_set;
+let nc_comment_status_map;
+let nc_image_status_map;
 
+const NC_REQUEST_TIMEOUT = 30000;
 
 
 
@@ -144,30 +147,76 @@ function nc_dream_list() {
 
 
 
+function nc_xhr_reason(xhr) {
+	if (!xhr.status || xhr.status === 0) {
+		return 'network error';
+	}
+	return 'HTTP ' + xhr.status;
+};
+
+
+function nc_image_fail(stepnum, num, path, reason) {
+	// 保留现有的外链下载兜底
+	nc_cors_image('http://img.nian.so/step/' + path);
+
+	// 该图片同时计入失败明细，不能当作已打包成功
+	let status = nc_image_status_map[stepnum];
+	status.failedImages.push({ path: path, reason: reason });
+
+	vm.log = 'image ' + num + ' of step ' + stepnum + ' failed: ' + reason;
+};
+
+function nc_images_finish_step(stepnum) {
+	let status = nc_image_status_map[stepnum];
+
+	// 仅不完整的步骤追加 imageStatus，完整步骤不出现多余字段
+	if (status.fetched < status.expected || status.failedImages.length > 0) {
+		nc_dream_object.steps[stepnum].imageStatus = {
+			complete: false,
+			expected: status.expected,
+			fetched: status.fetched,
+			failedImages: status.failedImages
+		};
+	}
+};
+
+function nc_images_continue(stepnum, nextnum) {
+	if (nextnum < nc_dream_object.steps[stepnum].images.length) {
+		nc_images_page(stepnum, nextnum);
+	}
+	else {
+		nc_images_finish_step(stepnum);
+		nc_images_entry(stepnum + 1);
+	}
+};
+
 function nc_images_page(stepnum, num) {
+	let path = nc_dream_object.steps[stepnum].images[num].path;
 	let xhr = new XMLHttpRequest();
+
   xhr.onload = () => {
-  	vm.log = 'image ' + num + ' of step ' + stepnum + ' downloaded';
-  	nc_images_set[nc_dream_object.steps[stepnum].images[num].path] = xhr.response;
-  	if(num + 1 < nc_dream_object.steps[stepnum].images.length) {
-  		nc_images_page(stepnum, num + 1);
+  	if (xhr.status >= 200 && xhr.status < 300 && xhr.response) {
+  		vm.log = 'image ' + num + ' of step ' + stepnum + ' downloaded';
+  		nc_images_set[path] = xhr.response;
+  		nc_image_status_map[stepnum].fetched ++;
   	}
   	else {
-  		nc_images_entry(stepnum + 1);
+  		nc_image_fail(stepnum, num, path, nc_xhr_reason(xhr));
   	}
+  	nc_images_continue(stepnum, num + 1);
   };
   xhr.onerror = () => {
-  	nc_cors_image('http://img.nian.so/step/' + nc_dream_object.steps[stepnum].images[num].path);
-  	if(nc_dream_object.steps[stepnum].images.length > 1) {
-  		nc_images_page(stepnum, 1);
-  	}
-  	else {
-  		nc_images_entry(stepnum + 1);
-  	}
-  }
+  	nc_image_fail(stepnum, num, path, 'network error');
+  	nc_images_continue(stepnum, num + 1);
+  };
+  xhr.ontimeout = () => {
+  	nc_image_fail(stepnum, num, path, 'timeout');
+  	nc_images_continue(stepnum, num + 1);
+  };
 
   xhr.responseType = 'blob';
-  xhr.open('GET', 'http://img.nian.so/step/' + nc_dream_object.steps[stepnum].images[num].path + '!step');
+  xhr.timeout = NC_REQUEST_TIMEOUT;
+  xhr.open('GET', 'http://img.nian.so/step/' + path + '!step');
   xhr.send();
 };
 
@@ -182,34 +231,71 @@ function nc_images_entry(stepnum) {
 		return;
 	}
 
+	let step = nc_dream_object.steps[stepnum];
+	nc_image_status_map[stepnum] = {
+		expected: step.images.length,
+		fetched: 0,
+		failedImages: []
+	};
+
+	let path = step.image;
 	let xhr = new XMLHttpRequest();
+
   xhr.onload = () => {
-  	vm.log = 'image 0 of step ' + stepnum + ' downloaded';
-  	nc_images_set[nc_dream_object.steps[stepnum].image] = xhr.response;
-  	if(nc_dream_object.steps[stepnum].images.length > 1) {
-  		nc_images_page(stepnum, 1);
+  	if (xhr.status >= 200 && xhr.status < 300 && xhr.response) {
+  		vm.log = 'image 0 of step ' + stepnum + ' downloaded';
+  		nc_images_set[path] = xhr.response;
+  		nc_image_status_map[stepnum].fetched ++;
   	}
   	else {
-  		nc_images_entry(stepnum + 1);
+  		nc_image_fail(stepnum, 0, path, nc_xhr_reason(xhr));
   	}
+  	nc_images_continue(stepnum, 1);
   };
   xhr.onerror = () => {
-  	nc_cors_image('http://img.nian.so/step/' + nc_dream_object.steps[stepnum].image);
-  	if(nc_dream_object.steps[stepnum].images.length > 1) {
-  		nc_images_page(stepnum, 1);
-  	}
-  	else {
-  		nc_images_entry(stepnum + 1);
-  	}
-  }
+  	nc_image_fail(stepnum, 0, path, 'network error');
+  	nc_images_continue(stepnum, 1);
+  };
+  xhr.ontimeout = () => {
+  	nc_image_fail(stepnum, 0, path, 'timeout');
+  	nc_images_continue(stepnum, 1);
+  };
 
   xhr.responseType = 'blob';
-  xhr.open('GET', 'http://img.nian.so/step/' + nc_dream_object.steps[stepnum].image + '!step');
+  xhr.timeout = NC_REQUEST_TIMEOUT;
+  xhr.open('GET', 'http://img.nian.so/step/' + path + '!step');
   xhr.send();
 };
 
 
 
+
+function nc_comments_fail(stepnum, page, reason) {
+	let status = nc_comment_status_map[stepnum];
+	status.failedPages.push({ page: page, reason: reason });
+
+	vm.log = 'comments page ' + page + ' of step ' + stepnum + ' failed: ' + reason;
+
+	// 停止该步骤后续翻页，已取评论保留在 comments 中不动
+	nc_comments_finish_step(stepnum);
+
+	// 继续后续步骤，不让整个抓取中断
+	nc_comments_entry(stepnum + 1);
+};
+
+function nc_comments_finish_step(stepnum) {
+	let status = nc_comment_status_map[stepnum];
+
+	// 仅不完整的步骤追加 commentStatus，完整步骤不出现多余字段
+	if (status.fetched < status.expected || status.failedPages.length > 0) {
+		nc_dream_object.steps[stepnum].commentStatus = {
+			complete: false,
+			expected: status.expected,
+			fetched: status.fetched,
+			failedPages: status.failedPages
+		};
+	}
+};
 
 function nc_comments_page(stepnum, page, totalNum) {
 	if (totalNum <= nc_dream_object.steps[stepnum].comments.length) {
@@ -220,12 +306,26 @@ function nc_comments_page(stepnum, page, totalNum) {
 
 	let xhr = new XMLHttpRequest();
   xhr.onload = () => {
-  	nc_dream_object.steps[stepnum].comments = nc_dream_object.steps[stepnum].comments.concat(xhr.response.data.comments);
+  	if (xhr.status >= 200 && xhr.status < 300 && xhr.response
+  			&& xhr.response.data && Array.isArray(xhr.response.data.comments)) {
+  		nc_dream_object.steps[stepnum].comments = nc_dream_object.steps[stepnum].comments.concat(xhr.response.data.comments);
+  		nc_comment_status_map[stepnum].fetched = nc_dream_object.steps[stepnum].comments.length;
 
-  	nc_comments_page(stepnum, page + 1, totalNum);
+  		nc_comments_page(stepnum, page + 1, totalNum);
+  	}
+  	else {
+  		nc_comments_fail(stepnum, page, nc_xhr_reason(xhr));
+  	}
+  };
+  xhr.onerror = () => {
+  	nc_comments_fail(stepnum, page, 'network error');
+  };
+  xhr.ontimeout = () => {
+  	nc_comments_fail(stepnum, page, 'timeout');
   };
 
   xhr.responseType = 'json';
+  xhr.timeout = NC_REQUEST_TIMEOUT;
   xhr.open('GET', 'http://api.nian.so/step/' + nc_dream_object.steps[stepnum].sid + '/comments?page=' + page + '&uid=' + nc_uid + '&shell=' + nc_shell, true);
   xhr.send();
 };
@@ -241,17 +341,40 @@ function nc_comments_entry(stepnum) {
 		return;
 	}
 
+	let step = nc_dream_object.steps[stepnum];
+	let totalNum = parseInt(step.comments);
+
+	nc_comment_status_map[stepnum] = {
+		expected: totalNum,
+		fetched: 0,
+		failedPages: []
+	};
+
 	let xhr = new XMLHttpRequest();
   xhr.onload = () => {
-  	let totalNum = parseInt(nc_dream_object.steps[stepnum].comments);
+  	if (xhr.status >= 200 && xhr.status < 300 && xhr.response
+  			&& xhr.response.data && Array.isArray(xhr.response.data.comments)) {
+  		// 首页成功后 comments 仍按原结构从计数字符串切换为评论数组
+  		step.comments = xhr.response.data.comments;
+  		nc_comment_status_map[stepnum].fetched = step.comments.length;
 
-  	nc_dream_object.steps[stepnum].comments = xhr.response.data.comments;
-
-		nc_comments_page(stepnum, 2, totalNum);
+  		nc_comments_page(stepnum, 2, totalNum);
+  	}
+  	else {
+  		// 首页失败：保留原 comments 字段，记录失败，不再翻页
+  		nc_comments_fail(stepnum, 1, nc_xhr_reason(xhr));
+  	}
+  };
+  xhr.onerror = () => {
+  	nc_comments_fail(stepnum, 1, 'network error');
+  };
+  xhr.ontimeout = () => {
+  	nc_comments_fail(stepnum, 1, 'timeout');
   };
 
   xhr.responseType = 'json';
-  xhr.open('GET', 'http://api.nian.so/step/' + nc_dream_object.steps[stepnum].sid + '/comments?page=' + 1 + '&uid=' + nc_uid + '&shell=' + nc_shell, true);
+  xhr.timeout = NC_REQUEST_TIMEOUT;
+  xhr.open('GET', 'http://api.nian.so/step/' + step.sid + '/comments?page=' + 1 + '&uid=' + nc_uid + '&shell=' + nc_shell, true);
   xhr.send();
 };
 
@@ -281,6 +404,8 @@ function nc_steps(dreamid, page) {
 function nc_dream(dreamid) {
 	nc_dream_object = {};
 	nc_images_set = {};
+	nc_comment_status_map = {};
+	nc_image_status_map = {};
 
 	let xhr = new XMLHttpRequest();
   xhr.onload = () => {

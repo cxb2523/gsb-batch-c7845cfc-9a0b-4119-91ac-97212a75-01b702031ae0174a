@@ -31,3 +31,21 @@ A web crawler for api.nian.so
 第二步：把之前下载的记本数据解压至和index.html同一文件夹下。（举个例子：dist和index.html在C:\Users\Heping\Desktop\nian-viewer\中，那么你的记本数据就应解压至nian-viewer下。images文件夹和content.json文件应在C:\Users\Heping\Desktop\nian-viewer\你的记本文件夹\ 中）
 
 第三步：用浏览器打开index.html，输入记本文件夹的名字后回车，数据将会加载出来。如要切换记本，在左下角的输入框中输入记本名称并回车。（你可以更改记本文件夹的名称以便输入）
+
+# 部分抓取失败时如何核对 content.json
+
+抓取过程中单个评论页或单张图片失败不会中断整个下载，打包始终可以进行。失败明细只追加在 content.json 内对应步骤（steps 数组元素）的新增字段中，dream、steps、comments 的原有结构和读取方式不变；完整的步骤不会出现这些字段。
+
+- commentStatus（仅评论抓取不完整的步骤出现）
+  - complete: false
+  - expected：该步骤评论期望总条数（原 comments 计数字段的值）
+  - fetched：实际已取到的评论条数，已取评论仍保留在 comments 数组中
+  - failedPages：失败页码及原因数组，每项形如 { "page": 2, "reason": "network error" }；某页失败后该步骤不再继续翻页
+- imageStatus（仅图片抓取不完整的步骤出现）
+  - complete: false
+  - expected：该步骤期望图片张数
+  - fetched：实际已打包进 images 文件夹的张数
+  - failedImages：失败图片路径及原因数组，每项形如 { "path": "xxx.jpg", "reason": "HTTP 500" }；失败图片仍会触发外链下载兜底，但不会计入 fetched，也不会出现在 zip 的 images 文件夹中
+
+reason 可能为 "network error"（网络层失败）、"timeout"（请求超时）或 "HTTP <状态码>"（服务器返回错误状态）。
+
