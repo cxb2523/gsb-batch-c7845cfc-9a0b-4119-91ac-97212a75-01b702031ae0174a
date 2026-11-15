@@ -1,0 +1,747 @@
+#!/usr/bin/env python3.10
+# coding=utf-8
+
+import os, sys
+import logging
+import click as cli # command line interface
+import pandas as pd
+import sqlalchemy
+from sqlalchemy.pool import NullPool
+import yaml
+from urllib.parse import urlparse
+from urllib.parse import parse_qsl
+import random
+import numpy as np
+import urllib
+import json
+import psutil
+
+
+special_sources = ['http://','https://','ftp://','google+sheets', 'microsoft+graph', 'bigquery://']
+
+def parse_url_params(url):
+    result = dict()
+
+    for key, value in parse_qsl(url, keep_blank_values=True):
+        value_lower = value.lower()
+
+        if value_lower == 'true':
+            result[key] = True
+        elif value_lower == 'false':
+            result[key] = False
+        elif value_lower in ('none', 'null'):
+            result[key] = None
+        elif value == '':
+            result[key] = False
+        else:
+            try:
+                result[key] = int(value)
+            except ValueError:
+                try:
+                    result[key] = float(value)
+                except ValueError:
+                    result[key] = value
+
+    return result
+
+def colnum_string(n):
+    '''
+    >>> colnum_string(28)
+    >>> AB
+    '''
+    string = ""
+    while n > 0:
+        n, remainder = divmod(n - 1, 26)
+        string = chr(65 + remainder) + string
+    return string
+
+def api_call(method, url, body=None, **kwargs):
+    resource = kwargs.get('resource', None)
+    access_token = kwargs.get('access_token', None)
+    http_headers = {'Authorization':  access_token,
+                    'Accept': 'application/json',
+                    'Content-Type': 'application/json'}
+    endpoint = urllib.parse.urljoin(resource,url.lstrip('/'))
+    logging.debug(f'endpoint: {endpoint}')
+    return method(endpoint, headers=http_headers, json=body)
+
+def spreadsheet_open(workbook_ref, credentials_path):
+    """
+    Authorize google client and open spreadsheet by title, id, or url
+
+    """
+    pygsheets = __import__('pygsheets')
+    # command option --google_api_key
+    credentials_path = os.path.expanduser(credentials_path)
+    if os.path.isfile(credentials_path):
+        log.debug(f'google api key found <{credentials_path}>')
+    else:
+        log.error(f'google api key file not found <{credentials_path}>')
+        sys.exit(1)
+
+    # To prevent email printing by pygsheets
+    sys.stdout = open(os.devnull, "w")
+    try:
+        gclient = pygsheets.authorize(service_file=credentials_path)
+    except Exception as e:
+        log.error(e)
+        sys.exit(1)
+    # Switch to normal
+    sys.stdout = sys.__stdout__
+    try:
+        if workbook_ref.startswith(('http://', 'https://')):
+            workbook = gclient.open_by_url(workbook_ref)
+        else:
+            try:
+                workbook = gclient.open(workbook_ref)
+            except pygsheets.exceptions.SpreadsheetNotFound:
+                try:
+                    workbook = gclient.open_by_key(workbook_ref)
+                except Exception as e:
+                    http_status = getattr(getattr(e, 'resp', None), 'status', None)
+                    if not isinstance(e, pygsheets.exceptions.SpreadsheetNotFound) and str(http_status) not in ('400', '404'):
+                        raise
+                    raise pygsheets.exceptions.SpreadsheetNotFound(f'Spreadsheet not found <{workbook_ref}>')
+    except pygsheets.exceptions.SpreadsheetNotFound:
+        log.error(f'SpreadsheetNotFound: share spreadsheet <{workbook_ref}> with service email')
+        sys.exit(1)
+    except Exception as e:
+        log.error(e)
+        sys.exit(1)
+    return workbook
+
+def msgraph_open(credentials_path):
+    """
+    Authorize microsoft graph api client and get token
+
+    """
+    msal = __import__('msal')
+    # command option --msgraph_api_key
+    credentials_path = os.path.expanduser(credentials_path)
+    if os.path.isfile(credentials_path):
+        log.debug(f'graph api key found <{credentials_path}>')
+    else:
+        log.error(f'graph api key file not found <{credentials_path}>')
+        sys.exit(1)
+
+    # read config from yaml file
+    with open(credentials_path, 'r') as config_file:
+        cfg = yaml.safe_load(config_file)
+
+    # create the MSAL confidential client application and require token
+    app = msal.ConfidentialClientApplication(
+        client_id = cfg['client_id'], 
+        authority=cfg['authority'], 
+        client_credential=cfg['client_credential']
+        )
+    token_response = None
+    token_response = app.acquire_token_for_client(scopes=cfg['scopes'])
+    if token_response.get('error_description'):
+        logging.error('microsoft graph api error: {}'.
+                      format(token_response['error_description']))
+        sys.exit(1)
+    return token_response,cfg
+
+def get_source(source):
+    if '://' in source:
+        result = source
+        log.debug(f'source defined like a connection string <{source}>')
+    else:
+        cfg = get_config()
+        if cfg.get(source):
+            s = cfg.get(source)
+            if isinstance(s, list):
+                result = random.choice(s)
+                log.debug(f"source defined like a random choice by alias <{source}>")
+            else:
+                result = s
+                log.debug(f'source defined by alias from config file <{source}>')
+        else:
+            if '.' in source:
+                log.error(f'file name not found <{source}>')
+            else:
+                log.error(f'source alias not found <{source}>')
+            sys.exit(1)
+    return result
+
+def natural_size(num):
+    if num == 0: return "0 B"
+    units = ["B", "KiB", "MiB", "GiB", "TiB", "PiB", "EiB", "ZiB", "YiB"]
+    base = 1024
+    i = 0
+    abs_num = abs(num)
+    while abs_num >= base and i < len(units) - 1:
+        abs_num /= base
+        i += 1
+    if i == 0:
+        formatted_num = str(num)
+    else:
+        formatted_num = f"{abs_num * (1 if num >= 0 else -1):.1f}"
+    return f"{formatted_num} {units[i]}"
+
+def dataframe_size_info(df):
+    assert isinstance(df, pd.DataFrame), type(df)
+    if df.empty:
+        memory_usage = 0  # Set to zero if the DataFrame is empty
+    else:
+        memory_usage = df.memory_usage(index=True, deep=True).sum()
+    volume = natural_size(memory_usage)
+    return f'{volume} of data received in amount of {df.shape[0]} rows, {df.shape[1]} columns, {df.size} cells'
+
+def get_config():
+    """
+    Detect and get etl config
+
+    """
+    config_candidates = [
+        (os.path.expanduser(path), source)
+        for path, source in filter(lambda x: x[0], (
+            (options.config_path,            'cli option --config-path'),  # --config-path CLI option
+            (os.environ.get('ETL_CONFIG'),   'env ETL_CONFIG'),            # ETL_CONFIG env variable
+            ('~/.config/etl/.etl.yml',       'xdg hidden'),                # XDG hidden
+            ('~/.config/etl/etl.yml',        'xdg'),                       # XDG
+            ('~/.etl.yml',                   'home hidden'),                # home hidden
+            ('~/etl.yml',                    'home'),                       # home
+        ))
+    ]
+    result = next(((p, s) for p, s in config_candidates if os.path.exists(p)), None)
+    if not result:
+        log.error('config file not found')
+        sys.exit(1)
+    config_path, config_source = result
+    log.debug(f'config file found via {config_source} <{config_path}>')
+
+    with open(config_path, 'r') as config_file:
+        cfg = yaml.safe_load(config_file)
+        # expand paths in config values
+        for a, s in cfg.items():
+            if isinstance(s, str):
+                s = os.path.expandvars(s)
+                if '~/' in s:
+                    home = os.path.expanduser('~')
+                    s = s.replace('~/', home + '/')
+                cfg[a] = s
+        # log.debug(f'config contains: {cfg}')
+    return cfg
+
+def get_query(query, extra_args):
+    try:
+        if query.endswith(('.sql', '.ddl')):
+            if os.path.isfile(query):
+                sql_file_path = query.replace("\r", "")
+                sql = open(sql_file_path, 'r', encoding='utf-8')
+                result = " ".join(sql.readlines())
+            else:
+                log.error(f'query file not found <{query}>')
+                sys.exit(1)
+        else:
+            result = query
+        if extra_args:
+            query_args = {
+                key: str(value).format(**extra_args)
+                for key, value in extra_args.items()
+            }
+            result = str(result).format(**query_args)
+        result = sqlalchemy.text(result)
+        log.debug(f'sql:\n{result}')
+        return result
+    except Exception as e:
+        log.error(e)
+
+def create_dir(path):
+    # manage folders if not exist
+    dir = os.path.dirname(path)
+    if dir and not os.path.exists(dir):
+        os.makedirs(dir)
+        log.info(f'folder created <{dir}>')
+
+@cli.command(context_settings=dict(ignore_unknown_options=True, allow_extra_args=True))
+@cli.version_option(package_name="etl")
+@cli.pass_context
+@cli.option('--source', required=False, type=str, help="Source for extracting data. Database name, csv or xls filename. Defaults to stdin if not provided.")
+@cli.option('--extract', default='', help="Sql file name for extracting data from database")
+@cli.option('--execute', default='', help="Sql file name for executing without extracting data")
+@cli.option('--transform', default='', help="Sql file name for transforming data in extracted dataset")
+@cli.option('--target', required=False, type=str, help="Target for inserting data. Database name, csv or xls filename. Defaults to stdout if not provided.")
+@cli.option('--load', default='', help="Database schema and table name, if target is database")
+@cli.option('--config-path', default='', help="Custom path to etl.yml config")
+@cli.option('--list', default=False, is_flag=True, help="List named connections from etl.yml and exit.")
+@cli.option('--debug', default=False, is_flag=True, help="Extended level of logging with more info")
+def cli(ctx, **kwargs):
+    global log
+    global options
+    global extra_args
+# logging basic setup
+    log_level = logging.INFO
+    logging.basicConfig(level=log_level, format='%(asctime)s | %(levelname)-5s | %(process)d | %(message)s', datefmt='%Y-%m-%d %H:%M:%S', stream=sys.stderr)
+    log = logging.getLogger()
+
+    class StripCarriageReturnFilter(logging.Filter):
+        def filter(self, record):
+            if isinstance(record.msg, str):
+                record.msg = record.msg.lstrip('\r')
+            return True
+
+    for handler in logging.getLogger().handlers:
+        handler.addFilter(StripCarriageReturnFilter())
+
+# read cli options and extra args
+    try:
+        options = type('OptionValuesClass', (), ctx.params)
+        extra_args = {ctx.args[i][2:]: ctx.args[i+1] for i in range(0, len(ctx.args), 2)}
+    # except TypeError:
+        # sys.exit(1) # only --help option rise typeError: cannot unpack non-iterable int object
+    except Exception as e:
+        log.error(e)
+        sys.exit(1)
+    if options.debug:
+        log.setLevel(logging.DEBUG)
+
+    log.debug(f'project dir <{os.getcwd()}>')
+
+# print cli option in debug mode
+    if options.debug:
+        option_list = [option for option in dir(options) if not option.startswith("__")]
+        o = {}
+        for i in option_list:
+            value = getattr(options,i)
+            if value:
+                o[i] = getattr(options,i)
+        log.debug(f'command options: {o}')
+        if extra_args:
+            log.debug(f'custom params for query: {extra_args}')
+    else:
+        import urllib3
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+    if options.list:
+        for alias in get_config():
+            print(alias)
+        return
+
+# check options
+    if options.extract and options.execute:
+        log.error("options --extract and --execute are mutually exclusive")
+        sys.exit(1)
+
+# extract dataset from source
+    dataset = pd.DataFrame()
+    if options.source:
+        source_params = {}
+        if '??' in options.source: # take parameters for engine/source-specific config
+            source, source_params = options.source.split('??', 1)
+            source_params = parse_url_params(source_params)
+        else: # parameters after ? will be forwarded directry to source/target
+            source = options.source
+
+        if os.path.isfile(source): # file
+            log.debug(f'source params: {source_params}')
+            if source.endswith('.csv') or source.endswith('.csv.zip'):
+                source_params.setdefault('header',0) # default params # means you have the names of columns in the first row in the file
+                source_params.setdefault('sep',';') # default params
+                source_method = pd.read_csv
+            if source.endswith('.xlsx') or source.endswith('.xls'):
+                source_params.setdefault('header',0) # default params
+                source_params.setdefault('engine','openpyxl') # default params
+                source_method = pd.read_excel
+            if source.endswith('.parquet'):
+                source_method = pd.read_parquet
+            if source.endswith('.xml'):
+                source_method = pd.read_xml
+            if source.endswith('.json'):
+                source_method = pd.read_json
+            try:
+                log.info(f'extracting data from <{source}>')
+                dataset = source_method(source, **source_params)
+            except Exception as e:
+                log.error(e)
+                sys.exit(1)
+        # extract from sources with connection string
+        else:
+            source = get_source(options.source)
+            if '??' in source: # take parameters for sqlalchemy engine
+                source, source_params = source.split('??', 1)
+                source_params = parse_url_params(source_params)
+                log.debug(f'source params: {source_params}')
+
+            if any(s in source for s in special_sources): # any custom sources and apies
+                # extract from google sheets
+                if 'google+sheets' in source:
+                    log.info(f'extracting data from google speadsheet <{options.extract}>')
+                    workbook_ref, sheet_name = options.extract.split('!', 1)
+                    workbook = spreadsheet_open(workbook_ref, source_params.get('credentials'))
+                    sheet = workbook.worksheet_by_title(sheet_name)
+                    dataset = sheet.get_as_df(start='A1')
+                    dataset.columns = [
+                        colnum_string(i + 1) if col_name == '' else col_name 
+                        for i, col_name in enumerate(dataset.columns)
+                    ]
+                if 'microsoft+graph' in source:
+                    token_response, cfg = msgraph_open(source_params.get('credentials'))
+                    log.debug(token_response)
+                    workbook_url = options.extract
+                    sheet_name = 'data'
+                    if '??' in options.extract:
+                        workbook_url, sheet_name = options.extract.split('??', 1)
+                        sheet_name = parse_url_params(sheet_name)
+                        sheet_name = sheet_name.pop('sheet_name', 'data')
+                    requests = __import__('requests')
+                    url = workbook_url + f"/workbook/worksheets/{sheet_name}/usedRange()"
+                    response = api_call(requests.get, url, resource=cfg['resource'], access_token=token_response['access_token'])
+                    response
+                    data = response.json()['values']
+                    dataset = pd.DataFrame(data[1:], columns = data[0])
+
+                # extract csv from internent
+                if any(s in source for s in ['http','https','ftp']) and source.endswith('.csv'):
+                    log.info(f'extracting data from <{source}>')
+                    source_params.setdefault('sep',';') # default params
+                    source_params.setdefault('header',0) # default params # means you have the names of columns in the first row in the file
+                    try:
+                        dataset = pd.read_csv(source, **source_params)
+                    except Exception as e:
+                        log.error(e)
+                        sys.exit(1)
+                # extract from bigquery
+                if 'bigquery://' in source:
+                    log.debug(f'source params: {source_params}')
+                    project_id = urlparse(source).hostname
+                    gbq_params = {}
+                    if source_params.get('credentials_path'):
+                        service_account = __import__('google.oauth2.service_account', fromlist=['Credentials'])
+                        credentials_path = os.path.expanduser(source_params['credentials_path'])
+                        gbq_params['credentials'] = service_account.Credentials.from_service_account_file(
+                            credentials_path,
+                            scopes=['https://www.googleapis.com/auth/bigquery'],
+                        )
+                    if options.execute:
+                        log.info(f'executing <{options.execute}> on <{options.source}>')
+                        source_query = get_query(options.execute, extra_args)
+                        bigquery = __import__('google.cloud.bigquery', fromlist=['Client'])
+                        client = bigquery.Client(project=project_id, credentials=gbq_params.get('credentials'))
+                        try:
+                            query_job = client.query(str(source_query))
+                            query_job.result()  # Waits for job to complete.
+                            if extra_args:
+                                log.info(f'executed <{options.execute}> with user_variables {extra_args}')
+                            else:
+                                log.info(f'executed <{options.execute}>')
+                        except Exception as e:
+                            log.error(e)
+                            sys.exit(1)
+                    if options.extract:
+                        log.info(f'extracting data from <{options.source}> using query <{options.extract}>')
+                        source_query = get_query(options.extract, extra_args)
+                        try:
+                            pandas_gbq = __import__('pandas_gbq')
+                            dataset = pandas_gbq.read_gbq(
+                                str(source_query),
+                                project_id=project_id,
+                                dialect='standard',
+                                progress_bar_type=None,
+                                **gbq_params,
+                            )
+                        except Exception as e:
+                            log.error(e)
+                            sys.exit(1)
+            else:
+                try:
+                    source_params.setdefault('max_identifier_length',128) # default params
+                    source_engine = sqlalchemy.create_engine(source, poolclass=NullPool, **source_params)
+                    if options.execute:
+                        with source_engine.connect() as conn:
+                            log.info(f'executing <{options.execute}> on <{options.source}>')
+                            source_query = get_query(options.execute, extra_args)
+                            with conn.begin():
+                                execution_result = conn.execute(source_query)
+                            if execution_result.rowcount >= 0:
+                                log.info(f'executed <{options.execute}>, rowcount={execution_result.rowcount}')
+                            else:
+                                log.info(f'executed <{options.execute}>')
+                    if options.extract:
+                        import time
+                        log.info(f'extracting data from <{options.source}> using query <{options.extract}>')
+                        source_query = get_query(options.extract, extra_args)
+                        for attempt in range(3):
+                            try:
+                                with source_engine.connect() as conn:
+                                    dataset = pd.read_sql(sql=source_query, con=conn)
+                                break
+                            except (sqlalchemy.exc.OperationalError, sqlalchemy.exc.InterfaceError) as e:
+                                if attempt == 2:
+                                    raise
+                                delay = (10, 30)[attempt]
+                                error = str(getattr(e, 'orig', e)).replace('\n', '\\n')
+                                log.warning(f'extract retry {attempt + 1}/2 in {delay}s from <{options.source}> using query <{options.extract}>: {error}')
+                                time.sleep(delay)
+                except Exception as e:
+                        log.error(e)
+                        sys.exit(1)
+    else:
+        log.info(f'extracting data from stdin')
+        dataset = pd.read_csv(sys.stdin, sep=';', header=0)
+
+    if not options.execute:
+        log.info(dataframe_size_info(dataset))
+
+    # check if dataset is empty
+    if options.extract and dataset.empty:
+        log.warning("no data received, exiting without updating target")
+        return sys.exit(0)
+
+    if options.transform:
+        import duckdb
+        log.info(f'transforming data with <{options.transform}>')
+        trasform_query = str(get_query(options.transform, extra_args))
+        try:
+            duckdb.register('dataset', dataset)
+            dataset = duckdb.sql(trasform_query).df()
+        except Exception as e:
+            log.error(e)
+            sys.exit(1)
+
+    # load dataset to target
+    if options.target:
+        target_params = {}
+        if '??' in options.target: # take parameters for sqlalchemy engine
+            target, target_params = options.target.split('??', 1)
+        else: # parameters after ? will be forwarded directry to source/target
+            target = options.target
+        if target_params:
+            target_params = parse_url_params(target_params)
+        # load to csv
+        if target.endswith('.csv') or target.endswith('.csv.zip'):
+            create_dir(target) # manage folders if not exist
+            target_params.setdefault('sep',';') # default params
+            target_params.setdefault('encoding','utf-8')
+            target_params.setdefault('index',False)
+            if target.endswith('.csv.zip'):
+                target_params.setdefault('compression','zip')
+            try: # load data
+                log.debug(f'target params: {target_params}')
+                dataset.to_csv(target, **target_params)
+                log.info(f'data saved to file <{target}>')
+            except Exception as e:
+                log.error(e)
+        # load to xlsx
+        elif target.endswith('.xlsx') or target.endswith('.xls'):
+            create_dir(target) # manage folders if not exist
+            target_params.setdefault('engine','openpyxl')
+            target_params.setdefault('if_sheet_exists','replace')
+            log.debug(f'target params: {target_params}')
+            sheet_name = target_params.pop('sheet_name', 'data')
+            if os.path.exists(target):
+                mode = target_params.pop('mode', 'a') # read file mode or append by default
+            else:    
+                mode='w' #create new file mode
+            if mode == 'w': #if_sheet_exists is valid only when append mode
+                target_params.pop('if_sheet_exists', None)
+            try: # load data
+                with pd.ExcelWriter(target, mode=mode, **target_params) as writer:
+                    dataset.to_excel(writer, sheet_name=sheet_name, index=False) 
+                log.info(f'data saved to file <{target}> on sheet <{sheet_name}>')
+            except Exception as e:
+                log.error(e)
+        # load to parquet
+        elif target.endswith('.parquet'):
+            create_dir(target) # manage folders if not exist
+            target_params.setdefault('index',False)
+            try: # load data
+                dataset.to_parquet(target, **target_params)
+                log.info(f'data saved to file <{target}>')
+            except Exception as e:
+                log.error(e)
+        # load to xml
+        elif target.endswith('.xml'):
+            create_dir(target) # manage folders if not exist
+            target_params.setdefault('index',False)
+            try: # load data
+                dataset.to_xml(target, **target_params)
+                log.info(f'data saved to file <{target}>')
+            except Exception as e:
+                log.error(e)
+        # load to html
+        elif target.endswith('.html'):
+            create_dir(target) # manage folders if not exist
+            target_params.setdefault('index',False)
+            try: # load data
+                dataset.to_html(target, **target_params)
+                log.info(f'data saved to file <{target}>')
+            except Exception as e:
+                log.error(e)
+        # load to json
+        elif target.endswith('.json'):
+            create_dir(target) # manage folders if not exist
+            target_params.setdefault('index',False)
+            try: # load data
+                dataset.to_json(target, **target_params)
+                log.info(f'data saved to file <{target}>')
+            except Exception as e:
+                log.error(e)
+        # load to sources with connection strings
+        else:
+            target = get_source(target) #target can be set like alias
+            if '??' in target: # take parameters for sqlalchemy engine
+                target, target_params = target.split('??', 1)
+            if target_params:
+                target_params = parse_url_params(target_params)
+            if any(s in target for s in special_sources): # any custom sources and apies
+                log.debug(f'target params: {target_params}')
+                # load to google sheets
+                if 'google+sheets' in target:
+                    if dataset.size <= 10000000:
+                        workbook_ref, sheet_name = options.load.split('!', 1)
+                        workbook = spreadsheet_open(workbook_ref, target_params.get('credentials'))
+                        google_err = __import__('pygsheets.exceptions')
+                        try:
+                            log.info(f'loading data to google speadsheet <{workbook_ref}>')
+                            sheet = workbook.worksheet_by_title(sheet_name)
+                            sheet.clear(start='A1')
+                        except google_err.WorksheetNotFound:
+                            sheet = workbook.add_worksheet(sheet_name, rows=1, cols=1)
+                            log.info(f'new sheet added <{sheet_name}>')
+                        except Exception as e:
+                            log.error(e)
+                        for col in dataset.columns:
+                            if pd.api.types.is_numeric_dtype(dataset[col]):
+                                dataset[col] = dataset[col].fillna(0)
+                            else:
+                                try:
+                                    dataset[col] = dataset[col].fillna('')
+                                except ValueError:
+                                    dataset[col] = dataset[col].astype(object).fillna('')
+                        sheet.set_dataframe(dataset, start="A1", fit=True, nan='', include_tailing_empty=False)
+                        log.info(f'data saved to spreadsheet <{workbook_ref}!{sheet_name}>')
+                    else:
+                        log.error('saving to gsheet is ommited due to limit 10M of cells')
+                        sys.exit(1)
+                # load to microsoft 365 excel
+                if 'microsoft+graph' in target:
+                    if dataset.size <= 5000000:
+                        token_response, cfg = msgraph_open(target_params.get('credentials'))
+                        log.debug(token_response)
+                        urllib = __import__('urllib')
+                        requests = __import__('requests')
+                        # access_token = token_response['access_token']
+                        workbook_url = options.load
+                        sheet_name = 'data'
+                        if '??' in options.load:
+                            workbook_url, sheet_name = options.load.split('??', 1)
+                            sheet_name = parse_url_params(sheet_name)
+                            sheet_name = sheet_name.pop('sheet_name', 'data')
+                        url = workbook_url + f"/workbook/worksheets"
+                        # try to add worksheet
+                        response = api_call(requests.post, url, {"name": f"{sheet_name}"}, resource=cfg['resource'], access_token=token_response['access_token'])
+                        if response.status_code == 201:
+                            logging.info(f'New sheet <{sheet_name}> added')
+                        # clear all worksheet range
+                        url = workbook_url + f"/workbook/worksheets/{sheet_name}/range(address='A:XFD')/clear"
+                        response = api_call(requests.post, url, {"applyTo": "All"}, resource=cfg['resource'], access_token=token_response['access_token'])
+                        logging.debug(response)
+                        # add new table
+                        url = workbook_url + f"/workbook/worksheets/{sheet_name}/tables/add"
+                        col_range = 'A1:%s1' % colnum_string(len(dataset.columns))
+                        response = api_call(requests.post, url, {"address": f"{col_range}","hasHeaders": True, "name": sheet_name}, resource=cfg['resource'], access_token=token_response['access_token']).json()
+                        table_id = response.get('id')
+                        if response.get('error'):
+                            logging.error(f"{response['error']['code']}: {response['error']['message']}")
+                            sys.exit(1)
+                        # add table header
+                        url = workbook_url + f"/workbook/worksheets/{sheet_name}/range(address='{col_range}')"
+                        body = {'values': [dataset.to_dict(orient='split')['columns']]}
+                        response = api_call(requests.patch, url, body, resource=cfg['resource'], access_token=token_response['access_token'])
+                        dataset = dataset.fillna('')
+                        # add rows by chanks
+                        chunksize = 1000
+                        for g, df in dataset.groupby(np.arange(len(dataset)) // chunksize):
+                            url = workbook_url + f"/workbook/tables/{table_id}/Rows"
+                            data_dictionary = df.to_dict(orient='split')['data']
+                            data_body = json.dumps(data_dictionary, default=str) # to awoid TypeError: Object of type date is not JSON serializable
+                            body={'values': json.loads(data_body)}
+                            response = api_call(requests.post, url, body, resource=cfg['resource'], access_token=token_response['access_token'])
+                        if response.status_code == 201:
+                            logging.info(f'Saved data to <{workbook_url}> on <{sheet_name}> sheet')
+                    else:
+                        log.error('saving to graph api is ommited due to limit 5M of cells')
+                        sys.exit(1)
+                # load to bigquery
+                if 'bigquery://' in target:
+                    log.debug(f'target params: {target_params}')
+                    if options.load:
+                        load_params = {}
+                        load = options.load
+                        if '??' in load:
+                            load, load_params = load.split('??', 1)
+                        if load_params:
+                            load_params = parse_url_params(load_params)
+                        load_params.setdefault('if_exists', 'append')
+                        if target_params.get('credentials_path'):
+                            service_account = __import__('google.oauth2.service_account', fromlist=['Credentials'])
+                            credentials_path = os.path.expanduser(target_params['credentials_path'])
+                            load_params['credentials'] = service_account.Credentials.from_service_account_file(
+                                credentials_path,
+                                scopes=['https://www.googleapis.com/auth/bigquery'],
+                            )
+                        if '.' in load:
+                            schema, table = load.split('.')
+                        else:
+                            table = load
+                            schema = None
+                        project_id = urlparse(target).hostname
+                        full_table_id = f"{schema}.{table}" if schema else table
+                        log.debug(f'load params: {load_params}')
+                        try:
+                            pandas_gbq = __import__('pandas_gbq')
+                            pandas_gbq.to_gbq(
+                                dataset,
+                                destination_table=full_table_id,
+                                project_id=project_id,
+                                progress_bar=False,
+                                **load_params,
+                            )
+                            log.info(f'data saved to <{options.target}> in table <{options.load}>')
+                        except Exception as e:
+                            log.error(e)
+            # any sql sources supported by sqlalchemy or its extentions
+            else: 
+                target_params.setdefault('max_identifier_length', 128) # default params
+                target_engine = sqlalchemy.create_engine(target, poolclass=NullPool, **target_params)
+ 
+                @sqlalchemy.event.listens_for(target_engine, "do_setinputsizes")
+                # The CLOB datatype in cx_Oracle incurs a significant performance overhead
+                def _remove_clob(inputsizes, cursor, statement, parameters, context):
+                    for bindparam, dbapitype in list(inputsizes.items()):
+                        if dbapitype is sqlalchemy.CLOB:
+                            del inputsizes[bindparam]
+
+                if options.load:
+                    load_params = {}
+                    load = options.load
+                    if '??' in load: # take parameters for loading data
+                        load, load_params = load.split('??', 1)
+                    if load_params:
+                        load_params = parse_url_params(load_params)
+                    load_params.setdefault('if_exists','append')
+                    load_params.setdefault('index',False)
+                    log.debug(f'load params: {load_params}')
+                    if '.' in load:
+                        schema, table  = load.split('.')
+                    else:
+                        table = load
+                        schema = None
+                    try:
+                        with target_engine.connect() as conn:
+                            with conn.begin():
+                                dataset.to_sql(name=table, schema=schema, con=conn, **load_params)
+                        log.info(f'data saved to <{options.target}> in table <{options.load}>')
+                    except Exception as e:
+                        log.error(e)
+    elif not options.execute:
+        log.info(f'loading data to stdout')
+        dataset.to_csv(sys.stdout, sep=';', header=True, index=False)
+
+    log.debug(f"memory usage (rss): {psutil.Process().memory_info().rss / 1024**2:.2f} MB")
+
+
+if __name__ == "__main__":
+    cli()

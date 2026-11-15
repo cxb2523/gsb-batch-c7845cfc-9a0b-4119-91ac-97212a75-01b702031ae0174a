@@ -1,0 +1,72 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "etl"
+version = "1.6.4"
+description = "ETL CLI tool"
+readme = "README.md"
+requires-python = ">=3.11"
+keywords = ["etl"]
+
+# Core dependencies — always installed
+dependencies = [
+    "click",
+    "PyYAML",
+    "pandas",
+    "SQLAlchemy",
+    "duckdb",
+    "duckdb-engine",
+    "psutil",
+    "numpy",
+    "urllib3",
+]
+
+# Optional dependencies — install only what you need
+[project.optional-dependencies]
+postgres   = ["psycopg2-binary"]
+mysql      = ["mysqlclient"]
+oracle     = ["cx_Oracle"]
+mssql      = ["pymssql"]
+sqlite     = ["pysqlite3"]
+clickhouse = ["clickhouse-driver", "clickhouse-sqlalchemy"]
+duckdb     = ["duckdb", "duckdb-engine"]
+presto     = ["presto-python-client", "sqlalchemy_presto"]
+hive       = ["pyhive[hive]"]
+google     = ["pygsheets", "pandas-gbq", "google-cloud-bigquery"]
+msgraph    = ["msal", "requests"]
+excel      = ["openpyxl"]
+all        = [
+    "psycopg2-binary",
+    "mysqlclient",
+    "cx_Oracle",
+    "pymssql",
+    "pysqlite3",
+    "clickhouse-driver",
+    "clickhouse-sqlalchemy",
+    "duckdb-engine",
+    "presto-python-client",
+    "sqlalchemy_presto",
+    "pyhive[hive]",
+    "pygsheets",
+    "msal",
+    "requests",
+    "openpyxl",
+    "pandas-gbq",
+    "google-cloud-bigquery",
+]
+
+[project.scripts]
+etl = "etl:cli"
+upd = "upd:main"
+
+[tool.setuptools]
+py-modules = ["etl", "upd"]
+
+[tool.commitizen]
+name = "cz_conventional_commits"
+version = "1.6.4"
+version_files = [
+    "pyproject.toml:version"
+]
