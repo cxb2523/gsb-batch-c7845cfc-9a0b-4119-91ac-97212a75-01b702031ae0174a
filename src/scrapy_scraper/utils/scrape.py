@@ -9,16 +9,26 @@ from scrapy.spidermiddlewares.httperror import HttpError
 from scrapy.http                        import Request, HtmlResponse
 from playwright.async_api               import Request as PlaywrightRequest, Page as PlaywrightPage, Error as PlaywrightError, TimeoutError as PlaywrightTimeoutError
 
-import asyncio, dataclasses, jsbeautifier, os, random, scrapy, scrapy.crawler, scrapy.utils.project, typing, urllib.parse
+import asyncio, dataclasses, jsbeautifier, os, random, scrapy, scrapy.crawler, scrapy.utils.project, time, typing, urllib.parse
 
 STATUS_ERROR = -1
 NO_RECURSION = -1
+
+# Minimum time in seconds between two intermediate result snapshots.
+SNAPSHOT_INTERVAL = 1.0
+
+# Final state of a crawl record.
+STATE_SUCCESS    = "success"    # the URL was fetched successfully
+STATE_HTTP_ERROR = "http_error" # the URL returned an HTTP error status code
+STATE_ERROR      = "error"      # the URL could not be fetched (network, timeout, etc.)
 
 @dataclasses.dataclass
 class Crawled:
 	url         : str  = ""
 	status      : int  = STATUS_ERROR
 	is_start_url: bool = False
+	state       : str  = STATE_SUCCESS # one of the STATE_* constants; defaults to a successful crawl
+	error       : str  = "" # error message, empty on success
 
 @dataclasses.dataclass
 class Links:
@@ -26,9 +36,80 @@ class Links:
 	out_of_scope: list[str] = dataclasses.field(default_factory = list)
 
 @dataclasses.dataclass
+class Stats:
+	total  : int = 0
+	success: int = 0
+	failed : int = 0
+
+@dataclasses.dataclass
 class Collection:
-	crawled: list[Crawled] = dataclasses.field(default_factory = list[Crawled])
-	links  : Links         = dataclasses.field(default_factory = Links)
+	crawled: list[Crawled]                          = dataclasses.field(default_factory = list[Crawled])
+	links  : Links                                  = dataclasses.field(default_factory = Links)
+	stats  : Stats                                  = dataclasses.field(default_factory = Stats)
+	_revision: int                                  = dataclasses.field(default = 0, init = False, repr = False, compare = False)
+	_index : dict[str, int]                         = dataclasses.field(default_factory = dict[str, int], init = False, repr = False, compare = False)
+
+	@property
+	def revision(self) -> int:
+		"""
+		Number of changes made to the collection, used to track unsaved records.
+		"""
+		return self._revision
+
+	def record(self, crawled: Crawled) -> bool:
+		"""
+		Record the final state of a URL.\n
+		Each URL is kept exactly once: a successful crawl replaces an earlier failure, while a failure
+		never overwrites a success, and repeated failures are not counted twice.\n
+		Returns 'True' if the collection changed.
+		"""
+		index = self._index.get(crawled.url)
+		if index is not None:
+			entry = self.crawled[index]
+			if entry.state == STATE_SUCCESS or crawled.state != STATE_SUCCESS:
+				return False
+			self.crawled[index] = crawled
+		else:
+			self._index[crawled.url] = len(self.crawled)
+			self.crawled.append(crawled)
+		self._revision += 1
+		return True
+
+	def extend_links(self, in_scope: list[str], out_of_scope: list[str]):
+		"""
+		Add extracted links to the collection.
+		"""
+		self.links.in_scope.extend(in_scope)
+		self.links.out_of_scope.extend(out_of_scope)
+		if in_scope or out_of_scope:
+			self._revision += 1
+
+	def rebuild_index(self):
+		"""
+		Rebuild the URL index, e.g. after the records were re-sorted.
+		"""
+		self._index = {entry.url: index for index, entry in enumerate(self.crawled)}
+
+	def update_stats(self):
+		"""
+		Recount the final states.
+		"""
+		success = sum(1 for entry in self.crawled if entry.state == STATE_SUCCESS)
+		self.stats.total   = len(self.crawled)
+		self.stats.success = success
+		self.stats.failed  = self.stats.total - success
+
+	def to_dict(self):
+		"""
+		Convert the collection to a JSON-serializable dictionary.\n
+		The original 'crawled' and 'links' keys are preserved; 'stats' is additive.
+		"""
+		self.update_stats()
+		return {
+			"crawled": [dataclasses.asdict(entry) for entry in self.crawled],
+			"links"  : dataclasses.asdict(self.links),
+			"stats"  : dataclasses.asdict(self.stats)
+		}
 
 class ScrapyScraperSpider(scrapy.Spider):
 
@@ -68,6 +149,10 @@ class ScrapyScraperSpider(scrapy.Spider):
 		self.__debug           = debug
 		self.__context         = 0
 		self.__collection      = Collection()
+		self.__saved              = 0     # number of changes in the last persisted snapshot
+		self.__saved_at           = 0.0   # time of the last persisted snapshot
+		self.__snapshot_scheduled = False # whether a trailing snapshot is pending
+		self.__snapshot_error     = False # whether the last snapshot failed to save
 
 	def __print_start_urls(self):
 		"""
@@ -106,6 +191,16 @@ class ScrapyScraperSpider(scrapy.Spider):
 				callback    = self.__success,
 				dont_filter = False
 			)
+
+	def start(self):
+		"""
+		Scrapy 2.13+ consumes 'start()' instead of 'start_requests()'.\n
+		Bridge the two so that the spider works on both older and newer Scrapy versions.
+		"""
+		async def generator():
+			for request in self.start_requests():
+				yield request
+		return generator()
 
 	def __get_headers(self) -> dict[str, str]:
 		"""
@@ -162,33 +257,90 @@ class ScrapyScraperSpider(scrapy.Spider):
 
 	def closed(self, reason: str):
 		"""
-		On close callback.
+		On close callback.\n
+		This callback also runs when the crawl is interrupted, so every record collected
+		up to that point is saved to the output file.
 		"""
 		self.__collection.crawled.sort(key = lambda x: x.url.casefold(), reverse = True)
+		self.__collection.rebuild_index()
 		self.__collection.links.in_scope = sorted(array.unique(self.__collection.links.in_scope), key = str.casefold, reverse = True)
 		self.__collection.links.out_of_scope = sorted(array.unique(self.__collection.links.out_of_scope), key = str.casefold, reverse = True)
-		print(f"Total unique URLs crawled: {len(self.__collection.crawled)}")
+		self.__collection.update_stats()
+		print(f"Total unique URLs crawled: {self.__collection.stats.total}")
+		print(f"Total unique URLs crawled successfully: {self.__collection.stats.success}")
+		print(f"Total unique URLs failed: {self.__collection.stats.failed}")
 		print(f"Total unique in-scope links extracted: {len(self.__collection.links.in_scope)}")
 		print(f"Total unique out-of-scope links extracted: {len(self.__collection.links.out_of_scope)}")
 		stopwatch.stopwatch.stop()
 		if len(self.__collection.crawled) > 0:
-			file.overwrite(general.jdump(dataclasses.asdict(self.__collection)), self.__out)
+			file.overwrite(general.jdump(self.__collection.to_dict()), self.__out)
+
+	def __save_snapshot(self):
+		"""
+		Persist the records collected so far, so that not even a forced shutdown loses them.\n
+		Writes are throttled, but a pending write is always scheduled once the throttle interval elapses.
+		"""
+		if self.__collection.revision <= self.__saved:
+			return
+		if time.monotonic() - self.__saved_at >= SNAPSHOT_INTERVAL:
+			self.__flush_snapshot()
+		else:
+			self.__schedule_snapshot()
+
+	def __schedule_snapshot(self):
+		"""
+		Schedule a trailing snapshot, so that the last records are not left unsaved.
+		"""
+		if self.__snapshot_scheduled:
+			return
+		try:
+			loop = asyncio.get_running_loop()
+		except RuntimeError:
+			return
+		self.__snapshot_scheduled = True
+		loop.call_later(SNAPSHOT_INTERVAL, self.__flush_snapshot)
+
+	def __flush_snapshot(self):
+		"""
+		Write the current records to the output file if there are any unsaved ones.
+		"""
+		self.__snapshot_scheduled = False
+		revision = self.__collection.revision
+		if revision <= self.__saved:
+			return
+		if file.overwrite(general.jdump(self.__collection.to_dict()), self.__out, verbose = False):
+			self.__saved          = revision
+			self.__saved_at       = time.monotonic()
+			self.__snapshot_error = False
+		elif not self.__snapshot_error:
+			# report a write failure once instead of on every snapshot
+			self.__snapshot_error = True
+			print("Intermediate results could not be saved, will retry until the crawl ends")
 
 	# ------------------------------------
 
 	async def __error(self, failure: Failure):
 		"""
-		Error callback.
+		Error callback.\n
+		Records the final state of a failed URL, either an HTTP error or a non-HTTP failure (network, timeout, etc.).
 		"""
 		request : Request      = failure.request
-		response: HtmlResponse = failure.value.response
-		status = response.status if failure.check(HttpError) else STATUS_ERROR
+		response: HtmlResponse = failure.value.response if failure.check(HttpError) else None
+		status = response.status if response is not None else STATUS_ERROR
+		state  = STATE_HTTP_ERROR if status > STATUS_ERROR else STATE_ERROR
 		url    = request.url
-		error  = str(failure.value).splitlines()[0]
+		error  = str(failure.value).splitlines()
+		error  = error[0] if error else type(failure.value).__name__
 		if self.__playwright:
-			page: PlaywrightPage = request.meta["playwright_page"]
-			await page.close()
-			await page.context.close()
+			page: PlaywrightPage = request.meta.get("playwright_page")
+			if page is not None:
+				try:
+					await page.close()
+					await page.context.close()
+				except (PlaywrightError, PlaywrightTimeoutError):
+					pass
+		self.__collection.record(Crawled(url, status, request.meta.get("is_start_url", False), state, error))
+		self.__save_snapshot()
 		self.__print_error(status, url, error)
 
 	def __print_error(self, status: int, url: str, message: str):
@@ -223,9 +375,9 @@ class ScrapyScraperSpider(scrapy.Spider):
 		if self.__downloads:
 			self.__download(url, content)
 		in_scope_links, out_of_scope_links = self.__extract_links(url, HtmlResponse(url = url, body = content, encoding = "UTF-8") if self.__playwright else response)
-		self.__collection.crawled.append(Crawled(url, status, response.meta.get("is_start_url", False)))
-		self.__collection.links.in_scope.extend(in_scope_links)
-		self.__collection.links.out_of_scope.extend(out_of_scope_links)
+		self.__collection.record(Crawled(url, status, response.meta.get("is_start_url", False), STATE_SUCCESS))
+		self.__collection.extend_links(in_scope_links, out_of_scope_links)
+		self.__save_snapshot()
 		self.__print_success(status, url)
 		# --------------------------------
 		if self.__crawl:
@@ -407,6 +559,9 @@ class ScrapyScraper:
 		"""
 		Configure the settings and run the Chad Extractor spider.
 		"""
+		if not file.confirm_overwrite(self.__out):
+			print("The results will not be saved, exiting")
+			return
 		settings = scrapy.utils.project.get_project_settings()
 		# --------------------------------
 		settings["COOKIES_ENABLED"         ] = True

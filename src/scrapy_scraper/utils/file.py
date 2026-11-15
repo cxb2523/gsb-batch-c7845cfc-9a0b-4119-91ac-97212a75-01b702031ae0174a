@@ -41,18 +41,43 @@ def read_array(file: str):
 				tmp.append(line)
 	return array.unique(tmp)
 
-def overwrite(text: str, out: str):
+def confirm_overwrite(out: str):
+	"""
+	Confirm overwriting an existing output file.\n
+	Returns 'True' if the file does not exist or the overwrite was confirmed.\n
+	Without an interactive input the overwrite is confirmed, so that non-interactive runs still save their results.
+	"""
+	if not os.path.isfile(out):
+		return True
+	print(f"'{out}' already exists")
+	try:
+		return input("Overwrite the output file (yes): ").strip().lower() in ["yes", "y", ""]
+	except EOFError:
+		return True
+	except KeyboardInterrupt:
+		# the user interrupted the prompt, keep the existing file intact
+		print("")
+		return False
+
+def overwrite(text: str, out: str, verbose: bool = True):
 	"""
 	Write a text to an output file.\n
-	If the output file exists, prompt to overwrite it.
+	The text is written to a temporary file first, so an interrupted write never leaves a truncated output file.\n
+	With 'verbose' set to 'False', a failed write is reported only through the return value.
 	"""
-	confirm = "yes"
-	if os.path.isfile(out):
-		print(f"'{out}' already exists")
-		confirm = input("Overwrite the output file (yes): ")
-	if confirm.lower() in ["yes", "y"]:
-		try:
-			open(out, "w").write(text)
+	tmp = f"{out}.tmp"
+	try:
+		with open(tmp, "w") as stream:
+			stream.write(text)
+		os.replace(tmp, out)
+		if verbose:
 			print(f"Results have been saved to '{out}'")
-		except FileNotFoundError:
-			print(f"Cannot save the results to '{out}'")
+		return True
+	except OSError as ex:
+		try:
+			os.remove(tmp)
+		except OSError:
+			pass
+		if verbose:
+			print(f"Cannot save the results to '{out}': {ex}")
+		return False
