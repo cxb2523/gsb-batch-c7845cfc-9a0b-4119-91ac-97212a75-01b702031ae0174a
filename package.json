@@ -1,0 +1,64 @@
+{
+    "name": "task-farmer",
+    "version": "0.0.12",
+    "description": "",
+    "main": "build/index.js",
+    "types": "build/index.d.ts",
+    "scripts": {
+        "start": "npm run multi1 && npm run multi2 && npm run single",
+        "multi1": "ts-node ./src/examples/multi-core.1.ts",
+        "multi2": "ts-node ./src/examples/multi-core.2.ts",
+        "single": "ts-node ./src/examples/single-core.ts",
+        "multi1:watch": "nodemon",
+        "clean": "rm -rf build/*",
+        "build": "tsc",
+        "clean-build": "rm -rf build/* && tsc",
+        "build:watch": "tsc --watch",
+        "clean-build:watch": "rm -rf build/* && tsc --watch",
+        "prepublishOnly": "npm test && npm run build",
+        "lint": "tslint -c tslint.json 'src/**/*.{ts,tsx}'",
+        "pretest": "npm run lint",
+        "test": "jest",
+        "test:watch": "jest --watch"
+    },
+    "repository": {
+        "type": "git",
+        "url": "git+https://grademark@github.com/grademark/task-farmer.git"
+    },
+    "keywords": [
+        "task",
+        "parallel",
+        "parallel-computing",
+        "parallel-programming",
+        "parallel-processing",
+        "data",
+        "data-transform",
+        "data-processing",
+        "data-processing-system",
+        "multi-core",
+        "multi-process",
+        "cluster",
+        "cluster-computing"
+    ],
+    "author": "ashley@codecapers.com.au",
+    "license": "MIT",
+    "bugs": {
+        "url": "https://github.com/grademark/task-farmer/issues"
+    },
+    "homepage": "https://github.com/grademark/task-farmer#readme",
+    "dependencies": {
+        "uuid": "^3.3.2"
+    },
+    "devDependencies": {
+        "@types/jest": "^24.0.6",
+        "@types/node": "10.11.4",
+        "@types/uuid": "^3.4.4",
+        "jest": "^24.1.0",
+        "nodemon": "^1.18.10",
+        "source-map-support": "0.5.9",
+        "ts-jest": "^23.10.5",
+        "ts-node": "7.0.1",
+        "tslint": "^5.12.1",
+        "typescript": "^3.1.1"
+    }
+}
