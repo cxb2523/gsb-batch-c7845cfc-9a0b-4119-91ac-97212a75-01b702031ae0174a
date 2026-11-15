@@ -1,0 +1,450 @@
+[build-system]
+build-backend = "setuptools.build_meta"
+requires = [
+  "setuptools>=42", # At least v42 of setuptools required.
+  "versioningit",
+]
+
+[project]
+name = "cratedb-toolkit"
+description = "CrateDB Toolkit"
+readme = "README.md"
+keywords = [
+  "cratedb",
+  "cratedb-admin",
+  "cratedb-cloud",
+  "cratedb-diagnostics",
+  "cratedb-shell",
+  "data-processing",
+  "data-retention",
+  "managed-cratedb",
+  "toolkit",
+]
+license = "AGPL-3.0-or-later"
+maintainers = [
+  { name = "Andreas Motl", email = "andreas.motl@crate.io" },
+  { name = "Hernan Cianfagna", email = "hernan@crate.io" },
+  { name = "Niklas Schmidtmer", email = "niklas@crate.io" },
+  { name = "Walter Behmann", email = "walter@crate.io" },
+]
+authors = [
+  { name = "The CrateDB Developers" },
+]
+requires-python = ">=3.10"
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Environment :: Console",
+  "Intended Audience :: Customer Service",
+  "Intended Audience :: Developers",
+  "Intended Audience :: Education",
+  "Intended Audience :: End Users/Desktop",
+  "Intended Audience :: Information Technology",
+  "Intended Audience :: Manufacturing",
+  "Intended Audience :: Science/Research",
+  "Intended Audience :: System Administrators",
+  "Intended Audience :: Telecommunications Industry",
+  "Operating System :: MacOS :: MacOS X",
+  "Operating System :: Microsoft :: Windows",
+  "Operating System :: POSIX :: Linux",
+  "Operating System :: Unix",
+  "Programming Language :: Python",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Topic :: Adaptive Technologies",
+  "Topic :: Communications",
+  "Topic :: Database",
+  "Topic :: Documentation",
+  "Topic :: Education",
+  "Topic :: Internet",
+  "Topic :: Internet :: WWW/HTTP",
+  "Topic :: Office/Business",
+  "Topic :: Scientific/Engineering",
+  "Topic :: Software Development :: Embedded Systems",
+  "Topic :: Software Development :: Libraries",
+  "Topic :: Software Development :: Object Brokering",
+  "Topic :: Software Development :: Pre-processors",
+  "Topic :: Software Development :: Quality Assurance",
+  "Topic :: Software Development :: Testing",
+  "Topic :: Software Development :: Version Control",
+  "Topic :: System :: Archiving",
+  "Topic :: System :: Benchmark",
+  "Topic :: System :: Clustering",
+  "Topic :: System :: Distributed Computing",
+  "Topic :: System :: Hardware",
+  "Topic :: System :: Logging",
+  "Topic :: System :: Monitoring",
+  "Topic :: System :: Networking",
+  "Topic :: System :: Systems Administration",
+  "Topic :: Text Processing",
+  "Topic :: Utilities",
+]
+dynamic = [
+  "version",
+]
+dependencies = [
+  "attrs<27",
+  "boltons<27",
+  "cattrs<27",
+  "click<8.6",
+  "click-aliases>=1.0.6,<2",
+  "colorama<1",
+  "colorlog",
+  "crash",
+  "croud>=1.13,<1.16",
+  "keyrings-cryptfile<2",
+  "orjsonl<2",
+  "pympler<1.2",
+  "python-dateutil<3",
+  "python-dotenv<2",
+  "python-slugify<9",
+  "pyyaml<7",
+  "requests>=2.28,<3",
+  "sqlalchemy-cratedb>=0.43.1",
+  "sqlparse<0.7",
+  "tqdm<5",
+  "verlib2<0.4",
+  "yarl<1.25",
+]
+optional-dependencies.cfr = [
+  "cratedb-toolkit[service]",
+  "duckdb<2",
+  "marimo<0.26",
+  "matplotlib<3.12",
+  "numpy<2.5",
+  "pandas<3.1",
+  "polars<1.41",
+  "pyarrow<25",
+  "queryanonymizer<1.2",
+]
+optional-dependencies.datasets = [
+  "datasets<6",
+  "kaggle<2.3",
+]
+optional-dependencies.deltalake = [
+  "cratedb-toolkit[io]",
+  "polars[deltalake]<1.41",
+]
+optional-dependencies.develop = [
+  "black[jupyter]<27",
+  "poethepoet<1",
+  "pyproject-fmt<3",
+  "ruff<0.16",
+  "ty==0.0.44",
+  "validate-pyproject<1",
+]
+optional-dependencies.docs = [
+  "furo",
+  "myst-parser[linkify]>=0.18,<6",
+  "roman-numerals-py<5",
+  "sphinx<8",
+  "sphinx-autobuild",
+  "sphinx-copybutton",
+  "sphinx-design-elements<1",
+  "sphinx-sitemap<3",
+  "sphinxcontrib-mermaid<3",
+  "sphinxext-opengraph<1",
+]
+optional-dependencies.docs-api = [
+  "beautifulsoup4",
+  "rich>=3.3.2,<16",
+]
+optional-dependencies.dynamodb = [
+  "boto3",
+  "commons-codec>=0.0.20",
+  "cratedb-toolkit[io-recipe]",
+]
+optional-dependencies.full = [
+  "cratedb-toolkit[cfr,datasets,docs-api,io-curated,mcp,nlsql,service]",
+]
+optional-dependencies.iceberg = [
+  "cratedb-toolkit[io]",
+  "pyiceberg[adlfs,bigquery,dynamodb,gcsfs,glue,hive,pyarrow,s3fs]>=0.10,<0.13",
+]
+optional-dependencies.influxdb = [
+  "cratedb-toolkit[io-base]",
+  "influxio>=0.6,<1",
+  "sqlalchemy>=2,<2.1",
+]
+optional-dependencies.io = [
+  "cratedb-toolkit[io-base]",
+  "sqlalchemy>=2",
+]
+optional-dependencies.io-base = [
+  "aiohttp>=3.9,<4",
+  "cr8",
+  "dask[dataframe,distributed]>=2020",
+  "fsspec[http,s3]>=2024.5.0",
+  "pandas>=1,<3.1",
+  "polars<1.45",
+  "universal-pathlib<0.4",
+]
+optional-dependencies.io-curated = [
+  "cratedb-toolkit[influxdb,io,io-opentable,mongodb]",
+]
+optional-dependencies.io-ingest = [
+  "cratedb-toolkit[io-base]",
+]
+optional-dependencies.io-opentable = [
+  "cratedb-toolkit[deltalake,iceberg]",
+]
+optional-dependencies.io-recipe = [
+  "tikray>=0.2,<0.4",
+]
+optional-dependencies.kinesis = [
+  "aiobotocore<3.11",
+  "async-kinesis>=2.4.0,<3",
+  "boto3",
+  "botocore<1.44",
+  "commons-codec>=0.0.24",
+  "cratedb-toolkit[io-recipe]",
+  "lorrystream[carabas]>=0.0.6",
+]
+optional-dependencies.mcp = [
+  "mcp<1.31",
+]
+optional-dependencies.mongodb = [
+  "commons-codec[mongodb]>=0.0.22",
+  "cratedb-toolkit[io,io-recipe]",
+  "iterabledata[bson]<2",
+  "orjson>=3.3.1,<4",
+  "pymongo>=3.10.1,<4.17",
+  "python-bsonjs<0.8",
+  "rich>=3.3.2,<16",
+]
+optional-dependencies.nlsql = [
+  "llama-index-llms-anthropic<0.12",
+  "llama-index-llms-azure-openai<0.6",
+  "llama-index-llms-bedrock<0.6",
+  "llama-index-llms-bedrock-converse<0.15",
+  "llama-index-llms-google-genai<0.10",
+  "llama-index-llms-huggingface-api<0.8",
+  "llama-index-llms-llamafile<0.6",
+  "llama-index-llms-mistralai<0.11",
+  "llama-index-llms-ollama<0.11",
+  "llama-index-llms-openai<0.8",
+  "llama-index-llms-openai-like<0.8",
+  "llama-index-llms-openrouter<0.6",
+]
+optional-dependencies.pymongo = [
+  "jessiql==1.0.0rc1",
+  "numpy<2",
+  "pandas<2.2",
+  "pymongo<4.9",
+  "setuptools<81",
+  "sqlalchemy<2",
+]
+optional-dependencies.release = [
+  "build<2",
+  "twine<7",
+]
+optional-dependencies.release-cfr = [
+  "poethepoet<1",
+  "pyinstaller<7",
+]
+optional-dependencies.service = [
+  "fastapi<0.152",
+  "uvicorn<0.50",
+]
+optional-dependencies.settings = [
+  "cratedb-toolkit[docs-api]",
+  "docutils<0.24",
+]
+optional-dependencies.test = [
+  "azure-storage-blob<12.32",                   # Testcontainers: "ContainerClient" has no attribute "_format_url"
+  "boto3",
+  "cratedb-toolkit[testing]",
+  "httpx<0.29",
+  "ipywidgets<9",
+  "markdown-it-py<5",
+  "pueblo[dataframe,notebook,testing]>=0.0.11",
+  "pydantic-core<3",
+  "responses<0.27",
+  "testcontainers[azurite]",
+  "types-docutils<0.23",
+]
+optional-dependencies.test-mongodb = [
+  "cratedb-toolkit[test]",
+  "testcontainers[mongodb]",
+]
+optional-dependencies.testing = [
+  "pytest<10",
+  "pytest-cov<8",
+  "pytest-mock<4",
+  "testcontainers[cratedb]>=4.15,<4.16",
+]
+urls.Changelog = "https://github.com/crate/cratedb-toolkit/blob/main/CHANGES.md"
+urls.Documentation = "https://cratedb-toolkit.readthedocs.io/"
+urls.Homepage = "https://cratedb-toolkit.readthedocs.io/"
+urls.Issues = "https://github.com/crate/cratedb-toolkit/issues"
+urls.Repository = "https://github.com/crate/cratedb-toolkit"
+scripts.cratedb-cfr = "cratedb_toolkit.cfr.cli:cli"
+scripts.cratedb-retention = "cratedb_toolkit.retention.cli:cli"
+scripts.cratedb-toolkit = "cratedb_toolkit.cli:cli"
+scripts.ctk = "cratedb_toolkit.cli:cli"
+scripts.migr8 = "cratedb_toolkit.io.mongodb.cli:main"
+entry-points.pytest11.cratedb_service = "cratedb_toolkit.testing.pytest"
+
+[tool.setuptools]
+packages.find.namespaces = false
+
+[tool.black]
+line-length = 120
+
+[tool.ruff]
+line-length = 120
+extend-exclude = [
+  "amqp-to-mqtt.py",
+  "workbench.py",
+]
+lint.select = [
+  # Builtins
+  "A",
+  # Bugbear
+  "B",
+  # comprehensions
+  "C4",
+  # Pycodestyle
+  "E",
+  # eradicate
+  "ERA",
+  # Pyflakes
+  "F",
+  # isort
+  "I",
+  # pandas-vet
+  "PD",
+  # return
+  "RET",
+  # Bandit
+  "S",
+  # print
+  "T20",
+  "W",
+  # flake8-2020
+  "YTT",
+]
+lint.extend-ignore = [
+  # Module `xxx` shadows a Python standard-library module
+  "A005",
+  # zip() without an explicit strict= parameter
+  "B905",
+  # Unnecessary variable assignment before `return` statement
+  "RET504",
+  # Unnecessary `elif` after `return` statement
+  "RET505",
+  # Probable insecure usage of temporary file or directory
+  "S108",
+]
+lint.per-file-ignores."cratedb_toolkit/retention/cli.py" = [ "T201" ]  # Allow `print`
+lint.per-file-ignores."cratedb_toolkit/sqlalchemy/__init__.py" = [ "F401" ]  # Allow `module´ imported but unused
+lint.per-file-ignores."doc/conf.py" = [ "A001", "ERA001" ]
+lint.per-file-ignores."examples/*" = [ "ERA001", "F401", "T201", "T203" ]  # Allow `print` and `pprint`
+lint.per-file-ignores."tests/*" = [ "S101" ]  # Allow use of `assert`, and `print`.
+
+[tool.ty]
+src.include = [ "cratedb_toolkit", "tests" ]
+rules.unused-ignore-comment = "ignore"
+analysis.allowed-unresolved-imports = [
+  "bson.**",
+  "bsonjs.**",
+  "datasets.**",
+  "fastapi.**",
+  "importlib_metadata.**",
+  "importlib_resources.**",
+  "iterable.**",
+  "jessiql.**",
+  "kaggle.**",
+  "kinesis.**",
+  "llama_index.**",
+  "lorrystream.**",
+  "mcp.**",
+  "pymongo.**",
+  "sqlalchemy.**",
+  "tikray.**",
+]
+
+[tool.pytest]
+ini_options.minversion = "2.0"
+ini_options.testpaths = [
+  "cratedb_toolkit",
+  "examples",
+  "tests",
+]
+ini_options.addopts = "-rfEXs -p pytester --strict-markers --verbosity=3 --cov=. --cov-report=term-missing --cov-report=xml"
+ini_options.markers = [
+  "cfr",
+  "dynamodb",
+  "examples",
+  "influxdb",
+  "kinesis",
+  "mongodb",
+  "nlsql",
+  "pymongo",
+  "python",
+  "shell",
+  "slow",
+]
+ini_options.xfail_strict = true
+ini_options.log_format = "%(asctime)-15s [%(name)-36s] %(levelname)-8s: %(message)s"
+ini_options.log_level = "DEBUG"
+ini_options.log_cli_level = "DEBUG"
+
+[tool.coverage]
+run.branch = false
+run.omit = [
+  "tests/*",
+]
+run.source = [ "cratedb_toolkit" ]
+report.fail_under = 0
+report.show_missing = true
+
+# ===================
+# Tasks configuration
+# ===================
+[tool.poe]
+tasks.check = [
+  "lint",
+  "test",
+]
+tasks.docs-autobuild = [
+  { cmd = "sphinx-autobuild --open-browser --watch cratedb_toolkit doc doc/_build" },
+]
+tasks.docs-html = [
+  { cmd = "sphinx-build -W --keep-going doc doc/_build" },
+]
+tasks.docs-linkcheck = [
+  { cmd = "sphinx-build -W --keep-going -b linkcheck doc doc/_build" },
+]
+tasks.format = [
+  # Format project metadata.
+  { cmd = "pyproject-fmt --keep-full-version pyproject.toml" },
+  # Format code.
+  # Configure Ruff not to auto-fix a few items that are useful in workbench mode.
+  # e.g.: unused imports (F401), unused variables (F841), `print` statements (T201), commented-out code (ERA001)
+  { cmd = "ruff format --exclude examples" },
+  { cmd = "ruff check --fix --ignore=ERA --ignore=F401 --ignore=F841 --ignore=T20 --ignore=ERA001" },
+  # Format examples.
+  # Use `black` for the files in `examples/*`, because it knows how to treat Jupyter files well.
+  { cmd = "black examples" },
+]
+tasks.lint = [
+  { cmd = "ruff format --exclude examples --check" },
+  { cmd = "ruff check" },
+  { cmd = "validate-pyproject pyproject.toml" },
+  { cmd = "ty check" },
+]
+tasks.release = [
+  { cmd = "python -m build" },
+  { cmd = "twine upload --skip-existing dist/*" },
+]
+tasks.test = { cmd = "pytest -m 'not influxdb'" }
+tasks.build-cfr = { cmd = "pyinstaller cratedb_toolkit/cfr/cli.py --onefile --name cratedb-cfr" }
+
+[tool.versioningit]
+vcs.method = "git-archive"
+vcs.default-tag = "v0.0.0"
+vcs.describe-subst = "$Format:%(describe:tags,match=v*)$"

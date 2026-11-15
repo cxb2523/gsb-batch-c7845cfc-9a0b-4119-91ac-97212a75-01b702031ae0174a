@@ -1,0 +1,94 @@
+(dynamodb-loader)=
+# DynamoDB Table Loader
+
+## About
+Load data from DynamoDB into CrateDB using a one-stop command
+`ctk load dynamodb://...` to facilitate convenient
+data transfers to be used within data pipelines or ad hoc operations.
+
+It is the brother to the corresponding cdc-relay implementation,
+[](#dynamodb-cdc).
+
+## Install
+```shell
+pip install --upgrade 'cratedb-toolkit[dynamodb]'
+```
+
+## Usage
+Transfer data from DynamoDB table into CrateDB schema/table.
+```shell
+export CRATEDB_CLUSTER_URL=crate://crate@localhost:4200/testdrive/demo
+ctk load "dynamodb://AWS_ACCESS_KEY:AWS_SECRET_ACCESS_KEY@aws/ProductCatalog?region=us-east-1"
+```
+
+Query data in CrateDB.
+```shell
+export CRATEDB_CLUSTER_URL=crate://crate@localhost:4200/testdrive/demo
+ctk shell --command "SELECT * FROM testdrive.demo;"
+ctk show table "testdrive.demo"
+```
+
+## Options
+
+### Batch Size
+The source URL accepts the `batch-size` option to configure DynamoDB
+[pagination]. The default value is `100`.
+```shell
+ctk load .../ProductCatalog?batch-size=5000
+```
+
+### Consistent Read
+The source URL accepts the `consistent-read` option to configure DynamoDB
+[read consistency]. The default value is `false`.
+```shell
+ctk load .../ProductCatalog?consistent-read=true
+```
+
+### Region
+The source URL accepts the `region` option to configure the AWS region
+label. The default value is `us-east-1`.
+```shell
+ctk load .../ProductCatalog?region=eu-central-1
+```
+
+
+## Variants
+
+### CrateDB Cloud
+When aiming to transfer data to CrateDB Cloud, the shape of the target URL
+looks like that.
+```shell
+export CRATEDB_CLUSTER_URL='crate://admin:dZ...6LqB@testdrive.eks1.eu-west-1.aws.cratedb.net:4200/?ssl=true'
+```
+
+### Floci
+In order to exercise data transfers exclusively on your workstation, you can
+use Floci to run a DynamoDB service surrogate locally. See also the
+[Floci DynamoDB documentation].
+
+For addressing a DynamoDB database on Floci, use a command of that shape.
+```shell
+ctk load "dynamodb://AKIAIOSFODNN7EXAMPLE:dummy@localhost:4566/ProductCatalog?region=us-east-1"
+```
+
+:::{tip}
+Floci is a cloud service emulator that runs in a single container on your
+laptop or in your CI environment. With Floci, you can run your AWS
+applications or Lambdas entirely on your local machine without connecting to
+a remote cloud provider.
+
+In order to invoke Floci on your workstation, you can use this Docker
+command.
+```shell
+docker run \
+  --rm -it \
+  --name floci \
+  -p 127.0.0.1:4566:4566 \
+  floci/floci:1.5.11
+```
+:::
+
+
+[Floci DynamoDB documentation]: https://floci.io/floci/services/dynamodb/
+[pagination]: https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/Scan.html#Scan.Pagination
+[read consistency]: https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/Scan.html#Scan.ReadConsistency

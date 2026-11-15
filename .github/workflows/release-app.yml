@@ -1,0 +1,90 @@
+# Stage PyInstaller application bundles through GitHub Actions (GHA) to GitHub Workflow Artifacts.
+# https://github.com/actions/upload-artifact#where-does-the-upload-go
+name: "Release: Application Bundle"
+
+on:
+  push:
+    tags:
+      - '*'
+
+  # Run on pull requests.
+  # pull_request:
+
+  # Run each night.
+  schedule:
+    - cron: '55 04 * * *'  # every day at 04:55 am
+
+# Cancel in-progress jobs when pushing to the same branch.
+concurrency:
+  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.ref }}
+
+jobs:
+
+  cfr:
+    name: "CFR for OS ${{ matrix.os }}"
+
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [
+          "macos-15-intel",  # Intel
+          "macos-latest",    # ARM
+          "ubuntu-latest",   # Intel
+          "windows-latest",  # Intel
+        ]
+      # TODO: Also build for Linux/ARM, because this platform gets more traction in datacenters.
+      # - https://github.blog/changelog/2024-06-03-actions-arm-based-linux-and-windows-runners-are-now-in-public-beta/
+      # - https://arm-software.github.io/AVH/main/infrastructure/html/avh_gh.html
+      # - via: https://github.com/actions/partner-runner-images
+
+    steps:
+
+    - name: Acquire sources
+      uses: actions/checkout@v6
+      with:
+        fetch-depth: 0
+        fetch-tags: true
+
+    - name: Install uv
+      uses: astral-sh/setup-uv@v8.3.2
+      with:
+        activate-environment: 'true'
+        enable-cache: true
+        python-version: '3.13'
+
+    - name: Set up project
+      run: |
+        # Install package in editable mode.
+        uv pip install --editable='.[cfr,release-cfr]'
+
+    - name: Build application bundle
+      run: poe build-cfr
+
+    - name: Compute artifact suffix (OS-ARCH)
+      id: artifact-suffix
+      uses: ASzc/change-string-case-action@v8
+      with:
+        string: "${{ runner.os }}-${{ runner.arch }}"
+
+    - name: Upload artifact to Workflow Artifacts (Linux and macOS)
+      if: runner.os != 'Windows'
+      uses: actions/upload-artifact@v7
+      with:
+        name: "cratedb-cfr-${{ steps.artifact-suffix.outputs.lowercase }}"
+        path: dist/cratedb-cfr
+
+    - name: Upload artifact to Workflow Artifacts (Windows)
+      if: runner.os == 'Windows'
+      uses: actions/upload-artifact@v7
+      with:
+        name: "cratedb-cfr-${{ steps.artifact-suffix.outputs.lowercase }}"
+        path: dist/cratedb-cfr.exe
+
+    - name: Upload artifact to release assets
+      if: startsWith(github.event.ref, 'refs/tags')
+      run: echo "Not implemented yet."
+      # TODO: Upload to release assets, when invoked on "tag" event.
+      # https://github.com/grafana-toolbox/grafana-client/blob/4.1.0/.github/workflows/release.yml#L27-L42
+      # https://github.com/marketplace/actions/create-release

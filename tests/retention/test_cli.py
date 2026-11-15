@@ -1,0 +1,452 @@
+# Copyright (c) 2023, Crate.io Inc.
+# Distributed under the terms of the AGPLv3 license, see LICENSE.
+import logging
+import typing as t
+from uuid import uuid4
+
+import boto3
+import pytest
+from click.testing import CliRunner
+from docker.models.containers import Container
+from sqlalchemy.exc import OperationalError
+from testcontainers.core.container import DockerContainer
+
+from cratedb_toolkit.retention.cli import cli
+from tests.retention.conftest import TESTDRIVE_DATA_SCHEMA
+
+
+def toolkit_records(caplog) -> t.List[logging.LogRecord]:
+    """
+    The log records emitted by the application, without those of third-party libraries.
+    """
+    return [record for record in caplog.records if record.name.startswith("cratedb_toolkit")]
+
+
+SETUP_MESSAGE = "Installing retention policy bookkeeping table"
+
+
+def test_version():
+    """
+    CLI test: Invoke `cratedb-retention --version`.
+    """
+    runner = CliRunner()
+
+    result = runner.invoke(
+        cli,
+        args="--version",
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0
+
+
+def test_setup_brief(caplog, cratedb, settings):
+    """
+    CLI test: Invoke `cratedb-retention setup`.
+    """
+    database_url = cratedb.get_connection_url()
+    runner = CliRunner()
+
+    caplog.set_level(logging.ERROR, "sqlalchemy")
+    with caplog.at_level(logging.DEBUG):
+        result = runner.invoke(
+            cli,
+            args=f'setup "{database_url}"',
+            catch_exceptions=False,
+        )
+    assert result.exit_code == 0
+
+    assert cratedb.database.table_exists(settings.policy_table.fullname) is True
+    assert any(SETUP_MESSAGE in record.getMessage() for record in toolkit_records(caplog))
+
+
+def test_setup_verbose(caplog, cratedb, settings):
+    """
+    CLI test: Invoke `cratedb-retention setup`.
+    """
+    database_url = cratedb.get_connection_url()
+    runner = CliRunner()
+
+    with caplog.at_level(logging.DEBUG):
+        result = runner.invoke(
+            cli,
+            args=f'--verbose setup "{database_url}"',
+            catch_exceptions=False,
+        )
+    assert result.exit_code == 0
+
+    assert cratedb.database.table_exists(settings.policy_table.fullname) is True
+
+    assert any(SETUP_MESSAGE in record.getMessage() for record in toolkit_records(caplog))
+
+
+def test_setup_dryrun(caplog, cratedb, settings):
+    """
+    CLI test: Invoke `cratedb-retention setup --dry-run`,
+    and verify the table will not be created.
+    """
+    database_url = cratedb.get_connection_url()
+    runner = CliRunner()
+
+    result = runner.invoke(
+        cli,
+        args=f'setup --dry-run "{database_url}"',
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0
+
+    assert cratedb.database.table_exists(settings.policy_table.fullname) is False
+    assert "Pretending to execute SQL statement" in caplog.text
+
+
+def test_setup_failure_no_dburi():
+    """
+    Verify that the program fails, when it is not able to obtain a
+    database URI to connect to.
+    """
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        args="--verbose setup",
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 2
+    assert "Missing argument 'DBURI'" in result.output
+
+
+def test_setup_failure_envvar_invalid_dburi(mocker):
+    """
+    Verify using the `CRATEDB_URI` environment variable, and that the
+    program fails correctly, when pointing it to an arbitrary address.
+    """
+
+    mocker.patch.dict("os.environ", {"CRATEDB_URI": "crate://localhost:5555"})
+
+    runner = CliRunner()
+    with pytest.raises(OperationalError) as ex:
+        runner.invoke(
+            cli,
+            args="--verbose setup",
+            catch_exceptions=False,
+        )
+    assert ex.match("ConnectionError.*Connection refused")
+
+
+def test_list_policies(store, capsys):
+    """
+    Verify a basic DELETE retention policy through the CLI.
+    """
+
+    database_url = store.database.dburi
+    runner = CliRunner()
+
+    # Invoke data retention through CLI interface.
+    result = runner.invoke(
+        cli,
+        args=f'list-policies "{database_url}"',
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0
+
+    # TODO: Can't read STDOUT. Why?
+    """
+    out, err = capsys.readouterr()
+    output = json.loads(out)
+    item0 = output[0]
+
+    assert item0["table_schema"] == "doc"
+    assert item0["table_name"] == "raw_metrics"
+    """
+
+
+def test_run_delete_basic(store, database, raw_metrics, policies):
+    """
+    Verify a basic DELETE retention policy through the CLI.
+    """
+
+    database_url = store.database.dburi
+    runner = CliRunner()
+
+    # Check number of records in database.
+    assert database.count_records(raw_metrics) == 6
+
+    # Invoke data retention through CLI interface.
+    result = runner.invoke(
+        cli,
+        args=f'run --cutoff-day=2024-12-31 --strategy=delete "{database_url}"',
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0
+
+    # Check number of records in database.
+    assert database.count_records(raw_metrics) == 0
+
+
+def test_run_delete_dryrun(caplog, store, database, raw_metrics, policies):
+    """
+    Verify a basic DELETE retention policy through the CLI with `--dry-run` does not do anything.
+    """
+
+    database_url = store.database.dburi
+    runner = CliRunner()
+
+    # Check number of records in database.
+    assert database.count_records(raw_metrics) == 6
+
+    # Invoke data retention through CLI interface.
+    result = runner.invoke(
+        cli,
+        args=f'run --cutoff-day=2024-12-31 --strategy=delete --dry-run "{database_url}"',
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0
+    assert "Pretending to execute SQL statement" in caplog.text
+
+    # Check number of records in database.
+    assert database.count_records(raw_metrics) == 6
+
+
+def test_run_delete_with_tags_match(store, database, sensor_readings, policies, needs_sqlalchemy2):
+    """
+    Verify a basic DELETE retention policy through the CLI, with using correct (matching) tags.
+    """
+
+    database_url = store.database.dburi
+    runner = CliRunner()
+
+    # Check number of records in database.
+    assert database.count_records(sensor_readings) == 9
+
+    # Invoke data retention through CLI interface.
+    result = runner.invoke(
+        cli,
+        args=f'run --cutoff-day=2024-12-31 --strategy=delete --tags=foo,bar "{database_url}"',
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0
+
+    # Verify that records have been deleted.
+    assert database.count_records(f'"{TESTDRIVE_DATA_SCHEMA}"."sensor_readings"') == 0
+
+
+def test_run_delete_with_tags_unknown(caplog, store, database, sensor_readings, policies, needs_sqlalchemy2):
+    """
+    Verify a basic DELETE retention policy through the CLI, with using wrong (not matching) tags.
+    """
+
+    database_url = store.database.dburi
+    runner = CliRunner()
+
+    # Check number of records in database.
+    assert database.count_records(sensor_readings) == 9
+
+    # Invoke data retention through CLI interface.
+    result = runner.invoke(
+        cli,
+        args=f'run --cutoff-day=2024-12-31 --strategy=delete --tags=foo,unknown "{database_url}"',
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0
+
+    assert "No retention policies found with tags: ['foo', 'unknown']" in caplog.messages
+
+    # Check number of records in database.
+    # Records have not been deleted, because the tags did not match.
+    assert database.count_records(sensor_readings) == 9
+
+
+def test_run_reallocate(store, database, raw_metrics, raw_metrics_reallocate_policy):
+    """
+    CLI test: Invoke `cratedb-retention run --strategy=reallocate`.
+    """
+
+    database_url = store.database.dburi
+    runner = CliRunner()
+
+    # Check number of records in database.
+    assert database.count_records(raw_metrics) == 6
+
+    # Invoke data retention through CLI interface.
+    result = runner.invoke(
+        cli,
+        args=f'run --cutoff-day=2024-12-31 --strategy=reallocate "{database_url}"',
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0
+
+    # Check number of records in database.
+    # FIXME: Currently, the test for this strategy apparently does not remove any records.
+    #        The reason is because the scenario can't easily be simulated on a single-node
+    #        cluster. The suite would need to orchestrate at least two nodes.
+    assert database.count_records(raw_metrics) == 6
+
+
+def test_run_snapshot_aws_s3(
+    caplog, store, database, sensor_readings, sensor_readings_snapshot_policy, s3, needs_sqlalchemy2
+):
+    """
+    Verify the "SNAPSHOT" strategy using an object storage with AWS S3 API.
+    Invokes `cratedb-retention run --strategy=snapshot`.
+    """
+
+    # CrateDB needs the container's Docker-internal address, while boto3 uses the mapped port.
+    s3_endpoint = s3.get_real_host_address()
+    s3_client = boto3.client(
+        "s3",
+        endpoint_url=s3.get_url(),
+        aws_access_key_id="test",
+        aws_secret_access_key="test",  # noqa: S106
+        region_name="us-east-1",
+    )
+
+    # A new bucket keeps snapshot listings independent when Floci is kept alive across runs.
+    bucket_name = f"cratedb-cold-storage-{uuid4().hex}"
+    s3_client.create_bucket(Bucket=bucket_name)
+
+    # Create CrateDB repository on an object storage with AWS S3 API.
+    # https://crate.io/docs/crate/reference/en/latest/sql/statements/create-repository.html#s3
+    database.ensure_repository_s3(
+        name="export_cold",
+        typename="s3",
+        protocol="http",
+        endpoint=s3_endpoint,
+        access_key="test",
+        secret_key="test",  # noqa: S106
+        bucket=bucket_name,
+        drop=True,
+    )
+
+    # Check number of records in database.
+    assert database.count_records(sensor_readings) == 9
+
+    # Invoke data retention through CLI interface.
+    database_url = store.database.dburi
+    runner = CliRunner()
+    runner.invoke(
+        cli,
+        args=f'run --cutoff-day=2024-05-15 --strategy=snapshot "{database_url}"',
+        catch_exceptions=False,
+    )
+
+    # Check number of records in database.
+    assert database.count_records(sensor_readings) == 4
+
+    # Verify that the S3 bucket has been populated correctly, and that the snapshot has the right shape.
+    listing = s3_client.list_objects_v2(Bucket=bucket_name, Delimiter="/")
+    object_names = [item["Key"] for item in listing.get("Contents", [])]
+    object_names.extend(item["Prefix"] for item in listing.get("CommonPrefixes", []))
+    assert_snapshot_shape(object_names)
+
+
+def test_run_snapshot_azure_blob(caplog, store, database, sensor_readings, sensor_readings_snapshot_policy, azurite):
+    """
+    Verify the "SNAPSHOT" strategy using an object storage with Azure Blob Storage API.
+    Invokes `cratedb-retention run --strategy=snapshot`.
+    """
+
+    # Acquire runtime information from Azurite container. In order to let CrateDB talk to
+    # Azurite, we need its Docker-internal IP address (172.17.0.x), not the exposed one.
+    storage_endpoint = azurite.get_real_host_address()
+
+    # Prepare a "container" on Azure storage.
+    azurite.create_container("cratedb-cold-storage")
+
+    # Create CrateDB repository on an object storage with Azure Blob Storage API.
+    # https://crate.io/docs/crate/reference/en/latest/sql/statements/create-repository.html#azure
+    database.ensure_repository_az(
+        name="export_cold",
+        typename="azure",
+        protocol="http",
+        endpoint=storage_endpoint,
+        account=azurite.account_name,
+        key=azurite.account_key,
+        container="cratedb-cold-storage",
+        drop=True,
+    )
+
+    # Check number of records in database.
+    assert database.count_records(sensor_readings) == 9
+
+    # Invoke data retention through CLI interface.
+    database_url = store.database.dburi
+    runner = CliRunner()
+    runner.invoke(
+        cli,
+        args=f'run --cutoff-day=2024-05-15 --strategy=snapshot "{database_url}"',
+        catch_exceptions=False,
+    )
+
+    # Check number of records in database.
+    assert database.count_records(sensor_readings) == 4
+
+    # Verify that the AZ blob container has been populated correctly, and that the snapshot has the right shape.
+    blob_names = azurite.list_blob_names(container_name="cratedb-cold-storage")
+    assert_snapshot_shape(blob_names, flavor="azure")
+
+
+def test_run_snapshot_fs(caplog, cratedb, store, database, sensor_readings, sensor_readings_snapshot_policy):
+    """
+    Verify the "SNAPSHOT" strategy using classic filesystem storage.
+    Invokes `cratedb-retention run --strategy=snapshot`.
+    """
+
+    # Acquire OCI container handle, to introspect it.
+    tc_container: DockerContainer = cratedb.cratedb
+    oci_container: Container = tc_container.get_wrapped_container()
+
+    # Define snapshot directory.
+    # Note that the path is located _inside_ the OCI container where CrateDB is running.
+    snapshot_path = "/tmp/snapshots/cratedb-cold-storage"  # noqa: S108
+
+    # Delete snapshot directory.
+    oci_container.exec_run(f"rm -rf {snapshot_path}")
+
+    # Create CrateDB repository on the filesystem.
+    # https://crate.io/docs/crate/reference/en/latest/sql/statements/create-repository.html#fs
+    database.ensure_repository_fs(
+        name="export_cold",
+        typename="fs",
+        location=snapshot_path,
+        drop=True,
+    )
+
+    # Check number of records in database.
+    assert database.count_records(sensor_readings) == 9
+
+    # Invoke data retention through CLI interface.
+    database_url = store.database.dburi
+    runner = CliRunner()
+    runner.invoke(
+        cli,
+        args=f'run --cutoff-day=2024-05-15 --strategy=snapshot "{database_url}"',
+        catch_exceptions=False,
+    )
+
+    # Check number of records in database.
+    assert database.count_records(sensor_readings) == 4
+
+    # Verify that the filesystem has been populated correctly, and that the snapshot has the right shape.
+    ls_result = oci_container.exec_run(f"ls {snapshot_path}")
+    file_names = ls_result.output.decode().splitlines()
+    assert_snapshot_shape(file_names)
+
+
+def assert_snapshot_shape(file_names: t.List[str], flavor: t.Optional[str] = None) -> None:
+    """
+    Strip random fragments from snapshot file names, and compare against reference.
+    ['index-0', 'index.latest', 'meta-HaxVcmMiRMyhT2o_rVFqUw.dat', 'snap-HaxVcmMiRMyhT2o_rVFqUw.dat', 'indices/']
+    """  # noqa: ERA001, E501
+
+    assert len(file_names) >= 5, "Wrong number of file names in blob storage"
+
+    reference = ["index", "index.latest", "indices", "meta", "snap"]
+
+    base_names = sorted([name.split("-")[0].replace("/", "") for name in file_names])
+
+    if flavor == "azure":
+        reference.remove("indices")
+        indices = [item for item in base_names if item.startswith("indices")]
+        assert len(indices) >= 10, "Wrong number of `indices` file names in Azure blob storage container"
+        base_names = [item for item in base_names if not item.startswith("indices")]
+
+    assert base_names == reference

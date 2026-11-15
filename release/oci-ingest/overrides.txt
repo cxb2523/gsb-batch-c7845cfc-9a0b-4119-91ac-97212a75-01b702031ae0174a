@@ -1,0 +1,3 @@
+# Support for ARM64 available since version 0.7.0.
+# https://github.com/mongodb-labs/python-bsonjs/issues/81
+python-bsonjs>=0.7; platform_machine == "aarch64"

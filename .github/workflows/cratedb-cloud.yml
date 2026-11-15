@@ -1,0 +1,111 @@
+---
+name: "Tests: CrateDB Cloud"
+
+on:
+  # Only cluster-facing changes need the managed-service run as well.
+  pull_request:
+    paths:
+    - '.github/workflows/cratedb-cloud.yml'
+    - 'cratedb_toolkit/cluster/**'
+    - 'cratedb_toolkit/info/**'
+    - 'cratedb_toolkit/shell/**'
+    - 'cratedb_toolkit/util/croud.py'
+    - 'tests/cluster/**'
+    - 'tests/info/**'
+    - 'tests/shell/**'
+  push:
+    branches: [ main ]
+
+  # Allow job to be triggered manually.
+  workflow_dispatch:
+
+  # Run the job each night after CrateDB nightly has been published.
+  schedule:
+    - cron: '0 3 * * *'
+
+# Cancel in-progress jobs when pushing to the same branch.
+concurrency:
+  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.ref }}
+
+jobs:
+
+  tests:
+
+    if: ${{ ! github.event.pull_request.head.repo.fork }}
+
+    concurrency:
+      group: cratedb-cloud-testcluster
+      cancel-in-progress: false
+
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ["ubuntu-latest"]
+        python-version: [
+          "3.14",
+        ]
+
+    env:
+      OS: ${{ matrix.os }}
+      PYTHON: ${{ matrix.python-version }}
+
+    # https://docs.github.com/en/actions/using-containerized-services/about-service-containers
+    services:
+      cratedb:
+        image: crate/crate:nightly
+        ports:
+          - 4200:4200
+          - 5432:5432
+
+    name: Python ${{ matrix.python-version }} on OS ${{ matrix.os }}
+    steps:
+
+    - name: Acquire sources
+      uses: actions/checkout@v6
+
+    - name: Install uv
+      uses: astral-sh/setup-uv@v8.3.2
+      with:
+        activate-environment: 'true'
+        cache-suffix: ${{ matrix.python-version }}
+        enable-cache: true
+        python-version: ${{ matrix.python-version }}
+
+    - name: Set up project
+      run: |
+
+        # Install package in editable mode.
+        uv pip install --editable='.[full,test,develop]'
+
+        # MongoDB integration tests fail here. Why?
+        # pymongo.errors.ServerSelectionTimeoutError: localhost:32772:
+        # [Errno 111] Connection refused (configured timeouts: socketTimeoutMS: 5000.0ms,
+        #                                 connectTimeoutMS: 5000.0ms), Timeout: 5.0s
+        # https://github.com/crate/cratedb-toolkit/actions/runs/23055232713/job/66966725093#step:6:820
+        uv pip uninstall pymongo
+
+    - name: Run linter and software tests
+      env:
+        KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
+        KAGGLE_KEY: ${{ secrets.KAGGLE_KEY }}
+        TEST_CRATEDB_CLOUD_API_KEY: ${{ secrets.TEST_CRATEDB_CLOUD_API_KEY }}
+        TEST_CRATEDB_CLOUD_API_SECRET: ${{ secrets.TEST_CRATEDB_CLOUD_API_SECRET }}
+        TEST_CRATEDB_CLOUD_ORGANIZATION_ID: ${{ secrets.TEST_CRATEDB_CLOUD_ORGANIZATION_ID }}
+        #TEST_CRATEDB_CLOUD_CLUSTER_NAME: ${{ secrets.TEST_CRATEDB_CLOUD_CLUSTER_NAME }}
+        TEST_CRATEDB_USERNAME: ${{ secrets.TEST_CRATEDB_USERNAME }}
+        TEST_CRATEDB_PASSWORD: ${{ secrets.TEST_CRATEDB_PASSWORD }}
+      run: |
+        poe check
+
+    - name: Upload coverage to Codecov
+      uses: codecov/codecov-action@v7
+      env:
+        CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+      with:
+        files: ./coverage.xml
+        flags: cloud
+        env_vars: OS,PYTHON
+        name: codecov-umbrella
+        fail_ci_if_error: true

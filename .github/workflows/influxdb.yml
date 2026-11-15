@@ -1,0 +1,96 @@
+---
+name: "Tests: InfluxDB"
+
+on:
+  pull_request:
+    paths:
+    - '.github/workflows/influxdb.yml'
+    - 'cratedb_toolkit/io/influxdb/**'
+    - 'cratedb_toolkit/testing/testcontainers/influxdb2.py'
+    - 'cratedb_toolkit/testing/testcontainers/util.py'
+    - 'tests/io/influxdb/**'
+    - 'pyproject.toml'
+  push:
+    branches: [ main ]
+    paths:
+    - '.github/workflows/influxdb.yml'
+    - 'cratedb_toolkit/io/influxdb/**'
+    - 'cratedb_toolkit/testing/testcontainers/influxdb2.py'
+    - 'cratedb_toolkit/testing/testcontainers/util.py'
+    - 'tests/io/influxdb/**'
+    - 'pyproject.toml'
+
+  # Allow job to be triggered manually.
+  workflow_dispatch:
+
+  # Run the job each night after CrateDB nightly has been published.
+  schedule:
+    - cron: '0 3 * * *'
+
+# Cancel in-progress jobs when pushing to the same branch.
+concurrency:
+  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.ref }}
+
+jobs:
+
+  tests:
+
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ["ubuntu-latest"]
+        python-version: [
+          "3.14",
+        ]
+        influxdb-version: [
+          "2.6",
+          "2.7",
+          "2.8",
+        ]
+    env:
+      OS: ${{ matrix.os }}
+      PYTHON: ${{ matrix.python-version }}
+      INFLUXDB_VERSION: ${{ matrix.influxdb-version }}
+      # Do not tear down Testcontainers
+      TC_KEEPALIVE: true
+
+    name: "
+    Python ${{ matrix.python-version }}, 
+    InfluxDB ${{ matrix.influxdb-version }}, 
+    OS ${{ matrix.os }}
+    "
+    steps:
+
+    - name: Acquire sources
+      uses: actions/checkout@v6
+
+    - name: Install uv
+      uses: astral-sh/setup-uv@v8.3.2
+      with:
+        activate-environment: 'true'
+        cache-suffix: ${{ matrix.python-version }}
+        enable-cache: true
+        python-version: ${{ matrix.python-version }}
+
+    - name: Set up project
+      run: |
+
+        # Install package in editable mode.
+        uv pip install --editable=.[influxdb,test]
+
+    - name: Run software tests
+      run: |
+        pytest -m influxdb
+
+    - name: Upload coverage to Codecov
+      uses: codecov/codecov-action@v7
+      env:
+        CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+      with:
+        files: ./coverage.xml
+        flags: influxdb
+        env_vars: OS,PYTHON
+        name: codecov-umbrella
+        fail_ci_if_error: true

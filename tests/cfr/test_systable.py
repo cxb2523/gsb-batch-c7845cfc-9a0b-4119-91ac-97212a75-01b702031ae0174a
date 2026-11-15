@@ -1,0 +1,396 @@
+# ruff: noqa: E402
+import io
+import json
+import os.path
+import re
+import shutil
+import sys
+import tarfile
+from importlib.resources import files
+from pathlib import Path
+
+import pytest
+
+import tests.cfr
+
+pymongo = pytest.importorskip("polars", reason="Skipping tests because polars is not installed")
+
+from click.testing import CliRunner
+
+import tests
+from cratedb_toolkit.cfr.cli import cli
+from cratedb_toolkit.cfr.systable import ExportSettings, SystemTableExporter
+from tests.conftest import TESTDRIVE_DATA_SCHEMA
+
+pytestmark = pytest.mark.cfr
+
+
+@pytest.mark.parametrize(
+    "dburi, expected",
+    [
+        ("crate://localhost:4200/", f"timeout={ExportSettings.READ_TIMEOUT}"),
+        ("https://example.org:4200/", f"timeout={ExportSettings.READ_TIMEOUT}"),
+        ("crate://localhost:4200/?timeout=7", "timeout=7"),
+    ],
+)
+def test_cfr_sys_export_read_timeout(dburi, expected):
+    """
+    Every read has a deadline, and an address that brings its own keeps it.
+    """
+    assert expected in SystemTableExporter.with_timeout(dburi)
+
+
+def filenames(path: Path):
+    return sorted([item.name for item in path.iterdir()])
+
+
+def linecount(path: Path) -> int:
+    with path.open("r", encoding="utf-8") as f:
+        return sum(1 for _ in f)
+
+
+EXPORT_SUMMARY_PATTERN = r"Successfully exported \d+ tables from sys, information_schema"
+
+
+def test_cfr_sys_export_success(cratedb, click_kwargs, tmp_path, caplog):
+    """
+    Verify `ctk cfr sys-export` works.
+    """
+
+    # Invoke command.
+    runner = CliRunner(env={"CRATEDB_CLUSTER_URL": cratedb.database.dburi, "CFR_TARGET": str(tmp_path)}, **click_kwargs)
+    result = runner.invoke(
+        cli,
+        args="--debug sys-export",
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0, result.output
+
+    # Verify log output.
+    assert "Exporting system tables to" in caplog.text
+    assert re.search(EXPORT_SUMMARY_PATTERN, caplog.text), "Log message missing"
+
+    # Verify the outcome. The reported path is the bundle root, so everything
+    # the bundle carries is reachable from it.
+    path = Path(json.loads(result.stdout)["path"])
+    assert filenames(path) == ["ddl", "information_schema", "manifest.json", "sys"]
+    assert filenames(path / "sys") == ["data", "schema"]
+
+    schema_files = filenames(path / "sys" / "schema")
+    data_files = filenames(path / "sys" / "data")
+
+    assert len(schema_files) >= 19
+    assert len(data_files) >= 10
+
+
+def test_cfr_sys_export_reports_the_row_count_it_read(cratedb, click_kwargs, tmp_path, caplog):
+    """
+    Verify `ctk cfr sys-export` logs the row count of every table it reads.
+    """
+
+    runner = CliRunner(env={"CRATEDB_CLUSTER_URL": cratedb.database.dburi, "CFR_TARGET": str(tmp_path)}, **click_kwargs)
+    result = runner.invoke(cli, args="--debug sys-export", catch_exceptions=False)
+    assert result.exit_code == 0, result.output
+
+    reads = {
+        table: int(rows) for table, rows in re.findall(r"Read (\S+): (\d+) rows, ~\S+ in memory, [\d.]+s", caplog.text)
+    }
+
+    assert reads, f"No read was reported at all: {caplog.text[-2000:]}"
+    for tablename in ["sys.jobs_log", "sys.shards", "sys.allocations", "sys.nodes"]:
+        assert tablename in reads, f"Read of {tablename} not accounted for: {sorted(reads)}"
+
+    # Creating one relation moves `information_schema.tables` by exactly one.
+    assert reads["sys.nodes"] >= 1
+    tables_before = reads["information_schema.tables"]
+    cratedb.database.run_sql(f'CREATE TABLE "{TESTDRIVE_DATA_SCHEMA}".volume (id INT)')
+    caplog.clear()
+    result = runner.invoke(cli, args="--debug sys-export", catch_exceptions=False)
+    assert result.exit_code == 0, result.output
+    second = re.search(r"Read information_schema\.tables: (\d+) rows", caplog.text)
+    assert second, "The second export reported no read of information_schema.tables"
+    assert int(second.group(1)) == tables_before + 1
+
+
+def test_cfr_sys_export_progress_bar_names_the_table_in_flight(cratedb, click_kwargs, tmp_path):
+    """
+    Verify the export's progress bar names the table it is reading.
+    """
+    from cratedb_toolkit.cfr.systable import SystemTableExporter
+
+    class TerminalLike(io.StringIO):
+        """Keep tqdm enabled: it silences itself when its stream is not a terminal."""
+
+        def isatty(self):
+            return True
+
+    recorder = TerminalLike()
+    stderr, sys.stderr = sys.stderr, recorder
+    try:
+        SystemTableExporter(dburi=cratedb.database.dburi, target=tmp_path).save()
+    finally:
+        sys.stderr = stderr
+
+    # Only the bar's own frames; the redirected log lines share the stream.
+    frames = [line for line in recorder.getvalue().split("\r") if line.startswith("Exporting sys:")]
+    assert frames, "The progress bar produced no output"
+    labelled = {line.rsplit(", ", 1)[-1].rstrip("] ") for line in frames if line.endswith("]")}
+    for tablename in ["allocations", "jobs_log", "shards"]:
+        assert tablename in labelled, f"Bar never named sys.{tablename}; it named {sorted(labelled)}"
+
+
+def test_cfr_sys_export_to_archive_file(cratedb, click_kwargs, tmp_path, caplog):
+    """
+    Verify `ctk cfr sys-export some-file.tgz` works.
+    """
+
+    target = os.path.join(tmp_path, "cluster-data.tgz")
+
+    # Invoke command.
+    runner = CliRunner(env={"CRATEDB_CLUSTER_URL": cratedb.database.dburi, "CFR_TARGET": str(tmp_path)}, **click_kwargs)
+    result = runner.invoke(
+        cli,
+        args=f"--debug sys-export {target}",
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0, result.output
+
+    # Verify log output.
+    assert "Exporting system tables to" in caplog.text
+    assert re.search(EXPORT_SUMMARY_PATTERN, caplog.text), "Log message missing"
+
+    # Verify the outcome.
+    path = Path(json.loads(result.stdout)["path"])
+    assert "cluster-data.tgz" in path.name
+
+    # Classify by the `sys/` subtree's own directories, not by substring match.
+    data_files = []
+    schema_files = []
+    with tarfile.open(path, "r") as tar:
+        for name in tar.getnames():
+            if "/sys/data/" in name:
+                data_files.append(name)
+            elif "/sys/schema/" in name:
+                schema_files.append(name)
+
+    assert len(schema_files) >= 19
+    assert len(data_files) >= 10
+
+
+def test_cfr_sys_export_failure(cratedb, click_kwargs, tmp_path, caplog):
+    """
+    Verify `ctk cfr sys-export` failure.
+    """
+
+    # Invoke command.
+    runner = CliRunner(env={"CRATEDB_CLUSTER_URL": "crate://foo.bar/", "CFR_TARGET": str(tmp_path)}, **click_kwargs)
+    result = runner.invoke(
+        cli,
+        args="--debug sys-export",
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 1, result.output
+
+    # Verify log output.
+    assert "Failed to establish a new connection" in caplog.text or "Failed to resolve" in caplog.text
+    assert result.output == ""
+
+
+def test_cfr_sys_export_ensure_table_name_is_quoted(cratedb, click_kwargs, tmp_path, caplog):
+    runner = CliRunner(env={"CRATEDB_CLUSTER_URL": cratedb.database.dburi, "CFR_TARGET": str(tmp_path)}, **click_kwargs)
+    result = runner.invoke(
+        cli,
+        args="--debug sys-export",
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0, result.output
+
+    path = Path(json.loads(result.stdout)["path"])
+    sys_cluster_table_schema = path / "sys" / "schema" / "sys-cluster.sql"
+    with open(sys_cluster_table_schema, "r") as f:
+        content = f.read()
+        assert '"sys-cluster"' in content, "Table name missing or not quoted"
+
+
+def test_cfr_sys_import_success(cratedb, tmp_path, caplog):
+    """
+    Verify `ctk cfr sys-import` works.
+    """
+
+    # Blank database canvas.
+    imported_system_tables = [
+        "sys-allocations",
+        "sys-checks",
+        "sys-cluster",
+        "sys-health",
+        "sys-jobs",
+        "sys-jobs_log",
+        "sys-jobs_metrics",
+        "sys-node_checks",
+        "sys-nodes",
+        "sys-operations",
+        "sys-operations_log",
+        "sys-privileges",
+        "sys-repositories",
+        "sys-roles",
+        "sys-segments",
+        "sys-shards",
+        "sys-snapshot_restore",
+        "sys-snapshots",
+        "sys-users",
+    ]
+    cratedb.reset(imported_system_tables)
+
+    # Provision filesystem to look like a fake `sys-export` trace.
+    assets_path = files(tests.cfr) / "assets"
+    sys_operations_schema = assets_path / "sys-operations.sql"
+    sys_operations_data = assets_path / "sys-operations.jsonl"
+    schema_path = tmp_path / "schema"
+    data_path = tmp_path / "data"
+    schema_path.mkdir()
+    data_path.mkdir()
+    shutil.copy(str(sys_operations_schema), schema_path)
+    shutil.copy(str(sys_operations_data), data_path)
+
+    # Invoke command.
+    runner = CliRunner(env={"CRATEDB_CLUSTER_URL": cratedb.database.dburi, "CFR_SOURCE": str(tmp_path)})
+    result = runner.invoke(
+        cli,
+        args="--debug sys-import",
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0, result.output
+
+    # Verify log output.
+    assert "Importing system tables from" in caplog.text
+    assert re.search(r"Successfully imported \d+ system tables", caplog.text), "Log message missing"
+
+    # Verify the outcome.
+    results = cratedb.database.run_sql("SHOW TABLES", records=True)
+    assert {"table_name": "sys-operations"} in results
+
+    cratedb.database.run_sql('REFRESH TABLE "sys-operations"')
+    assert cratedb.database.count_records("sys-operations") == 1
+
+
+def test_cfr_sys_import_restores_every_exported_row(cratedb, click_kwargs, tmp_path):
+    adapter = cratedb.database
+    probe = adapter.quote_relation_name(f"{TESTDRIVE_DATA_SCHEMA}.segment_source")
+
+    # A Lucene segment puts `sys.segments`, with its dotted `attributes` keys, into the bundle.
+    adapter.run_sql(f"CREATE TABLE {probe} (id INT, name TEXT)")
+    adapter.run_sql(f"INSERT INTO {probe} (id, name) VALUES (1, 'probe')")  # noqa: S608
+    adapter.run_sql(f"REFRESH TABLE {probe}")
+
+    runner = CliRunner(env={"CRATEDB_CLUSTER_URL": adapter.dburi, "CFR_TARGET": str(tmp_path)}, **click_kwargs)
+    result = runner.invoke(cli, args="--debug sys-export", catch_exceptions=False)
+    assert result.exit_code == 0, result.output
+
+    bundle = Path(json.loads(result.stdout)["path"]) / "sys"
+    exported = {item.stem: linecount(item) for item in sorted((bundle / "data").glob("*.jsonl"))}
+    if "sys-segments" not in exported:
+        pytest.skip("Cluster reported no segments to export")
+
+    runner = CliRunner(env={"CRATEDB_CLUSTER_URL": adapter.dburi, "CFR_SOURCE": str(bundle)}, **click_kwargs)
+    result = runner.invoke(cli, args="--debug sys-import", catch_exceptions=False)
+    assert result.exit_code == 0, result.output
+
+    restored = {}
+    for tablename in exported:
+        adapter.run_sql(f"REFRESH TABLE {adapter.quote_relation_name(tablename)}")
+        restored[tablename] = adapter.count_records(tablename)
+
+    assert restored == exported
+
+
+def test_cfr_sys_import_empties_a_table_exported_without_rows(cratedb, click_kwargs, tmp_path):
+    adapter = cratedb.database
+    adapter.run_sql('DROP TABLE IF EXISTS "sys-repositories"')
+    adapter.run_sql('CREATE TABLE "sys-repositories" (name TEXT)')
+    adapter.run_sql("""INSERT INTO "sys-repositories" (name) VALUES ('r1')""")
+    adapter.run_sql('REFRESH TABLE "sys-repositories"')
+
+    schema_path = tmp_path / "schema"
+    schema_path.mkdir()
+    (tmp_path / "data").mkdir()
+    (schema_path / "sys-repositories.sql").write_text('CREATE TABLE IF NOT EXISTS "sys-repositories" (name TEXT);')
+
+    runner = CliRunner(env={"CRATEDB_CLUSTER_URL": adapter.dburi, "CFR_SOURCE": str(tmp_path)}, **click_kwargs)
+    result = runner.invoke(cli, args="--debug sys-import", catch_exceptions=False)
+    assert result.exit_code == 0, result.output
+
+    adapter.run_sql('REFRESH TABLE "sys-repositories"')
+    assert adapter.count_records("sys-repositories") == 0
+
+
+def test_cfr_sys_import_reports_rejected_rows(cratedb, click_kwargs, tmp_path, caplog):
+    """
+    A table whose rows the cluster refuses fails the import, naming the file to correct.
+    """
+
+    assets_path = files(tests.cfr) / "assets"
+    schema_path = tmp_path / "schema"
+    data_path = tmp_path / "data"
+    schema_path.mkdir()
+    data_path.mkdir()
+    shutil.copy(str(assets_path / "sys-segments.sql"), schema_path)
+    shutil.copy(str(assets_path / "sys-segments.jsonl"), data_path)
+
+    runner = CliRunner(env={"CRATEDB_CLUSTER_URL": cratedb.database.dburi, "CFR_SOURCE": str(tmp_path)}, **click_kwargs)
+    result = runner.invoke(cli, args="--debug sys-import", catch_exceptions=False)
+
+    assert result.exit_code == 1
+    assert "sys-segments" in caplog.text
+    assert not re.search(r"Successfully imported [1-9]\d* system tables", caplog.text)
+    assert "attributes" in caplog.text
+    assert "Export the bundle again from the source cluster" in caplog.text
+    assert str(schema_path / "sys-segments.sql") in caplog.text
+
+
+def test_cfr_sys_import_restores_oversized_cluster_state(cratedb, click_kwargs, tmp_path):
+    """
+    A restored `sys-cluster` holds a state longer than Lucene's maximum term length.
+    """
+
+    adapter = cratedb.database
+
+    runner = CliRunner(env={"CRATEDB_CLUSTER_URL": adapter.dburi, "CFR_TARGET": str(tmp_path)}, **click_kwargs)
+    result = runner.invoke(cli, args="--debug sys-export", catch_exceptions=False)
+    assert result.exit_code == 0, result.output
+
+    bundle = Path(json.loads(result.stdout)["path"]) / "sys"
+    if "state" not in (bundle / "schema" / "sys-cluster.sql").read_text():
+        pytest.skip("This CrateDB version does not report a cluster state")
+
+    runner = CliRunner(env={"CRATEDB_CLUSTER_URL": adapter.dburi, "CFR_SOURCE": str(bundle)}, **click_kwargs)
+    result = runner.invoke(cli, args="--debug sys-import", catch_exceptions=False)
+    assert result.exit_code == 0, result.output
+
+    oversized = "s" * 40_000
+    adapter.run_sql('INSERT INTO "sys-cluster" (state) VALUES (:state)', {"state": oversized})
+    adapter.run_sql('REFRESH TABLE "sys-cluster"')
+    records = adapter.run_sql(
+        'SELECT state FROM "sys-cluster" WHERE length(state) = :length',
+        {"length": len(oversized)},
+        records=True,
+    )
+    assert [record["state"] for record in records] == [oversized]
+
+
+def test_cfr_sys_import_failure(cratedb, click_kwargs, tmp_path, caplog):
+    """
+    Verify `ctk cfr sys-import` failure.
+    """
+
+    # Invoke command.
+    runner = CliRunner(env={"CRATEDB_CLUSTER_URL": "crate://foo.bar/", "CFR_SOURCE": str(tmp_path)}, **click_kwargs)
+    result = runner.invoke(
+        cli,
+        args="--debug sys-import",
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 1, result.output
+
+    # Verify log output.
+    assert "Failed to establish a new connection" in caplog.text or "Failed to resolve" in caplog.text
+    assert result.output == ""

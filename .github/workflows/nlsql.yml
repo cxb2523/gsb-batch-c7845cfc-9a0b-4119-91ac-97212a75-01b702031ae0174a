@@ -1,0 +1,81 @@
+---
+name: "Tests: NLSQL"
+
+on:
+  pull_request:
+    paths:
+    - '.github/workflows/nlsql.yml'
+    - 'cratedb_toolkit/query/nlsql/**'
+    - 'tests/query/*nlsql*'
+    - 'tests/query/test_sqlgate.py'
+    - 'pyproject.toml'
+  push:
+    branches: [ main ]
+    paths:
+    - '.github/workflows/nlsql.yml'
+    - 'cratedb_toolkit/query/nlsql/**'
+    - 'tests/query/*nlsql*'
+    - 'tests/query/test_sqlgate.py'
+    - 'pyproject.toml'
+
+  # Allow job to be triggered manually.
+  workflow_dispatch:
+
+  # Run the job each night after CrateDB nightly has been published.
+  schedule:
+    - cron: '0 3 * * *'
+
+# Cancel in-progress jobs when pushing to the same branch.
+concurrency:
+  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.ref }}
+
+jobs:
+
+  tests:
+
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ["ubuntu-latest"]
+        python-version: [
+          "3.10",
+          "3.14",
+        ]
+
+    env:
+      OS: ${{ matrix.os }}
+      PYTHON: ${{ matrix.python-version }}
+      # Do not tear down Testcontainers
+      TC_KEEPALIVE: true
+
+    name: Python ${{ matrix.python-version }} on OS ${{ matrix.os }}
+    steps:
+
+    - name: Acquire sources
+      uses: actions/checkout@v6
+
+    - name: Install uv
+      uses: astral-sh/setup-uv@v8.3.2
+      with:
+        activate-environment: 'true'
+        cache-suffix: ${{ matrix.python-version }}
+        enable-cache: true
+        python-version: ${{ matrix.python-version }}
+
+    - name: Set up project
+      run: |
+        # Install package in editable mode.
+        uv pip install --editable='.[nlsql,test]'
+
+    - name: Run software tests
+      run: |
+        pytest -m nlsql
+
+    - name: Upload coverage to Codecov
+      uses: codecov/codecov-action@v7
+      env:
+        CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+      with:
+        fail_ci_if_error: true

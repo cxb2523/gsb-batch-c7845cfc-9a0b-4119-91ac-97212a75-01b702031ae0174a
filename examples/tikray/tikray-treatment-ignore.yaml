@@ -1,0 +1,11 @@
+# Tikray transformation defining a few special treatments to be applied to inbound data.
+---
+meta:
+  type: tikray-project
+  version: 1
+collections:
+- address:
+    container: testdrive
+    name: demo
+  treatment:
+    ignore_complex_lists: true
