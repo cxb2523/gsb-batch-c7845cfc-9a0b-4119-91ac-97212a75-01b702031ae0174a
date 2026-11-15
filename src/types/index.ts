@@ -1,0 +1,16 @@
+export type {
+  CategoryOptions,
+  DetailsInput,
+  DetailsManyOptions,
+  Pagination,
+  SearchOptions,
+  VideoDetailsBatchFailure,
+  VideoDetailsBatchItem,
+  VideoDetailsBatchResult,
+  VideoDetailsBatchSuccess,
+  VideoDetailsResult,
+  VideoFiles,
+  VideoListResult,
+  VideoProfile,
+  VideoSummary,
+} from './videos.js';
