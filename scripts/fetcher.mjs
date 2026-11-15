@@ -1,12 +1,16 @@
-import createBrowser from 'browserless'
 import { onExit } from 'signal-exit'
-import puppeteer from 'puppeteer'
 
 const REQ_TIMEOUT = 10000
 
 let singletonBrowser = null
 
 const browser = async () => {
+  // browserless and puppeteer are only needed by withPrerender; keep them
+  // lazy so fetch-only runs (and tests) don't have to load a browser stack.
+  const [{ default: createBrowser }, { default: puppeteer }] = await Promise.all(
+    [import('browserless'), import('puppeteer')]
+  )
+
   if (!singletonBrowser) {
     const browser = createBrowser({ puppeteer })
     onExit(browser.close)

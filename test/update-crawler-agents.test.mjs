@@ -10,6 +10,9 @@ const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url),
 const stub = `import { writeFileSync } from 'node:fs'
 if (process.env.GENERATE_EXIT) process.exit(Number(process.env.GENERATE_EXIT))
 writeFileSync('index.json', process.env.GENERATE_BODY ?? '[]\\n')
+// A real run always leaves a verification report, even when index.json is
+// byte-identical to the committed one.
+writeFileSync('verification-report.json', process.env.REPORT_BODY ?? '[]\\n')
 `
 
 const git = (cwd, args) =>
@@ -27,6 +30,7 @@ const setup = () => {
   git(work, ['config', 'core.hooksPath', '/dev/null'])
   mkdirSync(join(work, 'scripts'))
   writeFileSync(join(work, 'index.json'), '[]\n')
+  writeFileSync(join(work, 'verification-report.json'), '[]\n')
   writeFileSync(join(work, 'scripts', 'generate.mjs'), stub)
   writeFileSync(join(work, 'scripts', 'healthcheck.mjs'), `import { writeFileSync } from 'node:fs'
 writeFileSync('healthcheck-ran', '')
@@ -38,7 +42,7 @@ writeFileSync('healthcheck-ran', '')
       'update:crawler-agents': pkg.scripts['update:crawler-agents']
     }
   }))
-  execFileSync('git', ['add', 'index.json'], { cwd: work, stdio: 'ignore' })
+  execFileSync('git', ['add', 'index.json', 'verification-report.json'], { cwd: work, stdio: 'ignore' })
   execFileSync('git', ['commit', '-m', 'init', '--no-verify'], { cwd: work, stdio: 'ignore' })
   execFileSync('git', ['push', '-u', 'origin', 'HEAD'], { cwd: work, stdio: 'ignore' })
   return { root, bare, work }
@@ -73,14 +77,33 @@ test('an unchanged index.json does not create a commit', t => {
   assert.equal(git(repo.bare, ['rev-parse', 'HEAD']), before)
 })
 
-test('a changed index.json is committed and pushed', t => {
+test('changed index.json and verification report are committed and pushed', t => {
   const repo = setup()
   t.after(() => rmSync(repo.root, { recursive: true, force: true }))
 
-  run(repo.work, 'update:crawler-agents', { GENERATE_BODY: '["Googlebot"]\n' })
+  run(
+    repo.work,
+    'update:crawler-agents',
+    {
+      GENERATE_BODY: '["Googlebot"]\n',
+      REPORT_BODY: '[{"userAgent":"Googlebot","outcome":"passed","statusCode":200,"error":null}]\n'
+    }
+  )
 
   assert.equal(git(repo.work, ['log', '-1', '--format=%s']), 'build(update): crawlers')
   assert.equal(readFileSync(join(repo.work, 'index.json'), 'utf8'), '["Googlebot"]\n')
+  assert.equal(
+    readFileSync(join(repo.work, 'verification-report.json'), 'utf8'),
+    '[{"userAgent":"Googlebot","outcome":"passed","statusCode":200,"error":null}]\n'
+  )
+
+  // Both artifacts must be part of the update commit.
+  const committed = git(repo.work, ['show', '--format=', '--name-only', 'HEAD'])
+    .split('\n')
+    .filter(Boolean)
+  assert.ok(committed.includes('index.json'))
+  assert.ok(committed.includes('verification-report.json'))
+
   assert.equal(git(repo.bare, ['log', '-1', '--format=%s']), 'build(update): crawlers')
 })
 

@@ -10,6 +10,24 @@ Some websites (such as [Twitter](https://twitter.com/Kikobeats/status/1687844145
 
 The list is derivated from [crawler-user-agents](https://github.com/monperrus/crawler-user-agents) after applying a [script](/scripts/generate.js), so it's always up-to-date to latest changes.
 
+## Verification
+
+Every candidate User-Agent is checked against real pages during generation.
+The result of each check is persisted to
+[`verification-report.json`](/verification-report.json), which is sorted by
+User-Agent and contains one entry per candidate:
+
+- `userAgent`: the User-Agent string
+- `outcome`: one of `passed`, `http-error` (the page did not respond with 200),
+  `request-error` (the request failed, including timeouts) or
+  `content-check-failed` (the response was 200 but missed the expected metadata)
+- `statusCode`: the HTTP status code, or `null` when the request failed
+- `error`: the error message, or `null`
+
+Only `passed` User-Agents are written to `index.json`. If every candidate
+fails, `index.json` is left untouched and the generation exits with a
+non-zero status code.
+
 ## Install
 
 ```bash

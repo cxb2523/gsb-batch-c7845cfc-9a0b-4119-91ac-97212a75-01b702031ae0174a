@@ -1,12 +1,9 @@
 'use strict'
 
-import { writeFile } from 'fs/promises'
 import Bottleneck from 'bottleneck'
-// import { writeFileSync } from 'fs'
 import { styleText } from 'util'
+import { pathToFileURL } from 'node:url'
 import { load } from 'cheerio'
-import pFilter from 'p-filter'
-import pEvery from 'p-every'
 
 import crawlerUserAgents from 'crawler-user-agents'
 
@@ -15,6 +12,12 @@ import {
   withFetch
   /* withPrerender */
 } from './fetcher.mjs'
+import {
+  OUTCOME,
+  compareUserAgents,
+  verifyUserAgents,
+  writeVerificationOutputs
+} from './verify-user-agents.mjs'
 
 const CHECK = { true: '✅', false: '❌' }
 const MAX_CONCURRENCY = Number(process.env.MAX_CONCURRENCY) || 1
@@ -46,67 +49,101 @@ const SOURCES = [
   }
 ]
 
-const userAgents = [
-  ...new Set((await Promise.all(SOURCES.map(fn => fn()))).flat())
-].sort((a, b) => a.localeCompare(b))
+export const loadUserAgents = async (sources = SOURCES) =>
+  [
+    ...new Set((await Promise.all(sources.map(fn => fn()))).flat())
+  ].sort(compareUserAgents)
 
-const total = userAgents.length
+export const generateIndex = async ({
+  userAgents,
+  verifications = VERIFICATIONS,
+  concurrency = MAX_CONCURRENCY,
+  minWaitTime = MIN_WAIT_TIME,
+  reportPath = 'verification-report.json',
+  indexPath = 'index.json',
+  logger = console
+} = {}) => {
+  const total = userAgents.length
 
-if (total === 0) {
-  console.error('No user agents found to verify.')
-  process.exit(1)
-}
+  if (total === 0) {
+    logger.error('No user agents found to verify.')
+    return { report: [], passed: [], exitCode: 1, written: [] }
+  }
 
-const limiter = new Bottleneck({
-  minTime: MIN_WAIT_TIME
-})
+  const limiter = new Bottleneck({ minTime: minWaitTime })
 
-const verify = (userAgent, index) => {
-  if (index !== 0) console.log()
-  console.log(`[${index + 1}/${total}] ${userAgent}\n`)
-  return pEvery(
-    VERIFICATIONS,
-    async ([url, verifyFn, fetcher]) =>
-      limiter.schedule(async () => {
-        let result = false
-        let statusCode
-        try {
-          const { html, statusCode: _statusCode } = await fetcher(
-            url,
-            userAgent
+  logger.log(
+    `\nStarting verification of user agents MAX_CONCURRENCY=${concurrency} MIN_WAIT_TIME=${minWaitTime}\n`
+  )
+
+  const { report, passed } = await verifyUserAgents(
+    userAgents,
+    verifications,
+    {
+      concurrency,
+      schedule: task => limiter.schedule(task),
+      load,
+      onResult: (result, index) => {
+        if (index !== 0) logger.log()
+        logger.log(`[${index + 1}/${total}] ${result.userAgent}\n`)
+        for (const check of result.checks) {
+          logger.log(
+            ' ' +
+              styleText(
+                'gray',
+                `${check.url} (${check.statusCode ?? check.error}) ${
+                  CHECK[check.passed]
+                }`
+              )
           )
-          statusCode = _statusCode
-          result = await verifyFn(load(html))
-        } catch (error) {
-          console.log('ERROR', error)
         }
-        console.log(
-          ' ' + styleText('gray', `${url} (${statusCode}) ${CHECK[result]}`)
-        )
-        return result
-      }),
-    { concurrency: MAX_CONCURRENCY }
+      }
+    }
   )
+
+  if (passed.length === 0) {
+    // Every entry failed: keep the report for diagnosis, but leave the
+    // existing index.json untouched and signal failure to the job.
+    await writeVerificationOutputs(
+      { report, passed },
+      { reportPath, indexPath }
+    )
+    logger.error(
+      `\nAll ${total} user agents failed the verification; index.json was not updated. See ${reportPath}.`
+    )
+    return { report, passed, exitCode: 1, written: [reportPath] }
+  }
+
+  const written = await writeVerificationOutputs(
+    { report, passed },
+    { reportPath, indexPath }
+  )
+
+  logger.log(
+    `\n${passed.length}/${total} user agents passed; wrote ${indexPath} and ${reportPath} ✨`
+  )
+  const failures = report
+    .filter(entry => entry.outcome !== OUTCOME.PASSED)
+    .map(
+      entry =>
+        `  ${entry.outcome}: ${entry.userAgent} ` +
+        `(status=${entry.statusCode ?? 'null'}, error=${entry.error ?? 'null'})`
+    )
+  if (failures.length > 0) logger.log(failures.join('\n'))
+
+  return { report, passed, exitCode: 0, written }
 }
 
-console.log()
-console.log(`Starting verification of user agents MAX_CONCURRENCY=${MAX_CONCURRENCY} MIN_WAIT_TIME=${MIN_WAIT_TIME}`)
-console.log()
+const isMain =
+  process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href
 
-Promise.resolve()
-  .then(() =>
-    pFilter(userAgents, verify, {
-      concurrency: MAX_CONCURRENCY
-    })
-  )
-  .then(async result => {
-    if (result.length === 0) {
-      throw new Error('No user agents passed the verification.')
-    }
-    const sorted = result.sort((a, b) => a.localeCompare(b))
-    await writeFile('index.json', JSON.stringify(sorted, null, 2))
-    console.log(`\nGenerated ${sorted.length} crawlers ✨`)
-  }).catch(error => {
+if (isMain) {
+  try {
+    const userAgents = await loadUserAgents()
+    const { exitCode } = await generateIndex({ userAgents })
+    if (exitCode !== 0) process.exit(exitCode)
+  } catch (error) {
     console.error('Error during verification:', error)
     process.exit(1)
-  })
+  }
+}
