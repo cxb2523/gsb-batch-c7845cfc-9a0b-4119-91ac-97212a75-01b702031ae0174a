@@ -170,6 +170,12 @@ class SearchPerformanceMetrics(_Model):
     average_page_time: Num
 
 
+class FailedPage(_Model):
+    page: int = Field(description="Page number that failed to fetch (1-based)")
+    url: str = Field(description="Request URL of the failed page")
+    error: str = Field(description="Short summary of the failure")
+
+
 class SearchResponse(_Model):
     success: bool
     results: list[ListingCard]
@@ -190,7 +196,11 @@ class SearchResponse(_Model):
     page: int | None = Field(None, description="First page number fetched (1-based)")
     pages_fetched: int | None = Field(
         None,
-        description="Number of pages actually requested; less than page_count when fetching stopped early",
+        description="Number of pages successfully fetched; less than pages_requested when pages failed or fetching stopped early",
+    )
+    failed_pages: list[FailedPage] | None = Field(
+        None,
+        description="Pages that could not be fetched; only set when at least one page failed",
     )
     warnings: list[str] | None = Field(
         None, description="User-facing warnings; only set when there are any"

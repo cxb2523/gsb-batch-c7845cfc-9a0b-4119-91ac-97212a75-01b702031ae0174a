@@ -137,7 +137,7 @@ def _parse_ad_previews(raw_props: list[str]) -> dict[str, dict[str, Any]]:
     for raw in raw_props:
         try:
             props = json.loads(raw)
-        except TypeError, ValueError:
+        except (TypeError, ValueError):
             continue
         if isinstance(props, dict):
             collect({k: _decode_astro_value(v) for k, v in props.items()})
@@ -616,11 +616,15 @@ class UltraOptimizedScraper:
 
             # Create page fetch tasks; the first page also grabs the
             # breadcrumb so we learn the real result/page count up front.
-            pages_dispatched = 0
+            failed_pages: list[dict[str, Any]] = []
+
+            def _record_failed_page(page_num: int, url: str, error: str) -> None:
+                logger.logger.warning(
+                    f"[OVERVIEW] page {page_num} failed: {error} ({url})"
+                )
+                failed_pages.append({"page": page_num, "url": url, "error": error})
 
             async def create_page_task(page_num: int):
-                nonlocal pages_dispatched
-                pages_dispatched += 1
                 url = search_url.format(page=page_num)
                 return await self.ultra_optimized_fetch_page(
                     url,
@@ -637,7 +641,7 @@ class UltraOptimizedScraper:
             total_pages: int | None = None
             stop_early = False
 
-            def _process_page_result(result) -> bool:
+            def _process_page_result(result, page_num: int) -> bool:
                 """Fold one fetch result into the aggregates.
 
                 Returns True when no further pages should be requested.
@@ -650,6 +654,26 @@ class UltraOptimizedScraper:
                             ErrorContext(operation="batch_processing"),
                             "batch_execution",
                         )
+                    )
+                    # Synthesize failed metrics so pages_requested still
+                    # accounts for this page, then record the failure and
+                    # keep fetching the remaining pages.
+                    now = time.time()
+                    page_metrics = PageMetrics(
+                        page_number=page_num,
+                        url=search_url.format(page=page_num),
+                        start_time=now,
+                        end_time=now,
+                        success=False,
+                        retry_count=0,
+                        error_message=str(result) or type(result).__name__,
+                    )
+                    all_metrics.append(page_metrics)
+                    tracker.add_page_metric(page_metrics)
+                    _record_failed_page(
+                        page_metrics.page_number,
+                        page_metrics.url,
+                        page_metrics.error_message,
                     )
                     return False
 
@@ -668,6 +692,18 @@ class UltraOptimizedScraper:
                 all_metrics.append(page_metrics)
                 tracker.add_page_metric(page_metrics)
 
+                if not page_metrics.success:
+                    # A failed page says nothing about later pages — record it
+                    # and keep fetching. It must not count as fetched, must not
+                    # trigger the empty-page stop, and must not participate in
+                    # the min_publish_date cutoff.
+                    _record_failed_page(
+                        page_metrics.page_number,
+                        page_metrics.url,
+                        page_metrics.error_message or "Unknown error",
+                    )
+                    return False
+
                 if not page_results:
                     logger.logger.info(
                         f"[OVERVIEW] page {page_metrics.page_number} returned no "
@@ -675,7 +711,7 @@ class UltraOptimizedScraper:
                     )
                     # Only a successfully loaded empty page means we are past
                     # the end; a failed fetch says nothing about later pages.
-                    return bool(page_metrics.success)
+                    return True
 
                 if min_publish_date:
                     stop = _page_has_old_listings(page_results, min_publish_date)
@@ -691,9 +727,11 @@ class UltraOptimizedScraper:
             # First page alone: its breadcrumb clamps the remaining range
             # before we spend requests on pages that don't exist.
             if page_numbers:
-                stop_early = _process_page_result(
-                    await create_page_task(page_numbers[0])
-                )
+                try:
+                    first_result = await create_page_task(page_numbers[0])
+                except Exception as e:
+                    first_result = e
+                stop_early = _process_page_result(first_result, page_numbers[0])
 
             remaining = [
                 p for p in page_numbers[1:] if total_pages is None or p <= total_pages
@@ -711,8 +749,8 @@ class UltraOptimizedScraper:
                     batch_tasks, return_exceptions=True
                 )
 
-                for result in batch_results:
-                    if _process_page_result(result):
+                for batch_page, result in zip(batch_pages, batch_results):
+                    if _process_page_result(result, batch_page):
                         stop_early = True
 
                 # Memory cleanup between batches
@@ -772,7 +810,7 @@ class UltraOptimizedScraper:
                 "results": all_results,
                 "unique_results": len(all_results),
                 "page": page,
-                "pages_fetched": pages_dispatched,
+                "pages_fetched": successful_pages,
                 "time_taken": round(request_metrics.total_time, 3),
                 "performance_metrics": {
                     **request_metrics.to_dict(),
@@ -796,6 +834,13 @@ class UltraOptimizedScraper:
             if total_results is not None:
                 response["total_results"] = total_results
                 response["total_pages"] = total_pages
+
+            # Surface per-page failures so callers can tell partial results
+            # apart from complete ones; absent when every page succeeded.
+            if failed_pages:
+                response["failed_pages"] = sorted(
+                    failed_pages, key=lambda f: f["page"]
+                )
 
             # Add warning information if present
             warnings = warning_manager.get_warnings()

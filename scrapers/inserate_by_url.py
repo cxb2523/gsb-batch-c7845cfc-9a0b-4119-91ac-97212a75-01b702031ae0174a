@@ -7,6 +7,7 @@ import asyncio
 import gc
 import logging
 import re
+import time
 from datetime import datetime
 from typing import Any
 
@@ -18,7 +19,7 @@ from scrapers.inserate_ultra_optimized import (
 )
 from utils.breadcrumb import TOTAL_RESULTS_SELECTOR, parse_breadcrumb
 from utils.browser import OptimizedPlaywrightManager
-from utils.performance import PerformanceTracker
+from utils.performance import PageMetrics, PerformanceTracker
 
 
 def inject_page(url: str, page_num: int) -> str:
@@ -78,6 +79,7 @@ async def scrape_by_url(
         batch_size = min(8, max_pages)
         all_results = []
         all_metrics = []
+        failed_pages: list[dict[str, Any]] = []
         total_results: int | None = None
         actual_max_pages: int | None = None
         _log = logging.getLogger("scrape_by_url")
@@ -97,51 +99,90 @@ async def scrape_by_url(
 
             if page_num > 1:
                 await asyncio.sleep(2)
-            result = await scraper.ultra_optimized_fetch_page(
-                inject_page(base_url, page_num),
-                page_num,
-                extra_selectors=TOTAL_RESULTS_SELECTOR if page_num == 1 else None,
-            )
-            if not isinstance(result, Exception):
-                page_results, page_metrics, extras = result
 
-                if total_results is None and "breadcrump_summary" in extras:
-                    total_results, actual_max_pages = parse_breadcrumb(
-                        extras["breadcrump_summary"]
+            page_url = inject_page(base_url, page_num)
+            try:
+                page_results, page_metrics, extras = (
+                    await scraper.ultra_optimized_fetch_page(
+                        page_url,
+                        page_num,
+                        extra_selectors=TOTAL_RESULTS_SELECTOR if page_num == 1 else None,
                     )
-                    effective = (
-                        min(max_pages, actual_max_pages)
-                        if actual_max_pages is not None
-                        else max_pages
-                    )
-                    _log.info(
-                        f"[OVERVIEW] breadcrumb: {total_results} results → "
-                        f"{actual_max_pages} page(s) available, "
-                        f"fetching up to {effective}"
-                    )
-
-                if not page_results:
-                    _log.info(
-                        f"[OVERVIEW] page {page_num} returned no results — stopping early"
-                    )
-                    all_metrics.append(page_metrics)
-                    tracker.add_page_metric(page_metrics)
-                    break
-
-                stop = min_publish_date and _page_has_old_listings(
-                    page_results, min_publish_date
                 )
-                if min_publish_date:
-                    page_results = _filter_by_min_publish_date(
-                        page_results, min_publish_date
-                    )
-
-                all_results.extend(page_results)
+            except Exception as e:
+                # A failed page must not abort the whole request — record it
+                # and continue with the next page.
+                error_msg = str(e) or type(e).__name__
+                _log.warning(f"[OVERVIEW] page {page_num} failed: {error_msg}")
+                now = time.time()
+                page_metrics = PageMetrics(
+                    page_number=page_num,
+                    url=page_url,
+                    start_time=now,
+                    end_time=now,
+                    success=False,
+                    retry_count=0,
+                    error_message=error_msg,
+                )
                 all_metrics.append(page_metrics)
                 tracker.add_page_metric(page_metrics)
+                failed_pages.append(
+                    {"page": page_num, "url": page_url, "error": error_msg}
+                )
+                continue
 
-                if stop:
-                    break
+            if total_results is None and "breadcrump_summary" in extras:
+                total_results, actual_max_pages = parse_breadcrumb(
+                    extras["breadcrump_summary"]
+                )
+                effective = (
+                    min(max_pages, actual_max_pages)
+                    if actual_max_pages is not None
+                    else max_pages
+                )
+                _log.info(
+                    f"[OVERVIEW] breadcrumb: {total_results} results → "
+                    f"{actual_max_pages} page(s) available, "
+                    f"fetching up to {effective}"
+                )
+
+            all_metrics.append(page_metrics)
+            tracker.add_page_metric(page_metrics)
+
+            if not page_metrics.success:
+                # Failed fetch: says nothing about later pages — record it and
+                # keep going. It must not count as fetched, must not trigger
+                # the empty-page stop, and must not participate in the
+                # min_publish_date cutoff.
+                error_msg = page_metrics.error_message or "Unknown error"
+                _log.warning(f"[OVERVIEW] page {page_num} failed: {error_msg}")
+                failed_pages.append(
+                    {
+                        "page": page_metrics.page_number,
+                        "url": page_metrics.url,
+                        "error": error_msg,
+                    }
+                )
+                continue
+
+            if not page_results:
+                _log.info(
+                    f"[OVERVIEW] page {page_num} returned no results — stopping early"
+                )
+                break
+
+            stop = min_publish_date and _page_has_old_listings(
+                page_results, min_publish_date
+            )
+            if min_publish_date:
+                page_results = _filter_by_min_publish_date(
+                    page_results, min_publish_date
+                )
+
+            all_results.extend(page_results)
+
+            if stop:
+                break
             gc.collect()
 
         pages_attempted = len(all_metrics)
@@ -175,12 +216,17 @@ async def scrape_by_url(
             },
             "browser_metrics": browser_metrics,
             "page": 1,
-            "pages_fetched": pages_attempted,
+            "pages_fetched": successful_pages,
         }
 
         if total_results is not None:
             response["total_results"] = total_results
             response["total_pages"] = actual_max_pages
+
+        # Surface per-page failures so callers can tell partial results
+        # apart from complete ones; absent when every page succeeded.
+        if failed_pages:
+            response["failed_pages"] = failed_pages
 
         return response
     finally:
