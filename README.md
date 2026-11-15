@@ -56,6 +56,11 @@ Currently supports pushing to:
 - Fill in the push key.
   For example, DingTalk needs to fill in `webhook`, `secret` and `name` in `dingtalk_bot_key.json`;
 
+- Fill in the YouTube API key(s) in `youtube_apikey_list.json`. Multiple keys are
+  supported: they are tried in file order, a key that fails with a quota or
+  authentication error is skipped for the rest of that run, and one failing author
+  never stops the remaining authors from being collected;
+
 - Depending on how often you want to get the latest articles, schedule `python3 main.py` with an external timer such as crontab or Windows Task Scheduler;
 
 
@@ -155,6 +160,10 @@ The main program will read spider_list.json and then read the corresponding file
 
 - 填写推送密钥。
   例如钉钉需要在 `dingtalk_bot_key.json` 中填入`webhook`和`secret`和`name`；
+
+- 在 `youtube_apikey_list.json` 中填写 YouTube API Key，可填写多个
+  （按文件中的顺序依次尝试；某个 Key 出现配额或鉴权类失败时，本轮采集会跳过它，
+  单个作者失败不会影响其余作者继续采集）；
 
 - 取决你你多久想获取一次最新文章，使用外部计时器定时执行 `python3 main.py` 例如 crontab 或 Window 任务计划程序；
 
