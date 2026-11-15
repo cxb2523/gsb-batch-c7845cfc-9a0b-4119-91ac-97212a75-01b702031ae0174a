@@ -22,6 +22,10 @@ export const messages = {
     'fix.markers.title': 'Track the maintenance marker', 'fix.markers.detail': 'Replace the marker with an example issue reference. This changes the signal; it does not implement payment handling.',
     reading: 'Reading local files…', tooMany: 'Choose a smaller folder (10,000 files maximum).', tooLarge: 'Choose a smaller folder (20 MB maximum).', readError: 'Could not read the folder. Try selecting it again.', noText: 'No supported text files were found in that folder.',
     auditAgain: 'Audit updated. {count} findings remain.', changeApplied: 'Example change applied. {before} → {after} findings.',
+    exportManifest: 'Export link checklist ↓', manifestName: 'reporelief-link-manifest.jsonl',
+    manifestResumed: 'Resumable link audit: {processed} settled now, {reused} reused from the saved checklist ({total} links: {missing} missing, {skipped} skipped).',
+    manifestRestarted: 'Saved link checklist belonged to a different folder state; the link audit restarted from scratch ({total} links: {missing} missing, {skipped} skipped).',
+    manifestCorrupt: 'Saved link checklist was corrupt or had an unsupported format; it was discarded and the link audit restarted.',
     planTitle: '# RepoRelief maintenance plan', planSummary: '{files} files · {sourceFiles} source files · {testFiles} test files · {findings} findings', changeReview: 'Change review', relatedTests: 'Related tests (filename and directory heuristic):', noRelatedTests: 'No related tests identified.', limits: 'Limits', downloadName: 'reporelief-plan.md'
   },
   'pt-BR': {
@@ -47,6 +51,10 @@ export const messages = {
     'fix.markers.title': 'Registrar o marcador de manutenção', 'fix.markers.detail': 'Substitui o marcador por uma referência fictícia de issue. Isso altera o sinal, sem implementar o tratamento de pagamentos.',
     reading: 'Lendo arquivos locais…', tooMany: 'Escolha uma pasta menor (máximo de 10.000 arquivos).', tooLarge: 'Escolha uma pasta menor (máximo de 20 MB).', readError: 'Não foi possível ler a pasta. Tente selecioná-la novamente.', noText: 'Nenhum arquivo de texto compatível foi encontrado nesta pasta.',
     auditAgain: 'Auditoria atualizada. {count} achados restantes.', changeApplied: 'Alteração aplicada ao exemplo. {before} → {after} achados.',
+    exportManifest: 'Exportar lista de links ↓', manifestName: 'reporelief-lista-de-links.jsonl',
+    manifestResumed: 'Auditoria de links retomável: {processed} verificados agora, {reused} reaproveitados da lista salva ({total} links: {missing} ausentes, {skipped} ignorados).',
+    manifestRestarted: 'A lista de links salva pertencia a outro estado da pasta; a auditoria de links reiniciou do zero ({total} links: {missing} ausentes, {skipped} ignorados).',
+    manifestCorrupt: 'A lista de links salva estava corrompida ou em formato não suportado; foi descartada e a auditoria de links reiniciou.',
     planTitle: '# Plano de manutenção RepoRelief', planSummary: '{files} arquivos · {sourceFiles} arquivos de código · {testFiles} arquivos de teste · {findings} achados', changeReview: 'Revisão de alterações', relatedTests: 'Testes relacionados (heurística de nomes e diretórios):', noRelatedTests: 'Nenhum teste relacionado identificado.', limits: 'Limites', downloadName: 'reporelief-plano.md'
   }
 };

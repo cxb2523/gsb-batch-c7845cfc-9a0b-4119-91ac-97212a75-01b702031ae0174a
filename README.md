@@ -52,6 +52,20 @@ node bin/reporelief.js examples/neglected-repo
 
 Relative inline links, images and defined reference links are checked against the local path inventory. Query strings and fragments are stripped for path lookup; URL-encoded filenames are decoded. Directories count as existing targets. External URLs, root-relative paths, anchors, HTML links and fenced/inline code examples are not validated. This is a bounded Markdown heuristic, not a full CommonMark parser. Excluded files and directories can appear missing; no instruction correctness is inferred.
 
+### Resumable link checklist
+
+Every candidate link is recorded with its source file, line number, raw target, normalized target path and a settlement status — `exists`, `missing` or `skipped` — plus the skip rule (`external-url`, `anchor`, `root-path`, `query`, `empty-local`, `decode-failed`, `code-example`). The checklist is written, one JSON object per line, to `.reporelief/link-manifest.jsonl` inside the scanned directory (override with `--manifest PATH`). It is human-readable and safe to review by hand.
+
+If a run is interrupted, the next run reads the checklist and only settles the links not already recorded; already-settled entries are reused. A scope fingerprint of the Markdown contents and path inventory ensures that any change to the audited files restarts the link scan from scratch, so a resumed report always matches a single full run. A checklist that is corrupt or uses an unsupported format is reported on stderr, discarded and rebuilt rather than silently trusted. The browser workbench runs the same engine and keeps its checklist in `localStorage`, with an **Export link checklist** button that downloads the identical JSONL format.
+
+```bash
+# Default checklist location: <directory>/.reporelief/link-manifest.jsonl
+node bin/reporelief.js /path/to/your/project
+
+# Resume after an interruption, or keep the checklist somewhere else
+node bin/reporelief.js /path/to/your/project --manifest /tmp/links.jsonl
+```
+
 ## Quick start
 
 Requires Node.js 22 or later and Git. No npm installation, API key or account required.

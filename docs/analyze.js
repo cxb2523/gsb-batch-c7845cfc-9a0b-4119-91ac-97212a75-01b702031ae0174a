@@ -9,7 +9,7 @@ const testPattern =
 const conventionalDirectory =
   /^(?:src|lib|app|tests?|__tests__|specs?|__specs__)$/;
 
-const normalizePath = path =>
+export const normalizePath = path =>
   path
     .replaceAll('\\', '/')
     .replace(/^(?:\.\/)+/, '')

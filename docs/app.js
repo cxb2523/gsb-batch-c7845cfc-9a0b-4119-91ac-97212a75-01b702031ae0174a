@@ -1,7 +1,15 @@
-import { analyze } from './analyze.js';
+import { analyze, normalizePath } from './analyze.js';
+import {
+  runLinkAudit,
+  parseLinkManifest,
+  serializeLinkManifest,
+  buildLinkAuditScope,
+  LinkManifestError
+} from './markdown-links.js';
 import { t, localizeReport, exportMarkdown } from './i18n.js?v=20261115-demo';
 import { createDemo, applyDemoFix, demoFixes } from './sample.js?v=20261115-demo';
 const $ = id => document.getElementById(id);
+const MANIFEST_STORAGE_KEY = 'reporelief-link-manifest';
 let locale;
 try { locale = localStorage.getItem('reporelief-language'); } catch {}
 if (!['en', 'pt-BR'].includes(locale)) locale = navigator.language.toLowerCase().startsWith('pt') ? 'pt-BR' : 'en';
@@ -12,6 +20,9 @@ const initialCount = report.summary.findings;
 let sourcePath = 'README.md';
 let localFiles;
 let localPaths;
+let linkManifest;
+let linkStats;
+let linkResume = { resumed: false, restarted: false };
 let busy = false;
 let requestId = 0;
 let notice;
@@ -77,8 +88,44 @@ function render() {
   $('status').textContent = busy ? text('reading') : notice ? `${text(notice.key, notice.vars)} ${status}` : status;
   $('rerun').disabled = busy;
   $('export').disabled = busy;
+  $('export-manifest').disabled = busy || mode !== 'local' || !linkManifest;
   $('workbench').setAttribute('aria-busy', String(busy));
   renderDemo();
+}
+function resetLocalManifest() {
+  linkManifest = undefined;
+  linkStats = undefined;
+  linkResume = { resumed: false, restarted: false };
+  try { localStorage.removeItem(MANIFEST_STORAGE_KEY); } catch {}
+}
+function loadStoredManifest(scope) {
+  let text;
+  try { text = localStorage.getItem(MANIFEST_STORAGE_KEY); } catch { return null; }
+  if (!text) return null;
+  try {
+    const manifest = parseLinkManifest(text);
+    return manifest.scope?.hash === scope.hash ? manifest : null;
+  } catch (error) {
+    if (error instanceof LinkManifestError && !notice) {
+      notice = { key: 'manifestCorrupt' };
+    }
+    try { localStorage.removeItem(MANIFEST_STORAGE_KEY); } catch {}
+    return null;
+  }
+}
+// Same resumable engine as the CLI. The checklist is persisted to
+// localStorage in the same JSONL format, one settled record per line.
+async function runLocalAudit(files, availablePaths) {
+  const entries = Object.entries(files).map(([path, content]) => [normalizePath(path), content]);
+  const inventory = [...new Set(availablePaths.map(normalizePath))];
+  const scope = buildLinkAuditScope(entries, inventory);
+  const stored = loadStoredManifest(scope);
+  const result = await runLinkAudit(entries, inventory, { manifest: stored, scope });
+  linkManifest = result.manifest;
+  linkStats = result.stats;
+  linkResume = { resumed: result.resumed, restarted: result.restarted };
+  try { localStorage.setItem(MANIFEST_STORAGE_KEY, serializeLinkManifest(linkManifest)); } catch {}
+  return analyze(files, [], availablePaths);
 }
 function runDemo(scroll = true) {
   requestId++;
@@ -87,6 +134,7 @@ function runDemo(scroll = true) {
   mode = 'sample';
   localFiles = undefined;
   localPaths = undefined;
+  resetLocalManifest();
   $('folder').value = '';
   $('priority').value = 'all';
   sourcePath = 'README.md';
@@ -133,9 +181,19 @@ $('findings').addEventListener('click', event => {
   $('sample-file').focus({ preventScroll: true });
   $('sample-source').scrollIntoView({ behavior: 'smooth', block: 'center' });
 });
-$('rerun').addEventListener('click', () => {
-  report = mode === 'sample' ? analyze(demoState.files) : analyze(localFiles, [], localPaths);
-  notice = { key: 'auditAgain', vars: { count: report.summary.findings } };
+$('rerun').addEventListener('click', async () => {
+  if (mode === 'sample') {
+    report = analyze(demoState.files);
+    notice = { key: 'auditAgain', vars: { count: report.summary.findings } };
+  } else {
+    busy = true;
+    render();
+    report = await runLocalAudit(localFiles, localPaths);
+    busy = false;
+    notice = linkResume.resumed
+      ? { key: 'manifestResumed', vars: linkStats }
+      : { key: 'auditAgain', vars: { count: report.summary.findings } };
+  }
   render();
 });
 $('folder').addEventListener('change', async event => {
@@ -165,10 +223,14 @@ $('folder').addEventListener('change', async event => {
     if (!Object.keys(files).length) throw new Error('noText');
     localFiles = files;
     localPaths = availablePaths;
-    report = analyze(files, [], availablePaths);
+    report = await runLocalAudit(files, availablePaths);
     mode = 'local';
     $('priority').value = 'all';
-    notice = undefined;
+    notice = linkResume.restarted
+      ? { key: 'manifestRestarted', vars: linkStats }
+      : linkResume.resumed
+        ? { key: 'manifestResumed', vars: linkStats }
+        : undefined;
   } catch (error) {
     if (currentRequest !== requestId) return;
     notice = { key: ['tooMany', 'tooLarge', 'noText'].includes(error.message) ? error.message : 'readError' };
@@ -181,6 +243,15 @@ $('export').addEventListener('click', () => {
   const link = element('a');
   link.href = url;
   link.download = text('downloadName');
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+});
+$('export-manifest').addEventListener('click', () => {
+  if (!linkManifest) return;
+  const url = URL.createObjectURL(new Blob([serializeLinkManifest(linkManifest)], { type: 'application/x-ndjson;charset=utf-8' }));
+  const link = element('a');
+  link.href = url;
+  link.download = text('manifestName');
   link.click();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 });
