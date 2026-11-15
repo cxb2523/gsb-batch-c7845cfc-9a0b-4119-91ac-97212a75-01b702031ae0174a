@@ -4,6 +4,19 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Per-file settlement records for Reddit parsing. Every input file now produces a `<input-file>.settlement.json` next to its CSV/Parquet output containing the input file name, data type, `success_rows`, `bad_rows`, output path, sizes, a bounded list of bad-line samples (line number + error), and whether the `retrieved_on` (legacy) or `_meta.retrieved_2nd_on` (new-format) timestamp fallback was used (with per-fallback row counts). The file name embeds the input identifier so parallel workers can no longer overwrite each other's results.
+- Settlement status distinguishes `success`, `partial_success` (one or more bad lines skipped) and `failed` (whole file could not be opened/written). `parse_files_parallel` collects one settlement per input file and never aborts the remaining files when one fails; `process_single_file` returns the settlement instead of a `(input_size, output_file)` tuple, and `parse_to_csv` raises `ParseFailureError` (carrying the settlement) on whole-file failure.
+
+### Changed
+
+- Bad lines are still skipped and processing continues, but they are now counted and sampled on the settlement record instead of being only logged. Transform-time errors on an individual record are treated as bad lines as well; open/write failures remain whole-file failures.
+- Parsing error logs are now per input file (`parsing_errors_<input-file>.log`) instead of a shared `parsing_errors_<data_type>.log` that parallel workers overwrote.
+- CSV/Parquet output format and column/field order are unchanged; temp-file cleanup and atomic-rename behavior on failure are preserved.
+
 ## [3.0.0]
 
 Major release. Adds StarRocks as a first-class OLAP backend, a jobs scheduler with a web UI and MCP server for human-in-the-loop agentic query workflows, GitHub Codespaces support for a click-to-try demo, and a comprehensive authentication hardening sweep across PostgreSQL, MongoDB, and StarRocks.

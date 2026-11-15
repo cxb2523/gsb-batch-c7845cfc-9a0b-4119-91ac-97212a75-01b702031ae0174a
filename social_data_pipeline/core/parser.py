@@ -3,10 +3,261 @@ Generic JSON to CSV/Parquet parsing utilities.
 
 This module contains shared utilities used by all platform-specific parsers.
 Platform-specific logic (like Reddit's waterfall algorithm) lives in platforms/*.
+
+It also defines the per-file *settlement record* contract used so that every
+input file gets an independently verifiable result (see ParseSettlement).
 """
 
+import json
+import logging
+from dataclasses import dataclass, field as dc_field, asdict
 from pathlib import Path
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Iterator, Optional, Tuple
+
+
+# ---------------------------------------------------------------------------
+# Per-file settlement records
+# ---------------------------------------------------------------------------
+
+#: File parsed fully with no bad lines.
+SETTLEMENT_STATUS_SUCCESS = "success"
+#: File parsed to completion but one or more lines were bad and skipped.
+SETTLEMENT_STATUS_PARTIAL = "partial_success"
+#: File could not be parsed end-to-end (open/write failure, ...); no
+#: trustworthy output file exists and any temp file was cleaned up.
+SETTLEMENT_STATUS_FAILED = "failed"
+
+SETTLEMENT_STATUSES = (
+    SETTLEMENT_STATUS_SUCCESS,
+    SETTLEMENT_STATUS_PARTIAL,
+    SETTLEMENT_STATUS_FAILED,
+)
+
+#: Suffix appended to the input-file identifier when writing settlement JSON.
+SETTLEMENT_SUFFIX = ".settlement.json"
+
+#: Maximum number of bad-line samples retained on a settlement record.
+MAX_ERROR_SAMPLES = 10
+
+
+class ParseFailureError(RuntimeError):
+    """Raised when an entire input file cannot be parsed (as opposed to
+    individual bad lines, which are skipped and counted).
+
+    Carries the ParseSettlement describing the failed file so callers do not
+    have to reconstruct it.
+    """
+
+    def __init__(self, settlement: "ParseSettlement"):
+        self.settlement = settlement
+        super().__init__(
+            f"Parsing failed for {settlement.input_file}: {settlement.error}"
+        )
+
+
+@dataclass
+class ParseSettlement:
+    """Per-input-file settlement record.
+
+    One record is produced for every input file handed to a parser, including
+    files that fail outright.  Records are serialized to JSON next to the
+    output file with a per-input-file name so parallel workers cannot
+    overwrite each other.
+
+    Fields:
+        input_file: Name (not full path) of the input file this record is for.
+        data_type: Platform data type, e.g. 'comments' / 'submissions'.
+        status: One of SETTLEMENT_STATUS_SUCCESS / _PARTIAL / _FAILED.
+        success_rows: Number of lines parsed and written successfully.
+        bad_rows: Number of lines that could not be parsed and were skipped.
+        output_path: Intended output path (str), or None when no output was
+            ever produced. Never trust this path on a 'failed' record.
+        used_retrieved_on_fallback: At least one row used the legacy
+            ``retrieved_on`` fallback for ``retrieved_utc``.
+        used_retrieved_2nd_on_fallback: At least one row used the new-format
+            ``_meta.retrieved_2nd_on`` fallback.
+        retrieved_on_fallback_rows / retrieved_2nd_on_fallback_rows:
+            Per-fallback row counts backing the booleans above.
+        input_size / output_size: File sizes in bytes when known.
+        error: Failure message for 'failed' records, otherwise None.
+        error_samples: Up to MAX_ERROR_SAMPLES {line, error, detail} dicts
+            describing skipped bad lines (empty for clean/failed-open files).
+        settlement_path: Where this record was (or will be) written, or None.
+    """
+
+    input_file: str
+    data_type: str = ""
+    status: str = SETTLEMENT_STATUS_SUCCESS
+    success_rows: int = 0
+    bad_rows: int = 0
+    output_path: Optional[str] = None
+    used_retrieved_on_fallback: bool = False
+    used_retrieved_2nd_on_fallback: bool = False
+    retrieved_on_fallback_rows: int = 0
+    retrieved_2nd_on_fallback_rows: int = 0
+    input_size: Optional[int] = None
+    output_size: Optional[int] = None
+    error: Optional[str] = None
+    error_samples: List[Dict[str, Any]] = dc_field(default_factory=list)
+    settlement_path: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        if self.status not in SETTLEMENT_STATUSES:
+            raise ValueError(
+                f"Invalid settlement status {self.status!r}; "
+                f"expected one of {SETTLEMENT_STATUSES}"
+            )
+
+    # -- construction helpers ---------------------------------------------
+
+    def mark_failed(self, error: str) -> "ParseSettlement":
+        """Record a whole-file failure. Half-finished output must already
+        have been cleaned up by the caller."""
+        self.status = SETTLEMENT_STATUS_FAILED
+        self.error = str(error)
+        return self
+
+    def finalize_status(self) -> "ParseSettlement":
+        """Derive success vs. partial_success from the row counters.
+
+        Only applies while the file has not failed outright.
+        """
+        if self.status != SETTLEMENT_STATUS_FAILED:
+            self.status = (
+                SETTLEMENT_STATUS_PARTIAL
+                if self.bad_rows > 0
+                else SETTLEMENT_STATUS_SUCCESS
+            )
+        return self
+
+    def add_error_sample(self, line_number: int, error: Exception, detail: str) -> None:
+        """Retain a bounded sample of skipped bad lines for auditability."""
+        if len(self.error_samples) >= MAX_ERROR_SAMPLES:
+            return
+        self.error_samples.append(
+            {
+                "line": line_number,
+                "error": type(error).__name__,
+                "detail": detail[:200],
+            }
+        )
+
+    def record_timestamp_fallback(self, fallback: str, count: int = 1) -> None:
+        """Accumulate timestamp-fallback usage (platform agnostic keys).
+
+        Args:
+            fallback: 'retrieved_on' or 'retrieved_2nd_on'.
+            count: Number of rows that used the fallback.
+        """
+        if fallback == "retrieved_on":
+            self.retrieved_on_fallback_rows += count
+            self.used_retrieved_on_fallback = True
+        elif fallback == "retrieved_2nd_on":
+            self.retrieved_2nd_on_fallback_rows += count
+            self.used_retrieved_2nd_on_fallback = True
+        else:
+            raise ValueError(f"Unknown timestamp fallback: {fallback!r}")
+
+    # -- (de)serialization -------------------------------------------------
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    def write_json(self, path: Optional[str] = None) -> str:
+        """Atomically write this settlement record as JSON.
+
+        A temp file + rename is used so a crashed/colliding parallel writer
+        never leaves a half-written settlement that could be mistaken for a
+        complete one.
+
+        Returns the path written.
+        """
+        target = Path(path) if path else Path(self.settlement_path)
+        if target is None:
+            raise ValueError("No settlement path configured")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        tmp = target.with_suffix(target.suffix + ".tmp")
+        # Record the destination before serializing so the JSON payload itself
+        # contains the path it was written to.
+        self.settlement_path = str(target)
+        payload = json.dumps(self.to_dict(), indent=2, sort_keys=True, ensure_ascii=False)
+        tmp.write_text(payload, encoding="utf-8")
+        tmp.replace(target)
+        return str(target)
+
+
+def settlement_file_path(output_dir: Path, input_file: str) -> Path:
+    """Return the unique settlement JSON path for an input file.
+
+    Named after the input file (plus SETTLEMENT_SUFFIX) so concurrent
+    workers parsing different files never share or overwrite a record.
+    """
+    return Path(output_dir) / f"{Path(input_file).name}{SETTLEMENT_SUFFIX}"
+
+
+def write_settlement(settlement: ParseSettlement, output_dir: Path, input_file: str) -> str:
+    """Write *settlement* for *input_file* into *output_dir* and record its
+    path on the record.
+
+    The write itself is atomic (temp file + replace inside
+    :meth:`ParseSettlement.write_json`); errors propagate to the caller so a
+    missing settlement is never silently mistaken for a completed file.
+    """
+    path = settlement_file_path(output_dir, input_file)
+    return settlement.write_json(str(path))
+
+
+def iter_ndjson_records(
+    infile,
+    settlement: ParseSettlement,
+    transform,
+    log_label: str,
+) -> Iterator[Tuple[int, Any]]:
+    """Yield ``(line_number, transformed_row)`` for every good NDJSON line.
+
+    Bad lines (undecodable JSON, or a transform that raises) are skipped —
+    never aborting the file — while still being counted on *settlement* and
+    logged to the per-file error log. Blank lines and NUL bytes are ignored
+    exactly as before and are not counted as bad rows.
+
+    Args:
+        infile: Open text file object over the NDJSON input.
+        settlement: ParseSettlement accumulating bad_rows / error_samples.
+        transform: Callable taking the decoded dict and returning the output
+            row. Anything it raises is treated as a bad line.
+        log_label: Label (usually the input file path) for error messages.
+
+    Yields:
+        (1-based line number, transformed row) tuples for good lines.
+    """
+    for line_number, line in enumerate(infile, start=1):
+        cleaned_line = line.replace("\x00", "")
+        if not cleaned_line.strip():
+            continue
+        try:
+            data = json.loads(cleaned_line)
+        except json.JSONDecodeError as e:
+            settlement.bad_rows += 1
+            settlement.add_error_sample(line_number, e, cleaned_line.strip())
+            logging.error(
+                "Failed to decode line %d in %s: %s... Error: %s",
+                line_number, log_label, cleaned_line[:100], e,
+            )
+            continue
+        try:
+            row = transform(data)
+        except Exception as e:
+            # A single malformed record must not sink the whole file: count
+            # it, keep a sample, log it, and move on.
+            settlement.bad_rows += 1
+            settlement.add_error_sample(line_number, e, cleaned_line.strip())
+            logging.error(
+                "Failed to transform line %d in %s: %s... Error: %s",
+                line_number, log_label, cleaned_line[:100], e,
+            )
+            continue
+        settlement.success_rows += 1
+        yield line_number, row
 
 
 def escape_string(value: str) -> str:

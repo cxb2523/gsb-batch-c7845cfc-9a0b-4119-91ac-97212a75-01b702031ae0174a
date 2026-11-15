@@ -435,25 +435,41 @@ def run_pipeline(config_dir: str = "/app/config"):
 
             parse_input = [(json_path, data_type) for json_path, file_id, data_type in files_to_parse]
 
-            try:
-                parser.parse_files_parallel(
-                    files=parse_input,
-                    output_dir=parsed_dir,
-                    platform_config=platform_config,
-                    workers=workers
-                )
+            # Parallel parsing no longer raises on individual file failures:
+            # one settlement per input file is returned, each marked
+            # success / partial_success / failed.
+            parse_results = parser.parse_files_parallel(
+                files=parse_input,
+                output_dir=parsed_dir,
+                platform_config=platform_config,
+                workers=workers
+            )
 
-                for json_path, file_id, data_type in files_to_parse:
+            for (json_path, file_id, data_type), result in zip(files_to_parse, parse_results):
+                # Custom parsers still return (output_path, data_type) tuples.
+                if not hasattr(result, 'status'):
                     success_count += 1
-
-                    cleanup_temp = get_required(config, 'processing', 'cleanup_temp')
-                    if cleanup_temp and os.path.exists(json_path):
+                    if get_required(config, 'processing', 'cleanup_temp') and os.path.exists(json_path):
                         os.remove(json_path)
                         print(f"[sdp] Removed: {Path(json_path).name}")
+                    continue
 
-            except Exception as e:
-                print(f"[sdp] Error in parallel parsing: {e}")
-                fail_count += len(files_to_parse)
+                if result.status == 'failed':
+                    fail_count += 1
+                    print(f"[sdp] Error parsing {file_id}: {result.error}")
+                    continue
+
+                success_count += 1
+                if result.status == 'partial_success':
+                    print(
+                        f"[sdp] {file_id}: parsed with {result.bad_rows} bad "
+                        f"line(s) skipped; settlement: {result.settlement_path}"
+                    )
+
+                cleanup_temp = get_required(config, 'processing', 'cleanup_temp')
+                if cleanup_temp and os.path.exists(json_path):
+                    os.remove(json_path)
+                    print(f"[sdp] Removed: {Path(json_path).name}")
         else:
             # Sequential parsing
             for json_path, file_id, data_type in files_to_parse:

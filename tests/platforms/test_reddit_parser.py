@@ -1,17 +1,30 @@
 """Tests for Reddit platform parser."""
 
 import csv
+import json
 import os
+from pathlib import Path
 
 import pytest
 import yaml
 
+from social_data_pipeline.core.parser import (
+    ParseSettlement,
+    ParseFailureError,
+    SETTLEMENT_STATUS_SUCCESS,
+    SETTLEMENT_STATUS_PARTIAL,
+    SETTLEMENT_STATUS_FAILED,
+    SETTLEMENT_SUFFIX,
+    settlement_file_path,
+)
 from social_data_pipeline.platforms.reddit.parser import (
     base36_to_int,
     determine_removal_status,
     get_all_columns,
     transform_json,
     parse_to_csv,
+    parse_file_to_settlement,
+    parse_files_parallel,
     process_single_file,
 )
 
@@ -291,6 +304,69 @@ class TestTransformJson:
         # retrieved_utc overridden by _meta.retrieved_2nd_on
         assert result[2] == 22222
 
+    def test_retrieved_on_fallback_recorded_on_tracker(self):
+        tracker = ParseSettlement(input_file="RC_x")
+        data = {
+            "id": "abc",
+            "author": "user",
+            "subreddit": "test",
+            "retrieved_on": 12345,
+        }
+        field_types = {"author": "text", "subreddit": "text", "retrieved_utc": "integer"}
+        result = transform_json(
+            data, "2024-01", field_types, ["retrieved_utc", "author"],
+            fallback_tracker=tracker,
+        )
+        assert result[2] == 12345
+        assert tracker.used_retrieved_on_fallback is True
+        assert tracker.retrieved_on_fallback_rows == 1
+        assert tracker.used_retrieved_2nd_on_fallback is False
+
+    def test_2nd_on_fallback_recorded_on_tracker(self):
+        tracker = ParseSettlement(input_file="RS_x")
+        data = {
+            "id": "abc",
+            "author": "user",
+            "subreddit": "test",
+            "retrieved_utc": 11111,
+            "_meta": {"retrieved_2nd_on": 22222},
+        }
+        field_types = {"author": "text", "subreddit": "text", "retrieved_utc": "integer"}
+        result = transform_json(
+            data, "2024-01", field_types, ["retrieved_utc", "author"],
+            fallback_tracker=tracker,
+        )
+        assert result[2] == 22222
+        assert tracker.used_retrieved_2nd_on_fallback is True
+        assert tracker.retrieved_2nd_on_fallback_rows == 1
+        # retrieved_utc was present, so the legacy retrieved_on path is unused
+        assert tracker.used_retrieved_on_fallback is False
+
+    def test_no_fallback_recorded_when_retrieved_utc_present(self):
+        tracker = ParseSettlement(input_file="RC_x")
+        data = {
+            "id": "abc",
+            "author": "user",
+            "subreddit": "test",
+            "retrieved_utc": 999,
+        }
+        field_types = {"author": "text", "subreddit": "text", "retrieved_utc": "integer"}
+        transform_json(
+            data, "2024-01", field_types, ["retrieved_utc", "author"],
+            fallback_tracker=tracker,
+        )
+        assert tracker.used_retrieved_on_fallback is False
+        assert tracker.used_retrieved_2nd_on_fallback is False
+        assert tracker.retrieved_on_fallback_rows == 0
+        assert tracker.retrieved_2nd_on_fallback_rows == 0
+
+    def test_no_tracker_leaves_output_unchanged(self):
+        """Without a tracker the output values must be byte-identical."""
+        data = {"id": "abc", "retrieved_on": 12345, "_meta": {"retrieved_2nd_on": 22222}}
+        field_types = {"retrieved_utc": "integer"}
+        result = transform_json(data, "2024-01", field_types, ["retrieved_utc"])
+        assert result[2] == 22222
+
     def test_id10_computation(self):
         data = {
             "id": "1a",
@@ -456,7 +532,7 @@ class TestProcessSingleFile:
         output_file = str(tmp_path / "comments" / "RC_2024-01.csv")
         (tmp_path / "comments").mkdir()
 
-        input_size, out_path = process_single_file(
+        settlement = process_single_file(
             input_file=input_file,
             output_file=output_file,
             data_type="comments",
@@ -465,8 +541,11 @@ class TestProcessSingleFile:
             file_format="csv",
         )
 
+        out_path = settlement.output_path
         assert os.path.exists(out_path)
-        assert input_size > 0
+        assert settlement.input_size > 0
+        assert settlement.status == "success"
+        assert settlement.bad_rows == 0
         # Temp file should not exist
         assert not os.path.exists(output_file + ".temp")
 
@@ -491,3 +570,363 @@ class TestProcessSingleFile:
         df = pl.read_parquet(output_file)
         assert len(df) == 10
         assert "dataset" in df.columns
+
+
+# ============================================================================
+# Settlement records: per-file results, bad lines, failures, fallbacks
+# ============================================================================
+
+
+def _write_ndjson(path, lines):
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+class TestSettlementBadLines:
+    def _config(self, config_fixtures_dir):
+        return yaml.safe_load(
+            (config_fixtures_dir / "valid_platform_reddit.yaml").read_text()
+        )
+
+    def test_bad_lines_skipped_and_counted_csv(self, config_fixtures_dir, tmp_path):
+        platform_config = self._config(config_fixtures_dir)
+        platform_config["file_format"] = "csv"
+        good = json.dumps({
+            "id": "abc1234", "author": "u", "body": "hi", "subreddit": "x",
+            "created_utc": 1, "retrieved_utc": 2,
+        })
+        input_path = tmp_path / "RC_2024-09"
+        _write_ndjson(input_path, [good, "{not valid json", good, "   ", "{also broken"])
+
+        settlement = process_single_file(
+            input_file=str(input_path),
+            output_file=str(tmp_path / "out.csv"),
+            data_type="comments",
+            data_type_config=platform_config["field_types"],
+            fields_to_extract=platform_config["fields"]["comments"],
+            file_format="csv",
+        )
+
+        assert settlement.status == SETTLEMENT_STATUS_PARTIAL
+        assert settlement.success_rows == 2
+        assert settlement.bad_rows == 2
+        # Output contains header + 2 good rows only
+        with open(settlement.output_path, newline="", encoding="utf-8") as f:
+            rows = list(csv.reader(f))
+        assert len(rows) == 3
+        # Bad-line samples retained for auditing
+        assert len(settlement.error_samples) == 2
+        assert {s["line"] for s in settlement.error_samples} == {2, 5}
+        assert all(s["error"] == "JSONDecodeError" for s in settlement.error_samples)
+
+    def test_bad_lines_settlement_written_by_parse_to_csv(
+        self, config_fixtures_dir, tmp_path
+    ):
+        platform_config = self._config(config_fixtures_dir)
+        platform_config["file_format"] = "csv"
+        good = json.dumps({
+            "id": "abc1234", "author": "u", "body": "hi", "subreddit": "x",
+            "created_utc": 1, "retrieved_utc": 2,
+        })
+        input_path = tmp_path / "RC_2024-09"
+        _write_ndjson(input_path, [good, "broken{"])
+
+        parse_to_csv(
+            input_file=str(input_path),
+            output_dir=str(tmp_path / "parsed"),
+            data_type="comments",
+            platform_config=platform_config,
+        )
+
+        settlement_path = settlement_file_path(
+            tmp_path / "parsed" / "comments", "RC_2024-09"
+        )
+        assert settlement_path.exists()
+        record = json.loads(settlement_path.read_text(encoding="utf-8"))
+        assert record["input_file"] == "RC_2024-09"
+        assert record["status"] == SETTLEMENT_STATUS_PARTIAL
+        assert record["success_rows"] == 1
+        assert record["bad_rows"] == 1
+        assert record["output_path"].endswith("RC_2024-09.csv")
+        assert "used_retrieved_on_fallback" in record
+        assert "used_retrieved_2nd_on_fallback" in record
+        assert record["settlement_path"].endswith(SETTLEMENT_SUFFIX)
+
+    def test_bad_lines_parquet(self, config_fixtures_dir, tmp_path):
+        import polars as pl
+
+        platform_config = self._config(config_fixtures_dir)
+        platform_config["file_format"] = "parquet"
+        good = json.dumps({
+            "id": "abc1234", "author": "u", "body": "hi", "subreddit": "x",
+            "created_utc": 1, "retrieved_utc": 2,
+        })
+        input_path = tmp_path / "RC_2024-09"
+        _write_ndjson(input_path, [good, "broken", good])
+
+        settlement = process_single_file(
+            input_file=str(input_path),
+            output_file=str(tmp_path / "out.parquet"),
+            data_type="comments",
+            data_type_config=platform_config["field_types"],
+            fields_to_extract=platform_config["fields"]["comments"],
+            file_format="parquet",
+        )
+
+        assert settlement.status == SETTLEMENT_STATUS_PARTIAL
+        assert settlement.success_rows == 2
+        assert settlement.bad_rows == 1
+        df = pl.read_parquet(settlement.output_path)
+        assert len(df) == 2
+
+
+class TestSettlementFallbacks:
+    def test_legacy_retrieved_on_file_flags_fallback(self, config_fixtures_dir, tmp_path):
+        platform_config = yaml.safe_load(
+            (config_fixtures_dir / "valid_platform_reddit.yaml").read_text()
+        )
+        platform_config["file_format"] = "csv"
+        # Old-format rows: no retrieved_utc, only retrieved_on
+        rows = [
+            json.dumps({"id": "a1", "author": "u", "subreddit": "s", "retrieved_on": 100}),
+            json.dumps({"id": "a2", "author": "u", "subreddit": "s", "retrieved_on": 200}),
+        ]
+        input_path = tmp_path / "RS_2006-03"
+        _write_ndjson(input_path, rows)
+
+        settlement = parse_file_to_settlement(
+            input_file=str(input_path),
+            output_dir=str(tmp_path / "parsed"),
+            data_type="submissions",
+            platform_config=platform_config,
+        )
+
+        assert settlement.status == SETTLEMENT_STATUS_SUCCESS
+        assert settlement.used_retrieved_on_fallback is True
+        assert settlement.retrieved_on_fallback_rows == 2
+        assert settlement.used_retrieved_2nd_on_fallback is False
+        record = json.loads(Path(settlement.settlement_path).read_text(encoding="utf-8"))
+        assert record["used_retrieved_on_fallback"] is True
+        assert record["retrieved_on_fallback_rows"] == 2
+
+    def test_new_format_2nd_on_file_flags_fallback(self, config_fixtures_dir, tmp_path):
+        platform_config = yaml.safe_load(
+            (config_fixtures_dir / "valid_platform_reddit.yaml").read_text()
+        )
+        platform_config["file_format"] = "csv"
+        rows = [
+            json.dumps({
+                "id": "a1", "author": "u", "subreddit": "s",
+                "retrieved_utc": 100, "_meta": {"retrieved_2nd_on": 300},
+            }),
+        ]
+        input_path = tmp_path / "RS_2024-09"
+        _write_ndjson(input_path, rows)
+
+        settlement = parse_file_to_settlement(
+            input_file=str(input_path),
+            output_dir=str(tmp_path / "parsed"),
+            data_type="submissions",
+            platform_config=platform_config,
+        )
+
+        assert settlement.used_retrieved_2nd_on_fallback is True
+        assert settlement.retrieved_2nd_on_fallback_rows == 1
+        assert settlement.used_retrieved_on_fallback is False
+
+    def test_mixed_fixture_flags_both_fallbacks(
+        self, config_fixtures_dir, reddit_fixtures_dir, tmp_path
+    ):
+        # RC_2024-01 intentionally mixes eras: one legacy row backfilled from
+        # retrieved_on, one new-format row using _meta.retrieved_2nd_on.
+        platform_config = yaml.safe_load(
+            (config_fixtures_dir / "valid_platform_reddit.yaml").read_text()
+        )
+        settlement = parse_file_to_settlement(
+            input_file=str(reddit_fixtures_dir / "RC_2024-01.ndjson"),
+            output_dir=str(tmp_path / "parsed"),
+            data_type="comments",
+            platform_config=platform_config,
+        )
+        assert settlement.status == SETTLEMENT_STATUS_SUCCESS
+        assert settlement.used_retrieved_on_fallback is True
+        assert settlement.retrieved_on_fallback_rows == 1
+        assert settlement.used_retrieved_2nd_on_fallback is True
+        assert settlement.retrieved_2nd_on_fallback_rows == 1
+
+
+class TestSettlementFailures:
+    def _config(self, config_fixtures_dir):
+        return yaml.safe_load(
+            (config_fixtures_dir / "valid_platform_reddit.yaml").read_text()
+        )
+
+    def test_unopenable_input_returns_failed_settlement(self, config_fixtures_dir, tmp_path):
+        platform_config = self._config(config_fixtures_dir)
+        missing = tmp_path / "RC_does_not_exist"
+        settlement = process_single_file(
+            input_file=str(missing),
+            output_file=str(tmp_path / "out.csv"),
+            data_type="comments",
+            data_type_config=platform_config["field_types"],
+            fields_to_extract=platform_config["fields"]["comments"],
+            file_format="csv",
+        )
+        assert settlement.status == SETTLEMENT_STATUS_FAILED
+        assert settlement.error
+        assert not os.path.exists(str(tmp_path / "out.csv"))
+        assert not os.path.exists(str(tmp_path / "out.csv.temp"))
+
+    def test_parse_to_csv_raises_failure_and_writes_settlement(
+        self, config_fixtures_dir, tmp_path
+    ):
+        platform_config = self._config(config_fixtures_dir)
+        missing = tmp_path / "RC_missing"
+        with pytest.raises(ParseFailureError) as exc_info:
+            parse_to_csv(
+                input_file=str(missing),
+                output_dir=str(tmp_path / "parsed"),
+                data_type="comments",
+                platform_config=platform_config,
+            )
+        assert exc_info.value.settlement.status == SETTLEMENT_STATUS_FAILED
+        # A settlement JSON must still exist for the failed file
+        settlement_path = settlement_file_path(
+            tmp_path / "parsed" / "comments", "RC_missing"
+        )
+        assert settlement_path.exists()
+        record = json.loads(settlement_path.read_text(encoding="utf-8"))
+        assert record["status"] == SETTLEMENT_STATUS_FAILED
+        assert record["input_file"] == "RC_missing"
+
+    def test_write_failure_cleans_temp_and_marks_failed(
+        self, config_fixtures_dir, tmp_path, monkeypatch
+    ):
+        platform_config = self._config(config_fixtures_dir)
+        input_path = tmp_path / "RC_2024-09"
+        good = json.dumps({
+            "id": "abc1234", "author": "u", "body": "hi", "subreddit": "x",
+            "created_utc": 1, "retrieved_utc": 2,
+        })
+        _write_ndjson(input_path, [good, good])
+
+        real_open = open
+
+        def flaky_open(path, *args, **kwargs):
+            # Fail when opening the CSV temp output for writing.
+            if str(path).endswith(".temp") and "w" in (args[0] if args else kwargs.get("mode", "")):
+                raise OSError("simulated write failure")
+            return real_open(path, *args, **kwargs)
+
+        monkeypatch.setattr(
+            "social_data_pipeline.platforms.reddit.parser.open", flaky_open, raising=False
+        )
+
+        settlement = process_single_file(
+            input_file=str(input_path),
+            output_file=str(tmp_path / "out.csv"),
+            data_type="comments",
+            data_type_config=platform_config["field_types"],
+            fields_to_extract=platform_config["fields"]["comments"],
+            file_format="csv",
+        )
+        assert settlement.status == SETTLEMENT_STATUS_FAILED
+        assert "simulated write failure" in settlement.error
+        assert not os.path.exists(str(tmp_path / "out.csv"))
+        assert not os.path.exists(str(tmp_path / "out.csv.temp"))
+
+
+class TestParseFilesParallel:
+    def _config(self, config_fixtures_dir):
+        return yaml.safe_load(
+            (config_fixtures_dir / "valid_platform_reddit.yaml").read_text()
+        )
+
+    def test_mixed_success_partial_failure_returns_all(
+        self, config_fixtures_dir, tmp_path
+    ):
+        platform_config = self._config(config_fixtures_dir)
+        platform_config["file_format"] = "csv"
+        good = json.dumps({
+            "id": "abc1234", "author": "u", "body": "hi", "subreddit": "x",
+            "created_utc": 1, "retrieved_utc": 2,
+        })
+
+        clean = tmp_path / "RC_clean"
+        partial = tmp_path / "RC_partial"
+        missing = tmp_path / "RC_missing"
+        _write_ndjson(clean, [good, good])
+        _write_ndjson(partial, [good, "broken", good])
+        # `missing` is deliberately never created
+
+        results = parse_files_parallel(
+            files=[
+                (str(clean), "comments"),
+                (str(partial), "comments"),
+                (str(missing), "comments"),
+            ],
+            output_dir=str(tmp_path / "parsed"),
+            platform_config=platform_config,
+            workers=2,
+        )
+
+        assert len(results) == 3
+        statuses = [r.status for r in results]
+        assert statuses == [
+            SETTLEMENT_STATUS_SUCCESS,
+            SETTLEMENT_STATUS_PARTIAL,
+            SETTLEMENT_STATUS_FAILED,
+        ]
+        by_name = {r.input_file: r for r in results}
+        assert by_name["RC_clean"].success_rows == 2
+        assert by_name["RC_clean"].bad_rows == 0
+        assert by_name["RC_partial"].success_rows == 2
+        assert by_name["RC_partial"].bad_rows == 1
+        assert by_name["RC_missing"].error
+
+        # Each input file gets its own uniquely named settlement JSON —
+        # no parallel overwrites.
+        comments_dir = tmp_path / "parsed" / "comments"
+        settlement_files = sorted(p.name for p in comments_dir.glob(f"*{SETTLEMENT_SUFFIX}"))
+        assert settlement_files == [
+            "RC_clean.settlement.json",
+            "RC_missing.settlement.json",
+            "RC_partial.settlement.json",
+        ]
+        for name in ("RC_clean", "RC_partial"):
+            assert os.path.exists(by_name[name].output_path)
+        # The failed file must not leave a half-finished output behind
+        assert not os.path.exists(by_name["RC_missing"].output_path)
+
+    def test_empty_input_list(self):
+        assert parse_files_parallel([], "/tmp/whatever", {}, workers=2) == []
+
+    def test_parallel_settlements_match_sequential_output(
+        self, config_fixtures_dir, tmp_path
+    ):
+        """CSV content/column order must be unchanged by the rework."""
+        platform_config = self._config(config_fixtures_dir)
+        good = json.dumps({
+            "id": "abc1234", "author": "u", "body": "hi", "subreddit": "x",
+            "created_utc": 1, "retrieved_utc": 2,
+        })
+        f1 = tmp_path / "RC_one"
+        f2 = tmp_path / "RC_two"
+        _write_ndjson(f1, [good])
+        _write_ndjson(f2, [good, good])
+
+        results = parse_files_parallel(
+            files=[(str(f1), "comments"), (str(f2), "comments")],
+            output_dir=str(tmp_path / "parsed"),
+            platform_config=platform_config,
+            workers=2,
+        )
+        for settlement, expected_rows in zip(results, (1, 2)):
+            assert settlement.status == SETTLEMENT_STATUS_SUCCESS
+            with open(settlement.output_path, newline="", encoding="utf-8") as fh:
+                reader = csv.reader(fh)
+                header = next(reader)
+                rows = list(reader)
+            assert header[0:2] == ["dataset", "id"]
+            assert "retrieved_utc" in header
+            assert len(rows) == expected_rows
+

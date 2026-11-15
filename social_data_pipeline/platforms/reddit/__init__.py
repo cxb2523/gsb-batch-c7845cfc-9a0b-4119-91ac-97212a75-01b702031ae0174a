@@ -10,6 +10,7 @@ Handles Reddit-specific data formats including:
 from .parser import (
     transform_json,
     parse_to_csv,
+    parse_file_to_settlement,
     parse_files_parallel,
     process_single_file,
     get_all_columns,
@@ -22,6 +23,7 @@ from .parser import (
 __all__ = [
     'transform_json',
     'parse_to_csv',
+    'parse_file_to_settlement',
     'parse_files_parallel',
     'process_single_file',
     'get_all_columns',

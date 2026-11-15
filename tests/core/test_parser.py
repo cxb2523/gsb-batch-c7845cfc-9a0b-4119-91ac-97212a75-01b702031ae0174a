@@ -1,5 +1,8 @@
 """Tests for social_data_pipeline.core.parser."""
 
+import io
+import json
+
 import pytest
 import polars as pl
 
@@ -14,6 +17,16 @@ from social_data_pipeline.core.parser import (
     build_parquet_schema,
     write_parquet_file,
     BatchedParquetWriter,
+    ParseSettlement,
+    ParseFailureError,
+    iter_ndjson_records,
+    settlement_file_path,
+    write_settlement,
+    SETTLEMENT_STATUS_SUCCESS,
+    SETTLEMENT_STATUS_PARTIAL,
+    SETTLEMENT_STATUS_FAILED,
+    SETTLEMENT_SUFFIX,
+    MAX_ERROR_SAMPLES,
 )
 
 
@@ -308,3 +321,143 @@ class TestBatchedParquetWriter:
         writer = BatchedParquetWriter(["x"], {"x": "text"}, str(out))
         total = writer.close()
         assert total == 0
+
+
+# ── ParseSettlement ─────────────────────────────────────────────────────────
+
+class TestParseSettlement:
+    def test_defaults_are_success(self):
+        s = ParseSettlement(input_file="RC_x")
+        assert s.status == SETTLEMENT_STATUS_SUCCESS
+        assert s.success_rows == 0
+        assert s.bad_rows == 0
+        assert s.used_retrieved_on_fallback is False
+        assert s.used_retrieved_2nd_on_fallback is False
+        assert s.error is None
+        assert s.error_samples == []
+
+    def test_invalid_status_rejected(self):
+        with pytest.raises(ValueError):
+            ParseSettlement(input_file="x", status="nope")
+
+    def test_finalize_status_partial(self):
+        s = ParseSettlement(input_file="x")
+        s.bad_rows = 2
+        s.finalize_status()
+        assert s.status == SETTLEMENT_STATUS_PARTIAL
+
+    def test_finalize_status_stays_success(self):
+        s = ParseSettlement(input_file="x")
+        s.success_rows = 5
+        s.finalize_status()
+        assert s.status == SETTLEMENT_STATUS_SUCCESS
+
+    def test_mark_failed_does_not_get_overridden_by_finalize(self):
+        s = ParseSettlement(input_file="x")
+        s.mark_failed("boom")
+        s.finalize_status()
+        assert s.status == SETTLEMENT_STATUS_FAILED
+        assert s.error == "boom"
+
+    def test_fallback_counters_and_booleans(self):
+        s = ParseSettlement(input_file="x")
+        s.record_timestamp_fallback("retrieved_on")
+        s.record_timestamp_fallback("retrieved_on")
+        s.record_timestamp_fallback("retrieved_2nd_on", count=3)
+        assert s.retrieved_on_fallback_rows == 2
+        assert s.retrieved_2nd_on_fallback_rows == 3
+        assert s.used_retrieved_on_fallback is True
+        assert s.used_retrieved_2nd_on_fallback is True
+
+    def test_unknown_fallback_raises(self):
+        s = ParseSettlement(input_file="x")
+        with pytest.raises(ValueError):
+            s.record_timestamp_fallback("made_up")
+
+    def test_error_samples_are_bounded(self):
+        s = ParseSettlement(input_file="x")
+        for i in range(MAX_ERROR_SAMPLES + 5):
+            s.add_error_sample(i + 1, ValueError("v"), f"line {i}")
+        assert len(s.error_samples) == MAX_ERROR_SAMPLES
+
+    def test_round_trip_json(self, tmp_path):
+        s = ParseSettlement(
+            input_file="RC_2024-01",
+            data_type="comments",
+            output_path=str(tmp_path / "RC_2024-01.csv"),
+        )
+        s.success_rows = 10
+        s.bad_rows = 1
+        s.finalize_status()
+        s.record_timestamp_fallback("retrieved_on")
+        path = settlement_file_path(tmp_path, "RC_2024-01")
+        assert path.name == f"RC_2024-01{SETTLEMENT_SUFFIX}"
+        written = s.write_json(str(path))
+
+        payload = json.loads(open(written, encoding="utf-8").read())
+        assert payload["input_file"] == "RC_2024-01"
+        assert payload["status"] == SETTLEMENT_STATUS_PARTIAL
+        assert payload["success_rows"] == 10
+        assert payload["bad_rows"] == 1
+        assert payload["used_retrieved_on_fallback"] is True
+        assert payload["retrieved_on_fallback_rows"] == 1
+        # No leftover tmp file after the atomic write
+        assert not (tmp_path / "RC_2024-01.settlement.json.tmp").exists()
+
+    def test_write_settlement_helper(self, tmp_path):
+        s = ParseSettlement(input_file="RS_x", data_type="submissions")
+        path = write_settlement(s, tmp_path, "RS_x")
+        assert path == str(settlement_file_path(tmp_path, "RS_x"))
+        assert s.settlement_path == path
+
+    def test_parse_failure_error_carries_settlement(self):
+        s = ParseSettlement(input_file="RC_x").mark_failed("nope")
+        err = ParseFailureError(s)
+        assert err.settlement is s
+        assert "RC_x" in str(err)
+
+
+class TestIterNdjsonRecords:
+    def test_good_and_bad_lines_skipped_counted(self):
+        stream = io.StringIO(
+            '{"id": 1}\n'
+            "not json\n"
+            "\n"
+            "   \n"
+            '{"id": 2}\n'
+            "broken{\n"
+        )
+        settlement = ParseSettlement(input_file="x")
+        rows = list(iter_ndjson_records(stream, settlement, lambda d: d, "x"))
+        assert [r[1] for r in rows] == [{"id": 1}, {"id": 2}]
+        assert settlement.success_rows == 2
+        assert settlement.bad_rows == 2
+        assert [ln for ln, _ in rows] == [1, 5]
+        assert {s["line"] for s in settlement.error_samples} == {2, 6}
+        # Blank lines are not counted as bad
+        assert settlement.status == SETTLEMENT_STATUS_SUCCESS
+        settlement.finalize_status()
+        assert settlement.status == SETTLEMENT_STATUS_PARTIAL
+
+    def test_transform_exception_treated_as_bad_line(self):
+        stream = io.StringIO('{"id": 1}\n{"id": 2}\n')
+
+        def boom(record):
+            if record["id"] == 2:
+                raise RuntimeError("bad record")
+            return record
+
+        settlement = ParseSettlement(input_file="x")
+        rows = list(iter_ndjson_records(stream, settlement, boom, "x"))
+        assert len(rows) == 1
+        assert settlement.success_rows == 1
+        assert settlement.bad_rows == 1
+        assert settlement.error_samples[0]["error"] == "RuntimeError"
+
+    def test_null_bytes_stripped(self):
+        stream = io.StringIO('{"id\x00": 1}\n')
+        settlement = ParseSettlement(input_file="x")
+        rows = list(iter_ndjson_records(stream, settlement, lambda d: d, "x"))
+        assert rows[0][1] == {"id": 1}
+        assert settlement.success_rows == 1
+        assert settlement.bad_rows == 0
