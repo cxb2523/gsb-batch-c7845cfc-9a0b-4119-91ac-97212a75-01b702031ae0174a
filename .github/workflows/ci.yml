@@ -41,3 +41,6 @@ jobs:
 
       - name: Dashboard data validator
         run: node .github/scripts/validate-dashboard-data.mjs --self-test
+
+      - name: GitHub events sync settlement
+        run: node .github/scripts/sync-github-events.mjs --self-test

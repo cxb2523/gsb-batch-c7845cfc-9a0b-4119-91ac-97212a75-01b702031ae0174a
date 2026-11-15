@@ -69,6 +69,9 @@ jobs:
       - name: Dashboard data validator self-test
         run: node .github/scripts/validate-dashboard-data.mjs --self-test
 
+      - name: GitHub events sync settlement self-test
+        run: node .github/scripts/sync-github-events.mjs --self-test
+
       - name: Save self-test runtime state
         continue-on-error: true
         uses: actions/cache/save@v5

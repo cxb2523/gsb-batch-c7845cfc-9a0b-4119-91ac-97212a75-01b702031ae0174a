@@ -28,6 +28,9 @@ for public release tags.
 
 ### Changed
 
+- `sync-github-events.mjs` now settles every fetched event individually: each one is either appended to the content file and recorded in the sync state, or reported with a skip reason (unsupported type/action, stale, excluded repo, missing fields, duplicate, run limit). It prints a per-event summary, persists state after each write so earlier notes survive later failures, and dedupes re-runs against both the state file and the content file.
+- GitHub events API rate limits / non-array responses now leave existing content and state untouched and exit non-zero so the workflow notices; individual bad events no longer abort the whole sync.
+
 - `TWEET_AI_QUALITY_GATE_ENABLED` now defaults to `true` (one cheap call per run; falls back to the top local candidate when it rejects).
 - Draft reuse defaults extended (`TWEET_FOLLOWUP_DRAFT_REUSE_HOURS` / `TWEET_REPLY_DRAFT_REUSE_HOURS` 20 → 48), follow-up drafts capped at 1 per run, `TWEET_BUILD_IN_PUBLIC_RATIO` 0.35 → 0.55.
 - Story verdict budget: `TWEET_STORY_PICK_MAX` default 5 → 2; hybrid content kind is decided before spending AI verdict calls.

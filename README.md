@@ -269,6 +269,8 @@ The posting loop wins reach; these optional loops win distribution:
 | Promo audit | growth report | $0 | “OSS promo vs organic” section — drop promo probability if it drags reach |
 | Staleness watchdog | `heartbeat` workflow (every 6h) | $0 | Opens an issue after 30h of silence; auto-closes on recovery |
 
+`sync-github-events.mjs` settles each fetched event on its own: it appends the note to `TWEET_BUILD_IN_PUBLIC_FILE`, records the ID in `GITHUB_EVENTS_SYNC_FILE` (bounded by `GITHUB_EVENTS_SYNC_MAX_IDS`, default 200), or reports a skip reason (unsupported type/action, stale, excluded repo, missing fields, duplicate, run limit). A rate-limit/non-array API response changes nothing and exits non-zero; bad individual events just get skipped. Run it offline without credentials by pointing `GITHUB_EVENTS_FIXTURE_FILE` (or `--events-file`) at a JSON event array; `GITHUB_EVENTS_FIXTURE_STATUS=403` simulates a rate limit, and `node .github/scripts/sync-github-events.mjs --self-test` runs the settlement suite.
+
 ## Repository layout
 
 ```text
