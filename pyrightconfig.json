@@ -1,0 +1,16 @@
+{
+  "include": [
+    "xl2times",
+    "utils",
+  ],
+  "exclude": [
+    "**/node_modules",
+    "**/__pycache__"
+  ],
+  "reportMissingImports": true,
+  "reportMissingTypeStubs": false,
+  "pythonVersion": "3.11",
+  "pythonPlatform": "All",
+  "venv": ".venv",
+  "venvPath": "."
+}
