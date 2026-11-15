@@ -1,0 +1,20 @@
+BigQuery is a serverless, highly scalable data warehouse built for analytics at petabyte scale.
+Cloud Run automatically scales containerized applications from zero to millions of requests.
+Vertex AI provides a unified platform for training, deploying, and monitoring machine learning models.
+Gemini is Google's most capable multimodal AI model, available via Vertex AI and the Google AI API.
+Cloud Storage offers globally distributed object storage with eleven nines of durability.
+Pub/Sub is a fully managed messaging service that decouples producers and consumers at any scale.
+Dataflow executes Apache Beam pipelines for both batch and real-time stream processing.
+Cloud Spanner is a globally distributed relational database with horizontal scaling and ACID transactions.
+Looker Studio transforms raw data into customizable dashboards and reports without writing code.
+Firestore is a serverless document database with real-time sync and offline support for mobile and web apps.
+AlloyDB is a fully managed PostgreSQL-compatible database with columnar engine for analytic queries.
+Cloud Composer orchestrates complex data pipelines using Apache Airflow in a fully managed environment.
+Dataproc is a managed Spark and Hadoop service for running large-scale data processing jobs on GCP.
+Cloud Functions allows developers to deploy single-purpose event-driven functions without server management.
+API Gateway provides a fully managed service to create, secure, and monitor REST APIs on GCP.
+Secret Manager securely stores and manages API keys, passwords, certificates, and other sensitive data.
+Cloud Armor provides distributed denial-of-service protection and web application firewall capabilities.
+Artifact Registry is a single place to manage container images, Maven, npm, and Python packages on GCP.
+Cloud Build is a serverless CI/CD platform that builds, tests, and deploys code on Google Cloud.
+Identity and Access Management controls who can do what on which GCP resource using fine-grained policies.

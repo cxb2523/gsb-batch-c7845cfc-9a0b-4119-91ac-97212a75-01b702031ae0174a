@@ -1,0 +1,21 @@
+id,name,description,category,price
+1,BigQuery On-Demand Slot,Pay-per-query compute slot for ad-hoc SQL analytics on petabyte-scale datasets,Data Warehouse,0.0065
+2,BigQuery Flat-Rate Reservation,Committed capacity reservation for predictable batch workloads and cost control,Data Warehouse,2000.00
+3,Cloud Run Managed Service,Serverless container hosting that auto-scales to zero — ideal for APIs and microservices,Compute,0.00002
+4,Cloud Run Jobs,Run-to-completion container workloads for batch processing and scheduled tasks,Compute,0.00002
+5,Vertex AI Training Custom Job,Managed GPU/TPU training job for custom ML models with automatic resource provisioning,AI/ML,2.48
+6,Vertex AI Prediction Endpoint,Low-latency online serving endpoint for deployed ML models with autoscaling,AI/ML,0.00015
+7,Gemini 2.5 Flash API Calls,Fast multimodal LLM with long context — optimized for high-throughput enterprise pipelines,AI/ML,0.00015
+8,Cloud Storage Standard,Globally redundant object storage for frequently accessed data and ML training sets,Storage,0.02
+9,Cloud Storage Nearline,Low-cost archival storage for data accessed less than once per month,Storage,0.01
+10,Pub/Sub Topic,Globally distributed message queue with at-least-once delivery for event-driven architectures,Messaging,0.06
+11,Dataflow Streaming Pipeline,Managed Apache Beam runner for real-time ETL ingestion from Pub/Sub into BigQuery,Data Engineering,0.011
+12,Dataflow Batch Pipeline,Managed Apache Beam runner for large-scale batch data transformation and enrichment,Data Engineering,0.011
+13,Cloud Composer Environment,Fully managed Apache Airflow for orchestrating multi-step data engineering workflows,Orchestration,300.00
+14,Dataproc Serverless Spark,Serverless Spark for running PySpark jobs without cluster provisioning or management,Data Engineering,0.0164
+15,Cloud SQL PostgreSQL,Fully managed PostgreSQL with automated backups, HA, and read replicas on GCP,Database,0.0150
+16,AlloyDB Cluster,PostgreSQL-compatible database with columnar engine for hybrid OLTP/OLAP workloads,Database,1.0476
+17,Firestore Database,Serverless NoSQL document store with real-time sync for mobile and web applications,Database,0.06
+18,Cloud Armor Security Policy,DDoS protection and WAF rules to block malicious traffic before it hits your application,Security,5.00
+19,Secret Manager Secret,Centralized and audited storage for API keys, passwords, and TLS certificates,Security,0.06
+20,Artifact Registry Repository,Managed repository for container images, Maven, npm, and Python packages with vulnerability scanning,DevOps,0.10

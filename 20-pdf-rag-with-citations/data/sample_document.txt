@@ -1,0 +1,21 @@
+GCP Data Engineering Best Practices
+
+Section 1: Ingestion Architecture
+
+Reliable data ingestion begins with choosing the right entry point for your data. For streaming workloads, Pub/Sub is the standard entry point — it decouples producers from consumers and provides at-least-once delivery guarantees with optional exactly-once semantics through the BigQuery subscription feature. For batch ingestion, Cloud Storage acts as the landing zone: drop files into a GCS bucket, trigger a Dataflow or Dataproc job via Eventarc or Cloud Scheduler, and load the results into BigQuery. Never write raw, unvalidated data directly into production BigQuery tables. Always validate schema, nullability, and referential integrity at the pipeline layer before the final write.
+
+Section 2: Data Modeling in BigQuery
+
+Denormalized, flat schemas outperform normalized schemas in BigQuery because columnar storage rewards wide tables with few joins. Nest repeated records using ARRAY and STRUCT types instead of creating separate child tables — this keeps related data in one physical row and eliminates join overhead at query time. Partition every fact table by a date or timestamp column that aligns with your most common query filter. If your queries frequently filter on a second dimension (region, product, customer tier), add clustering on up to four columns. Together, partitioning and clustering can reduce bytes scanned by 90% on large datasets, directly lowering on-demand query costs.
+
+Section 3: Pipeline Orchestration
+
+Use Cloud Composer (managed Apache Airflow) for complex multi-step pipelines that span multiple GCP services. Define each pipeline as a DAG with explicit upstream/downstream dependencies so failures are isolated and retries are surgical. For simpler pipelines — a single Dataflow job triggered on a schedule — Cloud Scheduler and Eventarc are lighter-weight alternatives that avoid the overhead of a full Airflow environment. Always build idempotent pipeline stages: a stage that is safe to re-run without duplicating data or side effects is a stage you can retry automatically without human intervention. Use the BigQuery MERGE statement or write-then-swap patterns (write to a staging table, validate, then swap partition) to achieve idempotency at the warehouse layer.
+
+Section 4: Cost and Performance Governance
+
+BigQuery on-demand pricing charges per terabyte scanned. The fastest way to reduce costs is to reduce bytes scanned — not to optimize SQL execution. Partition pruning and clustering are the primary levers. Secondary levers include materialized views for repeated aggregations, BI Engine reservations for dashboard query acceleration, and slot reservations for teams with predictable, high-volume workloads. Query costs should be monitored via the INFORMATION_SCHEMA.JOBS_BY_PROJECT view, which exposes bytes billed, slot milliseconds, and query text for every job. Build a FinOps dashboard over this view to identify top-spending queries and users. Set maximum bytes billed per query at the project or dataset level to prevent runaway scans from impacting the billing account.
+
+Section 5: Security and Compliance
+
+Apply the principle of least privilege at every layer: project IAM, dataset-level BigQuery permissions, table-level permissions, column-level security via Data Catalog policy tags, and row-level access policies for multi-tenant datasets. Avoid granting primitive roles (Owner, Editor, Viewer) at the project level — use predefined BigQuery roles (bigquery.dataViewer, bigquery.dataEditor) scoped to the dataset. All BigQuery data is encrypted at rest by default. For regulatory requirements, enable Customer-Managed Encryption Keys (CMEK) via Cloud KMS so you control the encryption key lifecycle. Audit all data access using Cloud Audit Logs, and route logs to a dedicated BigQuery dataset for long-term retention and anomaly detection.

@@ -1,0 +1,122 @@
+[
+  {
+    "order_id": 1001,
+    "order_date": "2026-01-05",
+    "customer_name": "Acme Corp",
+    "region": "US-East",
+    "product": "BigQuery Slots",
+    "category": "Data",
+    "quantity": 10,
+    "unit_price": 200.0,
+    "total_amount": 2000.0,
+    "event_type": "order.created"
+  },
+  {
+    "order_id": 1002,
+    "order_date": "2026-01-07",
+    "customer_name": "Globex Inc",
+    "region": "US-West",
+    "product": "Cloud Run CPU",
+    "category": "Compute",
+    "quantity": 25,
+    "unit_price": 12.5,
+    "total_amount": 312.5,
+    "event_type": "order.created"
+  },
+  {
+    "order_id": 1003,
+    "order_date": "2026-01-12",
+    "customer_name": "Initech LLC",
+    "region": "EU",
+    "product": "Vertex AI Tokens",
+    "category": "AI",
+    "quantity": 1000,
+    "unit_price": 0.15,
+    "total_amount": 150.0,
+    "event_type": "order.created"
+  },
+  {
+    "order_id": 1004,
+    "order_date": "2026-01-15",
+    "customer_name": "Umbrella Co",
+    "region": "APAC",
+    "product": "GCS Storage TB",
+    "category": "Storage",
+    "quantity": 50,
+    "unit_price": 20.0,
+    "total_amount": 1000.0,
+    "event_type": "order.created"
+  },
+  {
+    "order_id": 1005,
+    "order_date": "2026-01-20",
+    "customer_name": "Stark Industries",
+    "region": "US-East",
+    "product": "Gemini API Calls",
+    "category": "AI",
+    "quantity": 5000,
+    "unit_price": 0.02,
+    "total_amount": 100.0,
+    "event_type": "order.created"
+  },
+  {
+    "order_id": 1006,
+    "order_date": "2026-02-02",
+    "customer_name": "Wayne Enterprises",
+    "region": "US-West",
+    "product": "BigQuery Slots",
+    "category": "Data",
+    "quantity": 15,
+    "unit_price": 200.0,
+    "total_amount": 3000.0,
+    "event_type": "order.updated"
+  },
+  {
+    "order_id": 1007,
+    "order_date": "2026-02-08",
+    "customer_name": "Acme Corp",
+    "region": "US-East",
+    "product": "Dataflow Workers",
+    "category": "Data",
+    "quantity": 8,
+    "unit_price": 45.0,
+    "total_amount": 360.0,
+    "event_type": "order.created"
+  },
+  {
+    "order_id": 1008,
+    "order_date": "2026-02-14",
+    "customer_name": "Globex Inc",
+    "region": "EU",
+    "product": "Cloud SQL vCPU",
+    "category": "Database",
+    "quantity": 4,
+    "unit_price": 90.0,
+    "total_amount": 360.0,
+    "event_type": "order.created"
+  },
+  {
+    "order_id": 1009,
+    "order_date": "2026-02-21",
+    "customer_name": "Initech LLC",
+    "region": "APAC",
+    "product": "Vertex AI Tokens",
+    "category": "AI",
+    "quantity": 2500,
+    "unit_price": 0.15,
+    "total_amount": 375.0,
+    "event_type": "order.created"
+  },
+  {
+    "order_id": 1010,
+    "order_date": "2026-03-01",
+    "customer_name": "Umbrella Co",
+    "region": "US-East",
+    "product": "GCS Storage TB",
+    "category": "Storage",
+    "quantity": 75,
+    "unit_price": 20.0,
+    "total_amount": 1500.0,
+    "event_type": "order.fulfilled"
+  }
+]

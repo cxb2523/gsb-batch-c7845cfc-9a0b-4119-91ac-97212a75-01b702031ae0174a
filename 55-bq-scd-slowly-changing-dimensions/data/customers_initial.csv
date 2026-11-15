@@ -1,0 +1,6 @@
+customer_id,name,email,city,plan,monthly_spend
+C001,Alice Johnson,alice@example.com,New York,Basic,49.99
+C002,Bob Smith,bob@example.com,Chicago,Pro,99.99
+C003,Carol White,carol@example.com,San Francisco,Enterprise,299.99
+C004,David Lee,david@example.com,Austin,Basic,49.99
+C005,Eva Martinez,eva@example.com,Seattle,Pro,99.99

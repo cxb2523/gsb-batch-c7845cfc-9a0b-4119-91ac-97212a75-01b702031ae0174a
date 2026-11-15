@@ -1,0 +1,22 @@
+[
+  {"event_id": "EVT-001", "event_timestamp": "2026-01-03T10:00:00", "region": "US-East",  "product": "BigQuery Slots",     "category": "Data",    "total_amount": 1200.00},
+  {"event_id": "EVT-002", "event_timestamp": "2026-01-08T14:30:00", "region": "EU",       "product": "Vertex AI Tokens",   "category": "AI",      "total_amount": 450.50},
+  {"event_id": "EVT-003", "event_timestamp": "2026-01-15T09:15:00", "region": "US-East",  "product": "Gemini API Calls",   "category": "AI",      "total_amount": 2200.00},
+  {"event_id": "EVT-004", "event_timestamp": "2026-01-22T16:45:00", "region": "APAC",     "product": "Cloud Run CPU",      "category": "Compute", "total_amount": 310.75},
+  {"event_id": "EVT-005", "event_timestamp": "2026-01-28T11:20:00", "region": "US-West",  "product": "GCS Storage TB",     "category": "Storage", "total_amount": 999.99},
+  {"event_id": "EVT-006", "event_timestamp": "2026-02-04T08:00:00", "region": "EU",       "product": "BigQuery Slots",     "category": "Data",    "total_amount": 1750.25},
+  {"event_id": "EVT-007", "event_timestamp": "2026-02-11T13:10:00", "region": "US-East",  "product": "Dataflow Workers",   "category": "Data",    "total_amount": 89.99},
+  {"event_id": "EVT-008", "event_timestamp": "2026-02-18T17:30:00", "region": "APAC",     "product": "Vertex AI Tokens",   "category": "AI",      "total_amount": 4300.00},
+  {"event_id": "EVT-009", "event_timestamp": "2026-02-25T10:45:00", "region": "US-West",  "product": "Cloud SQL vCPU",     "category": "Database","total_amount": 630.00},
+  {"event_id": "EVT-010", "event_timestamp": "2026-03-03T09:00:00", "region": "EU",       "product": "Gemini API Calls",   "category": "AI",      "total_amount": 1100.00},
+  {"event_id": "EVT-011", "event_timestamp": "2026-03-09T15:20:00", "region": "US-East",  "product": "BigQuery Slots",     "category": "Data",    "total_amount": 2500.00},
+  {"event_id": "EVT-012", "event_timestamp": "2026-03-14T11:00:00", "region": "APAC",     "product": "GCS Storage TB",     "category": "Storage", "total_amount": 420.00},
+  {"event_id": "EVT-013", "event_timestamp": "2026-03-20T14:00:00", "region": "US-West",  "product": "Vertex AI Tokens",   "category": "AI",      "total_amount": 1875.50},
+  {"event_id": "EVT-014", "event_timestamp": "2026-03-27T16:30:00", "region": "EU",       "product": "Dataflow Workers",   "category": "Data",    "total_amount": 340.00},
+  {"event_id": "EVT-015", "event_timestamp": "2026-04-02T08:45:00", "region": "US-East",  "product": "Cloud Run CPU",      "category": "Compute", "total_amount": 780.00},
+  {"event_id": "EVT-016", "event_timestamp": "2026-04-09T12:15:00", "region": "APAC",     "product": "Gemini API Calls",   "category": "AI",      "total_amount": 960.00},
+  {"event_id": "EVT-017", "event_timestamp": "2026-04-17T10:30:00", "region": "US-West",  "product": "BigQuery Slots",     "category": "Data",    "total_amount": 3200.00},
+  {"event_id": "EVT-018", "event_timestamp": "2026-04-24T14:00:00", "region": "EU",       "product": "Cloud SQL vCPU",     "category": "Database","total_amount": 540.00},
+  {"event_id": "EVT-019", "event_timestamp": "2026-05-01T09:00:00", "region": "US-East",  "product": "Vertex AI Tokens",   "category": "AI",      "total_amount": 1650.00},
+  {"event_id": "EVT-020", "event_timestamp": "2026-05-08T11:30:00", "region": "APAC",     "product": "Pub/Sub Messages M", "category": "Data",    "total_amount": 290.00}
+]

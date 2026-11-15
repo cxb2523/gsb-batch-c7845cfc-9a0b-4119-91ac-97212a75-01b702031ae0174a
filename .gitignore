@@ -1,0 +1,57 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Environment
+.env
+.env.local
+*.env
+
+# GCP credentials — never commit these
+*service-account*.json
+*credentials*.json
+application_default_credentials.json
+gcloud/
+
+# Generated outputs
+output/
+outputs/
+generated/
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.mp4
+*.pdf
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Beam / Dataflow
+pipeline_spec.json
+*.beam
+
+# Vertex AI compiled pipelines
+*.yaml
+!deploy.sh
+
+# Test artifacts
+.pytest_cache/
+htmlcov/
+.coverage

@@ -1,0 +1,26 @@
+Sample prompts for each modality — swap these into main.py or the individual modules.
+
+--- IMAGE PROMPTS ---
+"1) Describe this image in one sentence. 2) List the main objects you can see, comma-separated."
+"What brand or product is shown in this image? What is the dominant color scheme?"
+"Is there any text visible in this image? If yes, transcribe it exactly."
+"Describe the mood or aesthetic of this image. Would it work for a marketing campaign?"
+
+--- PDF DOCUMENT PROMPTS ---
+"Summarize this document in 3 bullet points."
+"What is the title and publication date of this document?"
+"List all tables or figures mentioned in this document."
+"Extract any numerical data, statistics, or benchmark results from this document."
+"What are the key conclusions or recommendations in this document?"
+
+--- VIDEO PROMPTS ---
+"Describe what happens in this video in 2-3 sentences. Mention the setting and the main subject."
+"What product or brand is featured in this video?"
+"At what timestamp does the main action begin? Describe it briefly."
+"Identify any text, captions, or on-screen graphics visible in the video."
+
+--- AUDIO PROMPTS ---
+"Transcribe the first 30 seconds of this audio clip. Then give a one-line summary of the topic."
+"How many distinct speakers are in this audio? What is each speaker discussing?"
+"What language is spoken in this audio? Transcribe one key quote."
+"Summarize the main topic covered in this audio in two sentences."

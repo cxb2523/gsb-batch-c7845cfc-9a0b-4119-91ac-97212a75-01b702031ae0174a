@@ -1,0 +1,20 @@
+My invoice shows charges for a VM I deleted three weeks ago.
+Why did my BigQuery bill spike by 300% this billing cycle?
+Committed use discounts are not showing up on my monthly statement.
+Can I get a cost breakdown for egress traffic by region?
+Cloud Run service is returning 503 errors under sustained load.
+GKE pods are stuck in CrashLoopBackOff after the latest node upgrade.
+My Cloud Function times out when calling an external REST API.
+Load balancer health checks are failing intermittently on two backends.
+How do I grant a service account read-only access to a Cloud Storage bucket?
+Workload Identity Federation setup is failing for our GitHub Actions pipeline.
+A user keeps getting 403 on BigQuery datasets despite having the BigQuery Data Viewer role.
+What is the recommended approach for rotating service account keys in production?
+Gemini API is returning empty responses for prompts longer than 8,000 tokens.
+How do I ground Gemini responses with my own proprietary documents?
+Vertex AI batch prediction job has been stuck in PENDING state for two hours.
+Should I use fine-tuning or RAG for building a domain-specific support chatbot?
+Quota exceeded error when calling the text embedding API at scale.
+Which embedding model should I use for semantic code search across a large repository?
+How do I reduce cold start latency on Cloud Run without paying for always-on instances?
+Audit logs show unexpected API access from an unrecognized service account principal.

@@ -1,0 +1,57 @@
+{
+  "template_metadata": {
+    "name": "sales-etl-flex-template",
+    "description": "Sales ETL Dataflow Flex Template — reads JSON from GCS, transforms, writes to BigQuery",
+    "sdk_language": "PYTHON",
+    "flex_template_base_image": "PYTHON3"
+  },
+  "launch_parameters": {
+    "jobName": "sales-etl-{run_date}",
+    "parameters": {
+      "input_gcs_path":   "gs://your-gcs-bucket/landing/sales/{run_date}/*.json",
+      "output_bq_table":  "your-project-id:your_dataset.sales_dataflow_output",
+      "temp_location":    "gs://your-gcs-bucket/dataflow/temp",
+      "staging_location": "gs://your-gcs-bucket/dataflow/staging",
+      "runner":           "DataflowRunner",
+      "region":           "us-central1",
+      "max_num_workers":  4,
+      "machine_type":     "n1-standard-2",
+      "disk_size_gb":     50,
+      "use_public_ips":   false,
+      "enable_streaming_engine": false
+    },
+    "environment": {
+      "tempLocation":         "gs://your-gcs-bucket/dataflow/temp",
+      "stagingLocation":      "gs://your-gcs-bucket/dataflow/staging",
+      "zone":                 "us-central1-a",
+      "maxWorkers":           4,
+      "numWorkers":           1,
+      "machineType":          "n1-standard-2",
+      "diskSizeGb":           50,
+      "serviceAccountEmail":  "your-dataflow-sa@your-project-id.iam.gserviceaccount.com",
+      "network":              "default",
+      "subnetwork":           "regions/us-central1/subnetworks/default",
+      "enableStreamingEngine": false,
+      "additionalExperiments": [
+        "use_runner_v2",
+        "enable_recommendations"
+      ]
+    }
+  },
+  "dry_run": {
+    "enabled": false,
+    "description": "Set to true to validate template parameters without launching the job"
+  },
+  "notification": {
+    "pubsub_topic":   "your-pubsub-topic",
+    "on_success":     true,
+    "on_failure":     true,
+    "include_metrics": true
+  },
+  "validation": {
+    "bq_output_table":       "your-project-id:your_dataset.sales_dataflow_output",
+    "min_output_row_count":  1,
+    "check_null_key_columns": ["order_id", "order_date"],
+    "max_null_pct":           0.01
+  }
+}

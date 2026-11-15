@@ -1,0 +1,10 @@
+Apache Beam is an open source unified model for defining batch and streaming data processing pipelines.
+The Beam SDK provides a rich set of windowing and triggering primitives that give you fine-grained control over time.
+Google Cloud Dataflow is a fully managed service for executing Apache Beam pipelines at scale.
+Data engineering on Google Cloud spans BigQuery, Dataflow, Pub/Sub, and Cloud Storage working in concert.
+A pipeline in Beam is a directed acyclic graph of transforms applied to distributed datasets called PCollections.
+The DirectRunner executes pipelines locally without any cloud infrastructure or billing.
+Switching from DirectRunner to DataflowRunner requires only a change to PipelineOptions.
+BigQuery is a serverless analytics warehouse that scales to petabytes of data without index management.
+Pub/Sub decouples producers from consumers enabling real time event streaming architectures.
+Cloud Storage provides durable object storage used as the staging layer for Dataflow jobs.

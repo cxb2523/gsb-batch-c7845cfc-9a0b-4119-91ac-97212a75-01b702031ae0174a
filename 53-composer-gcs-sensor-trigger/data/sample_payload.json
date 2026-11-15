@@ -1,0 +1,143 @@
+{
+  "event_type": "sales_upload",
+  "source_system": "pos_system",
+  "uploaded_by": "etl_service_account",
+  "upload_timestamp": "2024-03-15T08:30:00Z",
+  "file_metadata": {
+    "filename": "sales_20240315_083000.json",
+    "file_size_bytes": 4096,
+    "record_count": 5,
+    "schema_version": "1.2"
+  },
+  "records": [
+    {
+      "order_id": "ORD-2024-0315-001",
+      "order_timestamp": "2024-03-15T08:00:00Z",
+      "customer_id": "CUST-001",
+      "customer_name": "Alice Johnson",
+      "region": "US-West",
+      "store_id": "STORE-SF-01",
+      "items": [
+        {
+          "sku": "HDPH-001",
+          "product_name": "Wireless Headphones",
+          "category": "Electronics",
+          "quantity": 2,
+          "unit_price": 89.99,
+          "discount_pct": 0
+        }
+      ],
+      "subtotal": 179.98,
+      "tax": 14.40,
+      "total": 194.38,
+      "payment_method": "credit_card",
+      "status": "completed"
+    },
+    {
+      "order_id": "ORD-2024-0315-002",
+      "order_timestamp": "2024-03-15T08:05:00Z",
+      "customer_id": "CUST-002",
+      "customer_name": "Bob Smith",
+      "region": "US-East",
+      "store_id": "STORE-NYC-02",
+      "items": [
+        {
+          "sku": "SHOE-002",
+          "product_name": "Running Shoes",
+          "category": "Clothing",
+          "quantity": 1,
+          "unit_price": 129.99,
+          "discount_pct": 5
+        }
+      ],
+      "subtotal": 123.49,
+      "tax": 9.88,
+      "total": 133.37,
+      "payment_method": "debit_card",
+      "status": "completed"
+    },
+    {
+      "order_id": "ORD-2024-0315-003",
+      "order_timestamp": "2024-03-15T08:10:00Z",
+      "customer_id": "CUST-003",
+      "customer_name": "Carol White",
+      "region": "EU-West",
+      "store_id": "STORE-LON-01",
+      "items": [
+        {
+          "sku": "LSTD-003",
+          "product_name": "Laptop Stand",
+          "category": "Electronics",
+          "quantity": 3,
+          "unit_price": 45.00,
+          "discount_pct": 0
+        },
+        {
+          "sku": "BOOK-004",
+          "product_name": "Data Engineering Book",
+          "category": "Books",
+          "quantity": 1,
+          "unit_price": 39.99,
+          "discount_pct": 10
+        }
+      ],
+      "subtotal": 170.99,
+      "tax": 34.20,
+      "total": 205.19,
+      "payment_method": "credit_card",
+      "status": "completed"
+    },
+    {
+      "order_id": "ORD-2024-0315-004",
+      "order_timestamp": "2024-03-15T08:15:00Z",
+      "customer_id": "CUST-004",
+      "customer_name": "David Lee",
+      "region": "APAC",
+      "store_id": "STORE-SGP-01",
+      "items": [
+        {
+          "sku": "SWTCH-005",
+          "product_name": "Smart Watch",
+          "category": "Electronics",
+          "quantity": 1,
+          "unit_price": 299.99,
+          "discount_pct": 0
+        }
+      ],
+      "subtotal": 299.99,
+      "tax": 27.00,
+      "total": 326.99,
+      "payment_method": "digital_wallet",
+      "status": "completed"
+    },
+    {
+      "order_id": "ORD-2024-0315-005",
+      "order_timestamp": "2024-03-15T08:20:00Z",
+      "customer_id": "CUST-005",
+      "customer_name": "Eva Martinez",
+      "region": "US-West",
+      "store_id": "STORE-LA-03",
+      "items": [
+        {
+          "sku": "YOGA-006",
+          "product_name": "Yoga Mat",
+          "category": "Clothing",
+          "quantity": 2,
+          "unit_price": 59.99,
+          "discount_pct": 0
+        }
+      ],
+      "subtotal": 119.98,
+      "tax": 9.60,
+      "total": 129.58,
+      "payment_method": "credit_card",
+      "status": "completed"
+    }
+  ],
+  "batch_summary": {
+    "total_orders": 5,
+    "total_revenue": 989.51,
+    "regions": ["US-West", "US-East", "EU-West", "APAC"],
+    "categories": ["Electronics", "Clothing", "Books"]
+  }
+}

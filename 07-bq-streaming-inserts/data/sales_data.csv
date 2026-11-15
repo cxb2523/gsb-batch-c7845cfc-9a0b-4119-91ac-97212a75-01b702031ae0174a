@@ -1,0 +1,21 @@
+order_id,order_date,customer_name,region,product,category,quantity,unit_price,total_amount
+1001,2026-01-05,Acme Corp,US-East,BigQuery Slots,Data,10,200.0,2000.0
+1002,2026-01-07,Globex Inc,US-West,Cloud Run CPU,Compute,25,12.5,312.5
+1003,2026-01-12,Initech LLC,EU,Vertex AI Tokens,AI,1000,0.15,150.0
+1004,2026-01-15,Umbrella Co,APAC,GCS Storage TB,Storage,50,20.0,1000.0
+1005,2026-01-20,Stark Industries,US-East,Gemini API Calls,AI,5000,0.02,100.0
+1006,2026-02-02,Wayne Enterprises,US-West,BigQuery Slots,Data,15,200.0,3000.0
+1007,2026-02-08,Acme Corp,US-East,Dataflow Workers,Data,8,45.0,360.0
+1008,2026-02-14,Globex Inc,EU,Cloud SQL vCPU,Database,4,90.0,360.0
+1009,2026-02-21,Initech LLC,APAC,Vertex AI Tokens,AI,2500,0.15,375.0
+1010,2026-03-01,Umbrella Co,US-East,GCS Storage TB,Storage,75,20.0,1500.0
+1011,2026-03-05,Stark Industries,EU,Gemini API Calls,AI,12000,0.02,240.0
+1012,2026-03-11,Wayne Enterprises,APAC,BigQuery Slots,Data,20,200.0,4000.0
+1013,2026-03-18,Acme Corp,US-West,Pub/Sub Messages M,Data,100,0.4,40.0
+1014,2026-03-25,Globex Inc,US-East,Cloud Run CPU,Compute,40,12.5,500.0
+1015,2026-04-02,Initech LLC,EU,Dataflow Workers,Data,12,45.0,540.0
+1016,2026-04-09,Umbrella Co,US-West,Vertex AI Tokens,AI,8000,0.15,1200.0
+1017,2026-04-16,Stark Industries,APAC,GCS Storage TB,Storage,30,20.0,600.0
+1018,2026-04-23,Wayne Enterprises,US-East,Gemini API Calls,AI,20000,0.02,400.0
+1019,2026-05-01,Acme Corp,EU,BigQuery Slots,Data,18,200.0,3600.0
+1020,2026-05-08,Globex Inc,APAC,Cloud SQL vCPU,Database,6,90.0,540.0
