@@ -1,0 +1,47 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "scraperwiki"
+version = "1.0.0"
+description = "Local version of ScraperWiki libraries"
+authors = [
+  { name = "ScraperWiki Developers", email = "hello@scraperwiki.com" }
+]
+readme = "README.rst"
+urls = { Repository = "https://github.com/cantabular/scraperwiki-python" }
+license = "GPL-3.0-or-later"
+classifiers = [
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: SQL",
+    "Topic :: Database :: Front-Ends",
+]
+dependencies = [
+    "sqlalchemy>=2,<3",
+    "alembic",
+]
+requires-python = ">=3.10"
+
+[dependency-groups]
+dev = [
+    "ruff",
+    "pytest",
+    "lxml",
+]
+
+[tool.ruff]
+line-length = 88
+
+[tool.setuptools.packages.find]
+where = ["."]  # Or wherever your 'scraperwiki' package folder is located
+include = ["scraperwiki*"]
+
+[tool.uv]
+required-version = ">=0.9"
