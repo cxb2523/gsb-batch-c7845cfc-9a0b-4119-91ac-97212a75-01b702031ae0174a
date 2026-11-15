@@ -22,6 +22,12 @@ export type Pagination = {
 export type VideoListResult = {
   videos: VideoSummary[];
   pagination: Pagination;
+  /**
+   * Path that produced this listing (e.g. `/c/AI-239/1`) — the candidate
+   * route that actually returned videos. Empty for listings whose route was
+   * never confirmed (unknown categories, 404 fallbacks).
+   */
+  resolvedPath: string;
   refresh: () => Promise<VideoListResult>;
   hasNext: () => boolean;
   next: () => Promise<VideoListResult>;

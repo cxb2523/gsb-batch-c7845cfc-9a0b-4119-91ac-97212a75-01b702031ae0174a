@@ -295,6 +295,7 @@ describe('videos helpers', () => {
           page: targetPage,
           pages: [1, 2, 3],
         },
+        resolvedPath: '',
         refresh: async () => {
           throw new Error('not-used');
         },
@@ -341,6 +342,7 @@ describe('videos helpers', () => {
           page: targetPage,
           pages: [targetPage],
         },
+        resolvedPath: '',
         refresh: async () => {
           throw new Error('not-used');
         },
@@ -375,6 +377,7 @@ describe('videos helpers', () => {
       },
     );
     expect(list.videos).toHaveLength(2);
+    expect(list.resolvedPath).toBe('/ok');
 
     requestGet.mockResolvedValue({
       data: '<div class="pagination"><a>1</a></div>',
@@ -472,6 +475,7 @@ describe('videos helpers', () => {
     expect(first).toMatchObject({
       pagination: { page: 1, pages: [1, 2, 3] },
     });
+    expect(first.resolvedPath).toBe('/c/AI-239');
     expect(first.videos[0]).toMatchObject({
       videoId: 'video.one',
       durationSeconds: 300,
@@ -485,6 +489,7 @@ describe('videos helpers', () => {
     });
     const nextPage = await first.next();
     expect(nextPage.pagination.page).toBe(2);
+    expect(nextPage.resolvedPath).toBe('/c/AI-239/1');
     expect(requestGet).toHaveBeenLastCalledWith('/c/AI-239/1');
 
     requestGet.mockResolvedValueOnce({
@@ -494,7 +499,137 @@ describe('videos helpers', () => {
     });
     const second = await videos.category({ category: 'AI-239', page: 2 });
     expect(second.pagination.page).toBe(2);
+    expect(second.resolvedPath).toBe('/c/AI-239/1');
     expect(requestGet).toHaveBeenLastCalledWith('/c/AI-239/1');
+  });
+
+  it('records the second category candidate and reuses its route', async () => {
+    // Page 1's first candidate (/c/AI-239) is a normal 200 with no videos, so
+    // the loader falls back to the second candidate and reports it.
+    requestGet
+      .mockResolvedValueOnce({
+        data: '<div class="pagination"><a>1</a></div>',
+        statusCode: 200,
+        url: 'https://www.xvideos.com/c/AI-239',
+      })
+      .mockResolvedValueOnce({
+        data: classicListingHtml,
+        statusCode: 200,
+        url: 'https://www.xvideos.com/c/AI-239/1',
+      });
+    const first = await videos.category({ category: 'AI-239' });
+
+    expect(first.resolvedPath).toBe('/c/AI-239/1');
+    expect(first.pagination.page).toBe(1);
+    expect(requestGet).toHaveBeenNthCalledWith(1, '/c/AI-239');
+    expect(requestGet).toHaveBeenNthCalledWith(2, '/c/AI-239/1');
+
+    // The confirmed route (offset 1) must drive page 2 straight to
+    // /c/AI-239/2 — no re-guessing via /c/AI-239/1 first.
+    requestGet.mockResolvedValueOnce({
+      data: classicListingHtml,
+      statusCode: 200,
+      url: 'https://www.xvideos.com/c/AI-239/2',
+    });
+    const second = await first.next();
+
+    expect(second.resolvedPath).toBe('/c/AI-239/2');
+    expect(second.pagination.page).toBe(2);
+    expect(requestGet).toHaveBeenLastCalledWith('/c/AI-239/2');
+  });
+
+  it('uses the confirmed route for previous navigation', async () => {
+    // Page 2 confirms offset 1: /c/AI-239/1 is empty, /c/AI-239/2 has videos.
+    requestGet
+      .mockResolvedValueOnce({
+        data: '<div class="pagination"><a>1</a></div>',
+        statusCode: 200,
+        url: 'https://www.xvideos.com/c/AI-239/1',
+      })
+      .mockResolvedValueOnce({
+        data: classicListingHtml,
+        statusCode: 200,
+        url: 'https://www.xvideos.com/c/AI-239/2',
+      });
+    const second = await videos.category({ category: 'AI-239', page: 2 });
+    expect(second.resolvedPath).toBe('/c/AI-239/2');
+
+    // Route offset 1 puts page 1 at /c/AI-239/1, so previous() must request
+    // that path first instead of falling back to the unsuffixed /c/AI-239.
+    requestGet.mockResolvedValueOnce({
+      data: classicListingHtml,
+      statusCode: 200,
+      url: 'https://www.xvideos.com/c/AI-239/1',
+    });
+    const first = await second.previous();
+
+    expect(first.pagination.page).toBe(1);
+    expect(first.resolvedPath).toBe('/c/AI-239/1');
+    expect(requestGet).toHaveBeenLastCalledWith('/c/AI-239/1');
+  });
+
+  it('keeps refresh on the route confirmed by the first load', async () => {
+    requestGet
+      .mockResolvedValueOnce({
+        data: '<div class="pagination"><a>1</a></div>',
+        statusCode: 200,
+        url: 'https://www.xvideos.com/c/AI-239',
+      })
+      .mockResolvedValueOnce({
+        data: classicListingHtml,
+        statusCode: 200,
+        url: 'https://www.xvideos.com/c/AI-239/1',
+      });
+    const first = await videos.category({ category: 'AI-239' });
+
+    requestGet.mockResolvedValueOnce({
+      data: classicListingHtml,
+      statusCode: 200,
+      url: 'https://www.xvideos.com/c/AI-239/1',
+    });
+    const refreshed = await first.refresh();
+
+    expect(refreshed.resolvedPath).toBe('/c/AI-239/1');
+    expect(refreshed.pagination.page).toBe(1);
+    expect(requestGet).toHaveBeenLastCalledWith('/c/AI-239/1');
+  });
+
+  it('falls back to candidates when the confirmed route returns empty html', async () => {
+    // Confirm offset 1 on page 1 (first candidate is empty, second has videos).
+    requestGet
+      .mockResolvedValueOnce({
+        data: '<div class="pagination"><a>1</a></div>',
+        statusCode: 200,
+        url: 'https://www.xvideos.com/c/AI-239',
+      })
+      .mockResolvedValueOnce({
+        data: classicListingHtml,
+        statusCode: 200,
+        url: 'https://www.xvideos.com/c/AI-239/1',
+      });
+    const first = await videos.category({ category: 'AI-239' });
+    expect(first.resolvedPath).toBe('/c/AI-239/1');
+
+    // The confirmed route says page 2 is /c/AI-239/2; that page is currently
+    // empty, so the loader must still try the remaining candidates and report
+    // whichever one actually has videos.
+    requestGet
+      .mockResolvedValueOnce({
+        data: '<div class="pagination"><a>1</a></div>',
+        statusCode: 200,
+        url: 'https://www.xvideos.com/c/AI-239/2',
+      })
+      .mockResolvedValueOnce({
+        data: classicListingHtml,
+        statusCode: 200,
+        url: 'https://www.xvideos.com/c/AI-239/1',
+      });
+    const second = await first.next();
+
+    expect(second.pagination.page).toBe(2);
+    expect(second.resolvedPath).toBe('/c/AI-239/1');
+    expect(requestGet).toHaveBeenNthCalledWith(3, '/c/AI-239/2');
+    expect(requestGet).toHaveBeenNthCalledWith(4, '/c/AI-239/1');
   });
 
   it('surfaces an empty listing for unknown category slugs', async () => {
@@ -514,21 +649,47 @@ describe('videos helpers', () => {
     const result = await videos.category({ category: 'missing-999' });
 
     expect(result.videos).toEqual([]);
+    expect(result.resolvedPath).toBe('');
     expect(result.pagination).toEqual({ page: 1, pages: [1] });
     expect(result.hasNext()).toBe(false);
     expect(result.hasPrevious()).toBe(false);
     await expect(result.refresh()).resolves.toMatchObject({
       videos: [],
+      resolvedPath: '',
       pagination: { page: 1, pages: [1] },
     });
     await expect(result.next()).resolves.toMatchObject({
       videos: [],
+      resolvedPath: '',
       pagination: { page: 1, pages: [1] },
     });
     await expect(result.previous()).resolves.toMatchObject({
       videos: [],
+      resolvedPath: '',
       pagination: { page: 1, pages: [1] },
     });
+  });
+
+  it('rethrows the last error when every category candidate fails', async () => {
+    requestGet
+      .mockRejectedValueOnce(new Error('first candidate failed'))
+      .mockRejectedValueOnce(new Error('second candidate failed'));
+
+    await expect(videos.category({ category: 'AI-239' })).rejects.toThrow(
+      'second candidate failed',
+    );
+    expect(requestGet).toHaveBeenCalledTimes(2);
+  });
+
+  it('reports the request path for non-category listings', async () => {
+    requestGet.mockResolvedValueOnce({
+      data: classicListingHtml,
+      statusCode: 200,
+      url: 'https://www.xvideos.com/',
+    });
+    const latest = await videos.dashboard();
+
+    expect(latest.resolvedPath).toBe('/');
   });
 
   it('rethrows non-404 category failures', async () => {

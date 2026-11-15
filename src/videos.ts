@@ -247,10 +247,34 @@ const retryDetails = async (
   }
 };
 
+/**
+ * A listing route confirmed on a previous page. Once a candidate has returned
+ * videos, its page numbering scheme is known; navigation reuses `pathForPage`
+ * instead of guessing between candidates again (which is what breaks when the
+ * site's page offset changes, e.g. zero-based category suffixes).
+ */
+type ListingRoute = {
+  pathForPage: (page: number) => string;
+};
+
+type ListingPageLoader = (
+  targetPage: number,
+  route?: ListingRoute,
+) => Promise<VideoListResult>;
+
+type ListingRouteOptions = {
+  /** Route confirmed by a previous page; tried before the candidates. */
+  route?: ListingRoute;
+  /** Maps a candidate path to the route it represents, so results can carry it. */
+  routeForCandidate?: (candidate: string) => ListingRoute | undefined;
+};
+
 const buildListResult = (
   page: number,
   html: string,
-  loadPage: (targetPage: number) => Promise<VideoListResult>,
+  loadPage: ListingPageLoader,
+  resolvedPath = '',
+  route?: ListingRoute,
 ): VideoListResult => {
   const $ = load(html);
   const videos = $(
@@ -269,39 +293,61 @@ const buildListResult = (
       page,
       pages,
     },
-    refresh: () => loadPage(page),
+    resolvedPath,
+    refresh: () => loadPage(page, route),
     hasNext: () => page < maxPage,
-    next: () => loadPage(page + 1),
+    next: () => loadPage(page + 1, route),
     hasPrevious: () => page > minPage && page > 1,
-    previous: () => loadPage(page - 1),
+    previous: () => loadPage(page - 1, route),
   };
 };
 
 const buildEmptyListing = (
   page: number,
-  loadPage: (targetPage: number) => Promise<VideoListResult>,
+  loadPage: ListingPageLoader,
+  route?: ListingRoute,
 ): VideoListResult => ({
   videos: [],
   pagination: { page, pages: [page] },
-  refresh: () => loadPage(page),
+  // An empty listing never confirmed a route, so there is no path to report.
+  resolvedPath: '',
+  refresh: () => loadPage(page, route),
   hasNext: () => false,
-  next: () => loadPage(page),
+  next: () => loadPage(page, route),
   hasPrevious: () => false,
-  previous: () => loadPage(page),
+  previous: () => loadPage(page, route),
 });
 
 const loadListingPage = async (
   page: number,
   candidates: string[],
-  loadPage: (targetPage: number) => Promise<VideoListResult>,
+  loadPage: ListingPageLoader,
+  { route, routeForCandidate }: ListingRouteOptions = {},
 ): Promise<VideoListResult> => {
   let lastError: Error | undefined;
+  const routePath = route?.pathForPage(page);
+  // A confirmed route is tried first; the generic candidates stay as a
+  // fallback because an empty (but successful) page means the site may have
+  // shifted its page offset since the route was confirmed.
+  const attempted = routePath ? [routePath, ...candidates] : candidates;
 
-  for (const candidate of Array.from(new Set(candidates))) {
+  for (const candidate of Array.from(new Set(attempted))) {
     try {
       const response = await request.get(candidate);
-      const result = buildListResult(page, response.data, loadPage);
+      const candidateRoute =
+        route && candidate === routePath
+          ? route
+          : (routeForCandidate?.(candidate) ?? undefined);
+      const result = buildListResult(
+        page,
+        response.data,
+        loadPage,
+        candidate,
+        candidateRoute,
+      );
 
+      // A normal HTTP response with no videos means the candidate route is
+      // wrong (or the page is empty) — keep trying the remaining candidates.
       if (result.videos.length > 0) {
         return result;
       }
@@ -398,17 +444,83 @@ const assertCategory = (categorySlug: string): void => {
   }
 };
 
+/**
+ * Page-number schemes a category url can use. xvideos numbers category pages
+ * from zero (`/c/<slug>` = page 1, `/c/<slug>/1` = page 2), but the site has
+ * shifted that offset before; candidate 0 keeps the historical scheme and
+ * candidate 1 shifts every suffix by one. Whichever candidate actually
+ * returns videos becomes the confirmed route for all later pages.
+ */
+const CATEGORY_ROUTE_OFFSETS = [0, 1] as const;
+
+const createCategoryPath = (
+  categorySlug: string,
+  page: number,
+  offset: number,
+): string => {
+  if (page === 1) {
+    return offset === 0 ? `/c/${categorySlug}` : `/c/${categorySlug}/1`;
+  }
+
+  return `/c/${categorySlug}/${page - 1 + offset}`;
+};
+
+const createCategoryRoute = (
+  categorySlug: string,
+  offset: number,
+): ListingRoute => ({
+  pathForPage: (targetPage) =>
+    createCategoryPath(categorySlug, targetPage, offset),
+});
+
 const createCategoryCandidates = (
   categorySlug: string,
   page: number,
-): string[] => {
-  if (page === 1) {
-    return [`/c/${categorySlug}`, `/c/${categorySlug}/1`];
-  }
+): string[] =>
+  CATEGORY_ROUTE_OFFSETS.map((offset) =>
+    createCategoryPath(categorySlug, page, offset),
+  );
 
-  // xvideos uses zero-based page suffixes on category urls: page 1 has no
-  // suffix, page 2 is /c/<slug>/1, page 3 is /c/<slug>/2, and so on.
-  return [`/c/${categorySlug}/${page - 1}`, `/c/${categorySlug}/${page}`];
+const loadCategoryPage = async (
+  categorySlug: string,
+  page: number,
+  route?: ListingRoute,
+): Promise<VideoListResult> => {
+  const candidates = createCategoryCandidates(categorySlug, page);
+  const candidateRoutes = new Map(
+    candidates.map((candidate, index) => [
+      candidate,
+      createCategoryRoute(categorySlug, CATEGORY_ROUTE_OFFSETS[index]),
+    ]),
+  );
+
+  try {
+    return await loadListingPage(
+      page,
+      candidates,
+      (targetPage, nextRoute) =>
+        loadCategoryPage(categorySlug, targetPage, nextRoute),
+      {
+        route,
+        routeForCandidate: (candidate) => candidateRoutes.get(candidate),
+      },
+    );
+  } catch (error) {
+    // Unknown category slugs return a real HTTP 404. Surface an empty
+    // listing instead of an exception so callers can fall back gracefully.
+    const statusCode = (error as { response?: { statusCode?: number } })
+      .response?.statusCode;
+
+    if (statusCode === 404) {
+      return buildEmptyListing(
+        page,
+        (targetPage) => loadCategoryPage(categorySlug, targetPage, route),
+        route,
+      );
+    }
+
+    throw error;
+  }
 };
 
 const category = async ({
@@ -418,30 +530,7 @@ const category = async ({
   assertPage(page);
   assertCategory(categorySlug);
 
-  try {
-    return await loadListingPage(
-      page,
-      createCategoryCandidates(categorySlug, page),
-      (targetPage) =>
-        category({
-          category: categorySlug,
-          page: targetPage,
-        }),
-    );
-  } catch (error) {
-    // Unknown category slugs return a real HTTP 404. Surface an empty
-    // listing instead of an exception so callers can fall back gracefully.
-    const statusCode = (error as { response?: { statusCode?: number } })
-      .response?.statusCode;
-
-    if (statusCode === 404) {
-      return buildEmptyListing(page, (targetPage) =>
-        category({ category: categorySlug, page: targetPage }),
-      );
-    }
-
-    throw error;
-  }
+  return loadCategoryPage(categorySlug, page);
 };
 
 const createSearchCandidate = (

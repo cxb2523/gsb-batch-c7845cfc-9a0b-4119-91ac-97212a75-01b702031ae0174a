@@ -5,6 +5,16 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `VideoListResult.resolvedPath` — the path that actually produced a listing (`''` when no route was confirmed, e.g. an unknown category's empty listing).
+
+### Fixed
+
+- Category pagination no longer re-guesses its page offset on every navigation. `loadListingPage` records the candidate that returned videos, and `refresh`/`next`/`previous` reuse that confirmed route, so a site offset change can no longer shift pages mid-traversal. An empty-but-successful page still falls back to the remaining candidates; if every candidate fails, the last error is still thrown.
+
 ## [3.2.2] - 2026-08-07
 
 ### Fixed

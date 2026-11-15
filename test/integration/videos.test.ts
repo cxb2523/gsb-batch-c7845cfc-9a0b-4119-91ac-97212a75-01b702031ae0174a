@@ -32,6 +32,7 @@ const assertList = (
     pagination: { page: number; pages: number[] };
     previous: () => Promise<unknown>;
     refresh: () => Promise<unknown>;
+    resolvedPath: string;
     videos: Array<{
       duration: string;
       durationSeconds: number;
@@ -53,6 +54,7 @@ const assertList = (
   expect(typeof list.next).toBe('function');
   expect(typeof list.previous).toBe('function');
   expect(typeof list.refresh).toBe('function');
+  expect(list.resolvedPath.startsWith('/')).toBe(true);
   expect(list.videos.length).toBeGreaterThan(0);
   assertVideo(list.videos[0]);
 };
@@ -86,6 +88,12 @@ describe.sequential('live integration', () => {
     const list = await xvideos.videos.category({ category: 'AI-239' });
 
     assertList(list, 1);
+    expect(list.resolvedPath.startsWith('/c/AI-239')).toBe(true);
+
+    const refreshed = await list.refresh();
+
+    assertList(refreshed, 1);
+    expect(refreshed.resolvedPath).toBe(list.resolvedPath);
   });
 
   it('loads search results and navigation', async () => {

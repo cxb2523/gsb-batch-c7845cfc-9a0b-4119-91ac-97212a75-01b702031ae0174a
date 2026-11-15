@@ -33,6 +33,7 @@ const xvideos = require('@rodrigogs/xvideos');
   console.log(fresh.videos); // Array of video objects with properties like url, videoId, title, duration, durationSeconds, thumbnailUrl, profile, watchCount
   console.log(fresh.pagination.page); // Current page number
   console.log(fresh.pagination.pages); // Array of available page numbers
+  console.log(fresh.resolvedPath); // Path that actually produced this listing
   console.log(fresh.hasNext()); // Check if there is a next page
   console.log(fresh.hasPrevious()); // Check if there is a previous page
 
@@ -263,6 +264,8 @@ const nextVideos = await categoryList.next();
 ```
 
 The `category` option is the slug as it appears in category urls (`/c/<category>`), e.g. `'AI-239'` or `'Amateur-65'`. Unknown categories return an empty listing instead of throwing.
+
+Every list result exposes `resolvedPath` — the path that actually produced the page (`''` when no route was confirmed, e.g. an unknown category's empty listing). The underlying site uses different page-number offsets per route (category pages are zero-based: `/c/<slug>` is page 1, `/c/<slug>/1` is page 2), so the first successful load confirms the route and `refresh()`, `next()` and `previous()` reuse it instead of re-guessing. If the confirmed route returns an empty page, the loader still falls back to the other candidates and updates `resolvedPath` to whichever one had videos.
 
 ### Retrieve [Video Details](https://www.xvideos.com/video36638661/chaturbate_lulacum69_30-05-2018)
 
