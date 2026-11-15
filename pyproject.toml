@@ -1,0 +1,140 @@
+[project]
+name = "gia-api"
+description = "GIA API"
+readme = "README.md"
+requires-python = ">=3.13"
+dynamic = ["version"]
+
+dependencies = [
+  "beautifulsoup4==4.15.0",
+  "crispy-bootstrap3==2024.1",
+  "dj-rest-auth==7.2.0",
+  "django==5.2.18",
+  "django-allauth==65.20.1",
+  "django-bootstrap3==26.3",
+  "django-brotli==0.4.0",
+  "django-cacheops==7.2",
+  "django-cors-headers==4.9.0",
+  "django-crispy-forms==2.7",
+  "django-decorator-include==3.5",
+  "django-environ==0.14.0",
+  "django-extensions==4.1",
+  "django-filter==26.2",
+  "django-minify-html==1.14.0",
+  "django-prometheus==2.5.0",
+  "django-redis==7.0.0",
+  "django-tables2==3.0.1",
+  "djangorestframework==3.18.3",
+  "djangorestframework-filters==1.0.0.dev2",
+  "djangorestframework-simplejwt==5.5.1",
+  "djmail==2.0.0",
+  "drf-extensions==0.8.0",
+  "drf-spectacular==0.30.0",
+  "gunicorn==26.2.0",
+  "hiredis==3.5.0",
+  "lxml==6.1.3",
+  "openpyxl==3.1.5",
+  "opentelemetry-exporter-otlp==1.45.1",
+  "opentelemetry-instrumentation-django==0.66b1",
+  "opentelemetry-instrumentation-psycopg==0.66b1",
+  "opentelemetry-instrumentation-redis==0.66b1",
+  "opentelemetry-sdk==1.45.1",
+  "psycopg[binary]==3.3.6",
+  "redis==8.1.0",
+  "requests==2.34.2",
+  "stamina==26.1.0",
+  "whitenoise==6.12.0",
+]
+
+[dependency-groups]
+dev = [
+  "debugpy==1.8.22",
+  "django-browser-reload==1.21.0",
+  "django-debug-toolbar==8.0.0",
+  "ipdb==0.13.13",
+  "prek==0.5.10",
+  "pylint-django==2.8.0",
+  "werkzeug[watchdog]==3.1.9",
+]
+test = [
+  "coverage==7.17.0",
+  "django-dynamic-fixture==4.0.1",
+  "pytest==9.1.1",
+  "pytest-cov==7.1.0",
+  "pytest-django==4.14.0",
+  "pytest-mock==3.17.0",
+  "pytest-randomly==5.0.0",
+  "pytest-responses==0.6.0",
+  "pytest-sugar==1.1.1",
+  "responses==0.26.3",
+]
+
+[tool.pytest.ini_options]
+DJANGO_SETTINGS_MODULE = "config.settings.test"
+addopts = "-ra --cov=gia-api --cov-report term-missing:skip-covered"
+
+[tool.coverage.run]
+branch = true
+# plugins = ["django_coverage_plugin"]
+omit = [
+  "*/config/*",
+  "*/migrations/*",
+  "*__init__.py",
+  "*manage.py",
+  "*apps.py",
+]
+
+[tool.coverage.report]
+exclude_also = ["if __name__ == .__main__.:", "if TYPE_CHECKING:"]
+precision = 2
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = [
+  "E501",    # line length violations
+  "D203",    # one-blank-line-before-class
+  "D213",    # multi-line-summary-second-line
+  "COM812",  # missing-trailing-comma
+  "RUF001",  # ambiguous-unicode-character-string
+  "D100",    # Missing docstring in public module
+  "D102",    # Missing docstring in public method
+  "D104",    # Missing docstring in public package
+  "D105",    # Missing docstring in magic method
+  "D106",    # Missing docstring in public nested class
+  "D107",    # Missing docstring in `__init__`
+  "ANN",     # annotations
+  "ARG001",  # unused arguments
+  "ARG002",  # unused arguments
+  "RUF012",  # mutable-class-default
+  "PLC0415", # import-outside-top-level
+  "TD002",   # todo
+  "TD003",   # todo
+  "FIX002",  # todo
+  "CPY001",  # no per-file copyright headers in this project
+]
+
+[tool.ruff.lint.per-file-ignores]
+"*test*" = [
+  "D",       # pydocstyle
+  "ANN",     # tests don't have to use annotations
+  "S101",    # allow assert statements in test cases
+  "PLR0913", # tests can use many arguments for fixtures
+  "PLR2004", # magic-value-comparison
+  "SLF001",  # tests can access private members
+  "ARG001",  # tests can have unused arguments
+  "ARG002",  # tests can have unused arguments
+  "DTZ001",  # allow naive datetime
+]
+"*/settings/*" = [
+  "F403", # star imports
+  "F405", # star imports
+]
+"*/migrations/*" = [
+  "RUF012", # mutable-class-default
+  "D101",   # Missing docstring in public class
+  "ICN001", # generated code, never reformat imports
+]
+
+[tool.ruff.lint.isort]
+combine-as-imports = true
+known-first-party = ["apps"]

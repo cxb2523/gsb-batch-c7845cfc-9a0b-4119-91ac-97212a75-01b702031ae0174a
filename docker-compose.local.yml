@@ -1,0 +1,32 @@
+volumes:
+  postgres_data_local: {}
+  postgres_backups_local: {}
+
+services:
+  postgres-local:
+    build:
+      context: .docker/postgres
+      dockerfile: Dockerfile
+    ports:
+      - "5432:5432"
+    volumes:
+      - "postgres_data_local:/var/lib/postgresql"
+      - "postgres_backups_local:/backups"
+    env_file: .env.local
+
+  django-local:
+    build:
+      context: .
+      dockerfile: .docker/django/Dockerfile
+      args:
+        UV_ARGS: --dev --group=test
+    command: >
+      python -Xfrozen_modules=off /app/gia-api/manage.py runserver_plus 0.0.0.0:8000
+    ports:
+      - "8000:8000"
+      - "5678:5678"  # debugpy
+    volumes:
+      - ".:/app:z"
+    depends_on:
+      - postgres-local
+    env_file: .env.local

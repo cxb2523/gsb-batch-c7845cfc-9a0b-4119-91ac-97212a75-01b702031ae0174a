@@ -1,0 +1,57 @@
+{% load navactive %}
+<nav class="navbar navbar-default">
+    <div class="container-fluid">
+        <!-- Brand and toggle get grouped for better mobile display -->
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-collapse">
+                <span class="sr-only">Показать меню</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a class="navbar-brand" href="{% url 'rcoi:home' %}">ГИА {% now "Y" %} в Москве</a>
+        </div>
+        <!-- Collect the nav links, forms, and other content for toggling -->
+        <div class="collapse navbar-collapse" id="bs-example-navbar-collapse-1">
+            <ul class="nav navbar-nav">
+                <li class="{% navactive request 'rcoi:exam' %}">
+                    <a href="{% url 'rcoi:exam' %}">Экзамены</a>
+                </li>
+                <li class="{% navactive request 'rcoi:employee' %}">
+                    <a href="{% url 'rcoi:employee' %}">Сотрудники</a>
+                </li>
+                <li class="{% navactive request 'rcoi:organisation' %}">
+                    <a href="{% url 'rcoi:organisation' %}">Организации</a>
+                </li>
+                <li class="{% navactive request 'rcoi:place' %}">
+                    <a href="{% url 'rcoi:place' %}">ППЭ</a>
+                </li>
+                <li>
+                    <a href="https://gia.devmem.ru/about" target="_blank">О сайте</a>
+                </li>
+                <li>
+                    <a href="{% url 'apiv1:schema-swagger-ui' %}" target="_blank">API</a>
+                </li>
+                <li>
+                    <a href="https://github.com/spirkaa/gia-api" target="_blank">GitHub</a>
+                </li>
+            </ul>
+            {% if sources %}
+            <ul class="nav navbar-nav navbar-right">
+                <li class="dropdown">
+                    <a href="#" class="dropdown-toggle" data-toggle="dropdown" role="button"
+                        aria-haspopup="true"
+                        aria-expanded="false">Источники <span class="caret"></span></a>
+                    <ul class="dropdown-menu">
+                        {% for source in sources %}
+                        <li><a href="{{ source.url }}"
+                                target="_blank"
+                                rel="noopener noreferrer">{{ source.name }}</a></li>
+                        {% endfor %}
+                    </ul>
+                </li>
+            </ul>
+            {% endif %}
+        </div><!-- /.navbar-collapse -->
+    </div><!-- /.container-fluid -->
+</nav>

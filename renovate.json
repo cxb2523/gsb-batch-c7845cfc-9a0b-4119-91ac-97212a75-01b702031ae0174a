@@ -1,0 +1,23 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended"
+  ],
+  "packageRules": [
+    {
+      "matchPackageNames": [
+        "django"
+      ],
+      "description": "Django LTS.",
+      "allowedVersions": "< 6"
+    },
+    {
+      "matchPackageNames": [
+        "opentelemetry-{/,}**"
+      ],
+      "description": "OpenTelemetry: include pre-release versions of instrumentation packages as these packages are tightly coupled with otel api and sdk.",
+      "ignoreUnstable": false,
+      "groupName": "opentelemetry"
+    }
+  ]
+}

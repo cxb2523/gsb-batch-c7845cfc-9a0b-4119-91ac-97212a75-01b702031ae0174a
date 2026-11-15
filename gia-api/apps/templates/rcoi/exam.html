@@ -1,0 +1,47 @@
+{% extends 'base.html' %}
+{% load bootstrap3 %}
+{% load crispy_forms_tags %}
+{% load render_table from django_tables2 %}
+{% load tz %}
+
+{% block description %}{% block title %}Распределение организаторов ЕГЭ и ОГЭ в пункты проведения экзаменов{% endblock %}{% endblock %}
+
+{% if table.page and table.paginator.num_pages > 1 %}
+    {% block meta %}
+        {% if table.page.has_previous and table_sort %}
+            <link rel="canonical" href="{{ link_rel }}?page={{ table.page.number }}"/>
+            <link rel="prev" href="{{ link_rel }}?page={{ table.page.previous_page_number }}&sort={{ table_sort }}"/>
+        {% elif table.page.has_previous %}
+            <link rel="canonical" href="{{ link_rel }}?page={{ table.page.number }}"/>
+            <link rel="prev" href="{{ link_rel }}?page={{ table.page.previous_page_number }}"/>
+        {% else %}
+            {{ block.super }}
+        {% endif %}
+        {% if table.page.has_next and table_sort %}
+            <link rel="next" href="{{ link_rel }}?page={{ table.page.next_page_number }}&sort={{ table_sort }}"/>
+        {% elif table.page.has_next %}
+            <link rel="next" href="{{ link_rel }}?page={{ table.page.next_page_number }}"/>
+        {% endif %}
+    {% endblock meta %}
+{% endif %}
+
+{% block page_header %}
+    <h1>Список организаторов ЕГЭ и ОГЭ</h1>
+{% endblock %}
+{% block content %}
+    <div class="row">
+        <div class="col-md-3 col-sm-3"></div>
+        <div class="col-md-6 col-sm-6">
+            {% if updated %}{% localtime off %}
+            <div class="text-center bottom-buffer">Обновлено {{ updated|date:"d.m.Y, H:i" }}</div>
+            {% endlocaltime %}{% endif %}
+            {% crispy filter.form filter.form.helper %}
+        </div>
+        <div class="col-md-3 col-sm-3"></div>
+    </div>
+    <div class="row" id="row-main">
+        <div class="col-lg-1"></div>
+        <div class="col-lg-10">{% render_table table 'table.html' %}</div>
+        <div class="col-lg-1"></div>
+    </div>
+{% endblock %}

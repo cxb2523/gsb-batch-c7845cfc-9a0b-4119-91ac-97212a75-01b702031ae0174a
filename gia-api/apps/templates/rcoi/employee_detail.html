@@ -1,0 +1,75 @@
+{% extends "base.html" %}
+{% block description %}График работы (расписание экзаменов) для работника ППЭ {{ object.name }}, {{ object.org.name }}.{% endblock %}
+{% block title %}{{ object.name }}, {{ object.org.name }}, работник ППЭ{% endblock %}
+{% block page_header %}
+    <h1>{{ object.name }}<br/>
+        <small><a href="{{ object.org.get_absolute_url }}">{{ object.org.name }}</a></small>
+    </h1>
+{% endblock %}
+{% block content %}
+    <div class="row bottom-buffer">
+        <div class="col-sm-4"></div>
+        <div class="col-sm-4">
+            <a href="https://gia.devmem.ru/registration" role="button" class="btn btn-primary btn-block">
+                Подписаться на обновления
+            </a>
+        </div>
+        <div class="col-sm-4"></div>
+    </div>
+    <div class="row" id="row-main">
+        <div class="col-lg-1"></div>
+        <div class="col-lg-10">
+            <table class="table table-condensed table-hover no-more-tables">
+                <thead>
+                <tr>
+                    <th></th>
+                    <th>Дата</th>
+                    <th>Код ППЭ</th>
+                    <th>Наименование ППЭ</th>
+                    <th>Адрес ППЭ</th>
+                    <th>Должность в ППЭ</th>
+                </tr>
+                </thead>
+                <tbody>
+                {% for exam in exams %}
+                    {% now "Y-m-d" as todays_date %}
+                    <tr{% if todays_date > exam.date.date|date:"Y-m-d" %} class="text-muted"{% endif %}>
+                        <td>{% if todays_date > exam.date.date|date:"Y-m-d" %}&#10004;{% endif %}</td>
+                        <td data-title="Дата">
+                            <a
+                                href="{{ exam.datafile.url }}"
+                                rel="noopener noreferrer"
+                                title="Скачать таблицу с официального сайта РЦОИ">
+                                <span class="glyphicon glyphicon-download-alt"></span>
+                            </a>&nbsp;{{ exam.date }}
+                        </td>
+                        <td data-title="Код ППЭ" >
+                            <strong>
+                                <a{% if todays_date > exam.date.date|date:"Y-m-d" %} class="text-muted"{% endif %}
+                                        href="{{ exam.place.get_absolute_url }}">{{ exam.place.code }}
+                                </a>
+                            </strong>
+                        </td>
+                        <td data-title="Наим. ППЭ">
+                            <a{% if todays_date > exam.date.date|date:"Y-m-d" %} class="text-muted"{% endif %}
+                                    href="{{ exam.place.get_absolute_url }}">{{ exam.place.name }}
+                            </a>
+                        </td>
+                        <td data-title="Адрес ППЭ">
+                            <a{% if todays_date > exam.date.date|date:"Y-m-d" %} class="text-muted"{% endif %}
+                                    href="https://yandex.ru/maps/?text={{ exam.place.addr|urlencode }}"
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    title="Открыть карту">
+                                <span class="glyphicon glyphicon-map-marker"></span> {{ exam.place.addr }}
+                            </a>
+                        </td>
+                        <td data-title="Должность">{{ exam.position }}</td>
+                    </tr>
+                {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        <div class="col-lg-1"></div>
+    </div>
+{% endblock %}
