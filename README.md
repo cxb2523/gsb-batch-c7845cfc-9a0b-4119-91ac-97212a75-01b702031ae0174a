@@ -146,6 +146,49 @@ To stop the containers AND remove all persisted data (PostgreSQL data, pgAdmin d
 docker-compose down -v
 ```
 
+## Producer Resilience & Observability
+
+The ingestion producer (`producer/producer.py`) is built to survive an
+unreliable exchange feed without losing observability:
+
+- **Exponential backoff reconnect**: after a dropped connection or an
+  exception from `run_forever`, it reconnects after 5s, 10s, 20s, 40s and
+  then stays capped at 60s. As soon as any inbound frame is successfully
+  handled on a connection, the backoff resets to the initial 5s.
+- **Bad-frame isolation**: a frame that is not valid JSON, is not a JSON
+  object, is missing any of `trade_id` / `symbol` / `price` / `quantity` /
+  `trade_time` / `is_buyer_maker`, or carries a value of the wrong type is
+  skipped and counted as a bad frame. One bad message can never tear down
+  the connection.
+- **Round settlement logs**: every connection round ends with a
+  `ROUND SETTLEMENT` log line reporting `messages_received`,
+  `trades_published`, `bad_frames`, `non_trade_messages`,
+  `publish_failures` and `reconnect_wait_seconds`, so "no trades because the
+  connection is broken" is distinguishable from "healthy connection with no
+  trades".
+- **Kafka outages stay non-blocking**: if Kafka is unavailable, parsing and
+  counting continue; failed publishes are counted in `publish_failures`
+  instead of crashing or blocking the message loop. The unified Kafka
+  message schema is unchanged.
+
+### Running the producer unit tests
+
+No broker or network access is required — the tests drive the real
+`on_open` / `on_message` / `on_error` / `on_close` callback path with a
+scripted fake WebSocket and a fake Kafka producer:
+
+```bash
+# from the repository root
+python -m unittest discover -s producer/tests -v
+# or directly
+python producer/tests/test_producer.py -v
+```
+
+The suite covers valid trades, missing fields, wrong field types, malformed
+JSON, non-trade messages, Kafka unavailable at startup and mid-stream,
+consecutive disconnects followed by recovery, the 5→10→20→40→60s backoff
+sequence with reset, and the per-round settlement numbers.
+
 ## Project Structure
 
 ```plaintext
@@ -156,9 +199,13 @@ docker-compose down -v
 ├── README.md
 |
 ├── producer/
+│   ├── __init__.py
 │   ├── Dockerfile
 │   ├── producer.py
-│   └── requirements.txt
+│   ├── requirements.txt
+│   └── tests/
+│       ├── __init__.py
+│       └── test_producer.py
 |
 ├── spark_processor/
 │   ├── Dockerfile
