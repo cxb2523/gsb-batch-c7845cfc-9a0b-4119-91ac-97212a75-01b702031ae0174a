@@ -1,0 +1,76 @@
+# Changelog
+
+All notable changes to pipestage will be documented here.
+
+---
+
+## [0.3.0] - 2026-08-25
+
+### Added
+
+- `Stream.take(n)` - lazy, chainable stage that stops pulling from the source after `n` items and cancels any in-flight tasks in an upstream concurrent stage
+- `Stream.first()` - terminal, returns the first item or raises `StopAsyncIteration`
+- `Stream.last()` - terminal, returns the final item or raises `StopAsyncIteration`
+- `Stream.count()` - terminal, counts items without materializing a list
+- `Stream.reduce(fn, initial)` - terminal, folds the stream with a sync or async `fn(acc, item)`
+- `Stream.any(pred)` - terminal, short-circuits on the first match
+- `Stream.all(pred)` - terminal, short-circuits on the first non-match
+
+### Changed
+
+- `Stream.aclose()` now shares its cancellation logic with the new short-circuiting terminals via a single `_try_aclose` helper
+
+### Fixed
+
+- `[project.authors]` was never set in `pyproject.toml` - `pip show pipestage` showed blank `Author`/`Author-email` since v0.1.0. Set to `OpenLabX <contact@openlabx.com>`, matching the `LICENSE` copyright holder
+
+---
+
+## [0.2.0] - 2026-07-26
+
+### Changed
+
+- `_map_ordered` and `_map_unordered` now use a sliding window (at most `concurrency * 2` live tasks) instead of creating a task for every source item upfront - fixes high memory use and unbounded task growth on large or infinite sources
+- `stream()` now returns `Stream[T]` inferred from the source type instead of an untyped `Stream`
+
+### Added
+
+- `Stream.aclose()` - closes the underlying pipeline and cancels in-flight tasks on early exit
+- `pytest-cov` added to dev dependencies
+
+### Fixed
+
+- `test_validation_batch_size` message mismatch left over from the 0.1.1 validation unification (`batch` now raises with "batch size" in the message)
+- Two stale `type: ignore` comments removed after mypy flagged them as unused
+
+---
+
+## [0.1.1] - 2026-06-30
+
+### Changed
+
+- `filter_stage` serial branch removed, all paths now delegate to `map_stage` uniformly
+- Validation helper unified, `_check_concurrency` replaced with `_check_positive(name, value)` used by all methods including `batch`
+- `__version__` now read dynamically from package metadata via `importlib.metadata.version`
+
+---
+
+## [0.1.0] - 2026-06-25
+
+### Added
+
+- `stream(source)` - entry point accepting any sync or async iterable
+- `Stream.map(fn, *, concurrency, ordered)` - serial and concurrent map with ordered/unordered output
+- `Stream.filter(pred, *, concurrency, ordered)` - serial and concurrent filter
+- `Stream.flat_map(fn, *, concurrency, ordered)` - map then flatten one level
+- `Stream.batch(size)` - group items into fixed-size lists
+- `Stream.collect()` - terminal, returns `list[T]`
+- `Stream.for_each(fn, *, concurrency, ordered)` - terminal, side-effect consumer
+- Async iteration - `Stream` usable directly in `async for` loops
+- Fail-fast error handling - first exception cancels in-flight tasks and propagates unchanged
+- Zero runtime dependencies, Python 3.11+
+
+### Released
+
+- GitHub: https://github.com/openlab-x/pipestage - 2026-06-25
+- PyPI: https://pypi.org/project/pipestage - 2026-06-26
