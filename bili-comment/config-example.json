@@ -13,6 +13,7 @@
   },
   "get_refresh": 0,
   "submmit_refresh": 0,
+  "max_get_failures": 10,
   "multithread": {
     "floor_enabled": 0,
     "thread": 5

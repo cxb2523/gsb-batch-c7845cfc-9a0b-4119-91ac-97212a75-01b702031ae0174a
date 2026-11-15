@@ -18,6 +18,7 @@
 <tr><th>comment</th><th>评论内容，字符串</tr></th>
 <tr><th>get_refresh</th><th>刷新间隔，毫秒，整数，默认0</tr></th>
 <tr><th>submmit_refresh</th><th>提交评论间隔，毫秒，整数，默认0</tr></th>
+<tr><th>max_get_failures</th><th>查楼连续失败（请求异常/状态码非200/响应解析不出楼层）多少次后停止轮询，整数，可选。缺省或填0表示不限制、一直轮询（即旧版行为）；达到上限后打印 [failed] 结局并停止，不会误报“I am sorry”或“Done.Good luck.”。示例值10</tr></th>
 <tr><th>multithread</th><th>多线程相关</tr></th>
 <tr><th>floor_enabled</th><th>是否启用查楼多线程，0=禁用，1=启用，整数，默认0</tr></th>
 <tr><th>thread</th><th>线程数，多线程启用才可用，太快会被反爬，整数，默认5</tr></th>
