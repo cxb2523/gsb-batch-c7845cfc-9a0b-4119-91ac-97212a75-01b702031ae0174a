@@ -1,0 +1,525 @@
+import { FormProps, FormReturnValue } from '@codifycli/ink-form';
+import { CommandRequestData } from '@codifycli/schemas';
+import cliCursor from 'cli-cursor';
+import { render } from 'ink';
+import { EventEmitter } from 'node:events';
+import React from 'react';
+import stripAnsi from 'strip-ansi'
+
+import { PluginError } from '../../common/errors.js';
+import { ApplyResult } from '../../entities/apply-result.js';
+import { ResourceMissingParameters } from '../../entities/missing-parameter.js';
+import { Plan, ResourcePlan } from '../../entities/plan.js';
+import { ResourceConfig } from '../../entities/resource-config.js';
+import { ResourceInfo } from '../../entities/resource-info.js';
+import { ctx, Event, ProcessName, SubProcessName, SubprocessFinishStatus } from '../../events/context.js';
+import { FileModificationResult } from '../../generators/index.js';
+import { ImportResult } from '../../orchestrators/import.js';
+import { sleep } from '../../utils/index.js';
+import { SudoUtils } from '../../utils/sudo.js';
+import { DefaultComponent } from '../components/default-component.js';
+import { ParameterListProps } from '../components/parameter-list/parameter-list.js';
+import { ProgressState, ProgressStatus } from '../components/progress/progress-display.js';
+import { RenderStatus, store } from '../store/index.js';
+import { PromptType, RenderEvent, Reporter } from './reporter.js';
+import chalk from 'chalk';
+
+const ProgressLabelMapping = {
+  [ProcessName.TEST]: 'Codify test',
+  [ProcessName.APPLY]: 'Codify apply',
+  [ProcessName.PLAN]: 'Codify plan',
+  [ProcessName.DESTROY]: 'Codify destroy',
+  [ProcessName.REFRESH]: 'Codify refresh',
+  [ProcessName.IMPORT]: 'Codify import',
+  [ProcessName.INIT]: 'Codify init',
+  [ProcessName.TERMINATE]: 'Attempting to terminate existing instance',
+  [SubProcessName.APPLYING_RESOURCE]: 'Applying resource',
+  [SubProcessName.GENERATE_PLAN]: 'Refresh states and generating plan',
+  [SubProcessName.INITIALIZE_PLUGINS]: 'Initializing plugins',
+  [SubProcessName.PARSE]: 'Parsing configs',
+  [SubProcessName.CREATE_ROOT_FILE]: 'Creating root codify file',
+  [SubProcessName.VALIDATE]: 'Validating configs',
+  [SubProcessName.GET_REQUIRED_PARAMETERS]: 'Getting required parameters',
+  [SubProcessName.IMPORT_RESOURCE]: 'Importing resource',
+  [SubProcessName.FIND_EXISTING_RESOURCES]: 'Finding existing resources',
+  [SubProcessName.TEST_INITIALIZE_AND_VALIDATE]: 'Initializing and validating your configs',
+  [SubProcessName.TEST_CHECKING_VM_INSTALLED]: 'Checking if VM is installed',
+  [SubProcessName.TEST_STARTING_VM]: 'Starting VM',
+  [SubProcessName.TEST_COPYING_OVER_CONFIGS_AND_OPENING_TERMINAL]: 'Copying over configs and opening terminal (if a confirmation dialog appears within the VM, please confirm it.)',
+  [SubProcessName.TEST_USER_CONTINUE_ON_VM]: 'Done setup! Please continue on the VM UI',
+  [SubProcessName.TEST_DELETING_VM]: 'Deleting VM',
+}
+
+export class DefaultReporter implements Reporter {
+  private renderEmitter = new EventEmitter();
+  private inkWrite: ((data: string) => void) | null = null;
+  private progressState: ProgressState | null = null
+  private verbosityToggleCallback: (() => void) | null = null;
+  private sudoPasswordSubmittedCallback: ((password: string) => Promise<boolean>) | null = null;
+  private inkSuspendStdin: (() => void) | null = null;
+  private inkResumeStdin: (() => void) | null = null;
+  private inkPauseRendering: (() => void) | null = null;
+  private inkResumeRendering: (() => void) | null = null;
+  silent = false;
+  rawOutput = false;
+
+  constructor() {
+    const instance = render(<DefaultComponent emitter={this.renderEmitter} onWriteReady={(write) => { this.inkWrite = write; }}/>);
+    this.inkSuspendStdin = (instance as any).suspendStdin ?? null;
+    this.inkResumeStdin = (instance as any).resumeStdin ?? null;
+    this.inkPauseRendering = (instance as any).pauseRendering ?? null;
+    this.inkResumeRendering = (instance as any).resumeRendering ?? null;
+
+    ctx.on(Event.OUTPUT, (args) => this.log(args));
+    ctx.on(Event.PROCESS_START, (name) => this.onProcessStartEvent(name))
+    ctx.on(Event.PROCESS_FINISH, (name) => this.onProcessFinishEvent(name))
+    ctx.on(Event.SUB_PROCESS_START, (name, additionalName) => this.onSubprocessStartEvent(name, additionalName));
+    ctx.on(Event.SUB_PROCESS_FINISH, (name, additionalName, status) => this.onSubprocessFinishEvent(name, additionalName, status));
+
+    this.renderEmitter.on(RenderEvent.TOGGLE_VERBOSITY, () => {
+      this.verbosityToggleCallback?.();
+    });
+
+    this.renderEmitter.on(RenderEvent.SUDO_PASSWORD_TOGGLE, () => {
+      this.handleInlineSudoPassword();
+    });
+  }
+
+  onVerbosityToggle(callback: () => void): void {
+    this.verbosityToggleCallback = callback;
+  }
+
+  onSudoPasswordSubmitted(callback: (password: string) => Promise<boolean>): void {
+    this.sudoPasswordSubmittedCallback = callback;
+  }
+
+  setSudoPasswordCached(): void {
+    store.set(store.isSudoPasswordCached, true);
+  }
+
+  setSleepPrevented(value: boolean): void {
+    store.set(store.isSleepPrevented, value);
+  }
+
+  async promptPressKeyToContinue(message?: string): Promise<void> {
+    const previousRenderState = this.getRenderState();
+
+    await this.updateStateAndAwaitEvent<boolean>(
+      () => this.updateRenderState(RenderStatus.PROMPT_PRESS_KEY_TO_CONTINUE, message),
+      RenderEvent.PROMPT_RESULT,
+    )
+
+    await this.updateRenderState(previousRenderState.status, previousRenderState.data);
+  }
+
+  async displayInitBanner(skipConfirmation?: boolean): Promise<void> {
+    if (skipConfirmation) {
+      await this.updateRenderState(RenderStatus.DISPLAY_INIT_BANNER);
+      return;
+    }
+
+    await this.updateStateAndAwaitEvent<boolean>(
+      () => this.updateRenderState(RenderStatus.DISPLAY_INIT_BANNER),
+      RenderEvent.PROMPT_RESULT,
+    )
+  }
+
+  async promptInput(prompt: string, error?: string, placeholder?: string): Promise<string> {
+    return this.updateStateAndAwaitEvent<string>(
+      () => this.updateRenderState(RenderStatus.PROMPT_INPUT, { prompt, error, placeholder }),
+      RenderEvent.PROMPT_RESULT,
+    )
+  }
+
+  async displayProgress(): Promise<void> {
+    await this.updateRenderState(RenderStatus.PROGRESS);
+  }
+
+  async hide(): Promise<void> {
+    store.set(store.renderState, { status: RenderStatus.NOTHING, data: null });
+  }
+
+  async setRawMode(): Promise<void> {
+    this.rawOutput = true;
+    // Pause Ink's render loop so it stops writing to stdout during spawnSync.
+    this.inkPauseRendering?.();
+    this.inkSuspendStdin?.();
+    process.stdin.setRawMode(true);
+    // Ink hides the terminal cursor on its first render and only restores it on unmount,
+    // so without this the cursor stays hidden while we're waiting on stdin from the user.
+    cliCursor.show(process.stdout);
+  }
+
+  async disableRawMode(): Promise<void> {
+    this.rawOutput = false;
+    this.inkResumeStdin?.();
+    process.stdin.setRawMode(false);
+    cliCursor.hide(process.stdout);
+
+    // Wait for the terminal to settle before Ink resumes writing to stdout.
+    await sleep(200);
+    this.inkResumeRendering?.();
+    await this.displayProgress();
+  }
+
+  async displayImportWarning(requiresParameters: string[], noParametersRequired: string[]): Promise<void> {
+    await this.updateStateAndAwaitEvent<boolean>(
+      () => this.updateRenderState(RenderStatus.IMPORT_PROMPT_WARNING, { requiresParameters, noParametersRequired }),
+      RenderEvent.PROMPT_RESULT
+    )
+  }
+
+  async promptUserForValues(resources: Array<ResourceInfo>, promptType: PromptType): Promise<ResourceConfig[]> {
+    if (resources.length === 0) {
+      return [];
+    }
+
+    enterFullScreen()
+    process.on('beforeExit', exitFullScreen);
+
+    let props;
+    switch (promptType) {
+      case PromptType.IMPORT: {
+        props = {
+          title: 'Multiple instances exist: identify which instance to import',
+          description: 'fill out required',
+        }
+        break;
+      }
+
+      case PromptType.DESTROY: {
+        props = {
+          title: 'Multiple instances exist: identify which instance to destroy',
+          description: 'fill out required',
+        }
+        break;
+      }
+    }
+
+    const formProps: FormProps = {
+      form: {
+        ...props,
+        sections: resources.map((info) => ({
+          title: info.type,
+          description: info.description,
+          fields: info.getRequiredParameters().map((parameter) => ({
+            type: parameter.type,
+            name: parameter.name,
+            label: parameter.name,
+            initialValue: parameter.value,
+            description: parameter.description,
+            required: true,
+          })),
+        })),
+      },
+    }
+    
+    const userInput = await this.updateStateAndAwaitEvent<FormReturnValue>(() =>
+      this.updateRenderState(RenderStatus.IMPORT_PROMPT, formProps),
+      RenderEvent.PROMPT_IMPORT_PARAMETERS_RESULT
+    );
+
+    exitFullScreen()
+    process.off('beforeExit', exitFullScreen);
+
+    await this.updateRenderState(RenderStatus.PROGRESS);
+
+    return userInput.map((v) => ResourceConfig.fromJson({
+      core: { type: v.section.title },
+      parameters: v.value,
+    }))
+  }
+
+  async promptMissingParameters(requests: ResourceMissingParameters[]): Promise<unknown[][]> {
+    if (requests.length === 0) {
+      return [];
+    }
+
+    const prevRenderState = this.getRenderState();
+    const props: Omit<ParameterListProps, 'onCancel' | 'onSubmit'> = {
+      title: 'Some values are missing from your config',
+      subtitle: 'They are only used for this run and will not be saved to your config.',
+      // Each resource is shown in full so the user has the context of what each value is for
+      resources: requests.map(({ resource, parameters, sensitiveParameters }) => ({
+        id: resource.id,
+        config: { ...resource.core(), ...resource.parameters },
+        sensitiveKeys: sensitiveParameters,
+        fields: parameters.map((parameter) => ({
+          path: parameter.path,
+          type: parameter.type,
+          itemsType: parameter.itemsType,
+          description: parameter.description,
+          sensitive: parameter.sensitive,
+        })),
+      })),
+    };
+
+    const values = await this.updateStateAndAwaitEvent<null | string[]>(
+      () => this.updateRenderState(RenderStatus.PROMPT_MISSING_PARAMETERS, props),
+      RenderEvent.PROMPT_MISSING_PARAMETERS_RESULT,
+    );
+
+    await this.updateRenderState(prevRenderState.status, prevRenderState.data);
+
+    if (values === null) {
+      throw new Error('Cancelled: the missing values were not provided');
+    }
+
+    // Rows are flattened in request order. Reshape back into one list per resource.
+    let offset = 0;
+    return requests.map(({ parameters }) => {
+      const resourceValues = values.slice(offset, offset + parameters.length);
+      offset += parameters.length;
+      return resourceValues;
+    });
+  }
+
+  async displayImportResult(importResult: ImportResult, showConfigs: boolean): Promise<void> {
+    store.set(store.progressState, null);
+    this.progressState = null;
+
+    await this.updateRenderState(RenderStatus.DISPLAY_IMPORT_RESULT, { importResult, showConfigs });
+  }
+
+  async promptSudo(pluginName: string, data: CommandRequestData): Promise<string | undefined> {
+    ctx.log(`Plugin: "${pluginName}" requires root access to run command: "sudo ${data.command}"`);
+    const title = `Plugin: "${pluginName}" requires root access to run command: "sudo ${data.command}"`;
+
+    // Saving is only offered when a cache is registered (i.e. not in secure mode)
+    const savable = this.sudoPasswordSubmittedCallback !== null;
+    const result = await this.promptSudoPassword({ title, cancellable: false, savable });
+
+    if (result?.save) {
+      const isValid = await this.sudoPasswordSubmittedCallback!(result.password);
+      if (isValid) {
+        store.set(store.isSudoPasswordCached, true);
+      }
+    }
+
+    await this.displayProgress();
+    return result?.password;
+  }
+
+  async displayPlan(plan: Plan): Promise<void> {
+    await this.updateRenderState(RenderStatus.DISPLAY_PLAN, plan);
+  }
+
+  async displayMessage(message: string) {
+     await this.updateRenderState(RenderStatus.DISPLAY_MESSAGE, message);
+  }
+
+  async promptInitResultSelection(availableTypes: string[]): Promise<string[]> {
+    return this.updateStateAndAwaitEvent(
+      () => this.updateRenderState(RenderStatus.PROMPT_INIT_RESULT_SELECTION, availableTypes),
+      RenderEvent.PROMPT_RESULT,
+    )
+  }
+
+  async promptConfirmation(message: string): Promise<boolean> {
+    const result = await this.updateStateAndAwaitEvent<boolean>(
+      () => this.updateRenderState(RenderStatus.PROMPT_CONFIRMATION, message),
+      RenderEvent.PROMPT_RESULT
+    )
+
+    ctx.log(result ? `${message} -> "Yes"` : `${message} -> "No"`)
+
+    return result;
+  }
+
+  async promptOptions(message:string, options:string[]): Promise<number> {
+    const prevRenderState = this.getRenderState();
+
+    const result = await this.updateStateAndAwaitEvent<string>(
+      () => this.updateRenderState(RenderStatus.PROMPT_OPTIONS, { message, options }),
+      RenderEvent.PROMPT_RESULT
+    )
+
+    ctx.log(`${message} -> "${result}"`)
+
+    await this.updateRenderState(prevRenderState.status, prevRenderState.data);
+
+    return options.indexOf(result);
+  }
+
+  async displayFileModifications(diff: Array<{ file: string; modification: FileModificationResult}>): Promise<void> {
+    await this.updateRenderState(RenderStatus.DISPLAY_FILE_MODIFICATION, diff);
+  }
+
+  async displayApplyComplete(result: ApplyResult): Promise<void> {
+    await this.updateRenderState(RenderStatus.APPLY_COMPLETE, result);
+  }
+
+  async displayPluginError(error: PluginError): Promise<void> {
+    await this.updateRenderState(RenderStatus.PLUGIN_ERROR, [error.message]);
+  }
+
+  private log(log: string): void {
+    if (this.silent) return;
+
+    if (this.rawOutput) {
+      // Bypass Ink entirely in raw mode — Ink's buffer can split or mangle OSC
+      // escape sequences (e.g. \x1b]) that interactive tools like `gh auth login`
+      // rely on for terminal capability probing.
+      process.stdout.write(log);
+    } else {
+      this.inkWrite?.(chalk.cyan(stripAnsi(log)));
+    }
+  }
+
+  private onProcessStartEvent(name: ProcessName): void {
+    const label = ProgressLabelMapping[name];
+
+    this.progressState = {
+      label: label + '...',
+      name,
+      status: ProgressStatus.IN_PROGRESS,
+      subProgresses: [],
+    };
+
+    ctx.log(`${label} started`)
+    store.set(store.progressState, this.progressState);
+  }
+
+  private onProcessFinishEvent(name: ProcessName): void {
+    const label = ProgressLabelMapping[name];
+    ctx.log(`${label} finished successfully`)
+
+    this.progressState!.status = ProgressStatus.FINISHED;
+    store.set(store.progressState, structuredClone(this.progressState));
+  }
+
+  private onSubprocessStartEvent(name: SubProcessName, additionalName?: string): void {
+    const label = ProgressLabelMapping[name] + (additionalName ? ' ' + additionalName : '');
+    ctx.log(`${label} started`)
+
+    this.progressState?.subProgresses?.push({
+      label,
+      name: name + (additionalName ?? ''),
+      status: ProgressStatus.IN_PROGRESS,
+    });
+    store.set(store.progressState, structuredClone(this.progressState));
+  }
+
+  private onSubprocessFinishEvent(name: SubProcessName, additionalName?: string, status: SubprocessFinishStatus = SubprocessFinishStatus.SUCCESS): void {
+    const label = ProgressLabelMapping[name] + (additionalName ? ' ' + additionalName : '');
+
+    const subProgress = this.progressState
+      ?.subProgresses
+      ?.find((p) => p.name === name + (additionalName ?? ''));
+
+    if (!subProgress) {
+      return;
+    }
+
+    if (status === SubprocessFinishStatus.FAILED) {
+      subProgress.status = ProgressStatus.FAILED;
+      ctx.log(`${label} failed`);
+    } else if (status === SubprocessFinishStatus.SKIPPED) {
+      subProgress.status = ProgressStatus.SKIPPED;
+      ctx.log(`${label} skipped`);
+    } else {
+      subProgress.status = ProgressStatus.FINISHED;
+      ctx.log(`${label} finished successfully`);
+    }
+
+    store.set(store.progressState, structuredClone(this.progressState));
+  }
+
+  private async handleInlineSudoPassword(): Promise<void> {
+    ctx.log('Prompting sudo to save password for rest of requests');
+    const result = await this.promptSudoPassword({ cancellable: true, savable: false });
+
+    if (result != null) {
+      const isValid = await (this.sudoPasswordSubmittedCallback?.(result.password) ?? Promise.resolve(false));
+      if (isValid) {
+        store.set(store.isSudoPasswordCached, true);
+      }
+    }
+
+    await this.displayProgress();
+  }
+
+  // Shared prompt loop for both inline (cancellable) and blocking (non-cancellable) sudo password entry.
+  // Returns the validated password and whether the user chose to save it, or undefined if the user cancelled
+  // (only possible when cancellable=true).
+  private async promptSudoPassword(
+    opts: { title?: string; cancellable: boolean; savable: boolean }
+  ): Promise<{ password: string; save: boolean } | undefined> {
+    const { title, cancellable, savable } = opts;
+    let hasError = false;
+    let attemptCount = 0;
+
+    while (true) {
+      attemptCount++;
+      const result = (await Promise.all([
+        this.updateRenderState(RenderStatus.SUDO_PROMPT, { attemptCount, hasError, cancellable, savable, title }),
+        Promise.race([
+          this.awaitEvent<{ password: string; save: boolean }>(RenderEvent.SUDO_PROMPT_RESULT),
+          ...(cancellable
+            ? [this.awaitEvent<'cancel'>(RenderEvent.SUDO_PASSWORD_CANCEL).then(() => Symbol.for('cancel'))]
+            : []),
+        ]),
+      ])).at(1) as { password: string; save: boolean } | symbol;
+
+      if (result === Symbol.for('cancel')) {
+        return undefined;
+      }
+
+      const { password, save } = result as { password: string; save: boolean };
+      const isValid = await SudoUtils.validate(password);
+
+      if (isValid) {
+        ctx.log('Sudo password successful!');
+        await SudoUtils.invalidate();
+        return { password, save };
+      }
+
+      hasError = true;
+    }
+  }
+
+  private getRenderState(): { status: RenderStatus, data: any } {
+    return store.get(store.renderState) as { status: RenderStatus, data: any };
+  }
+
+  /**
+   * Update the render state. We need to make this async because there is currently a weird bug where if we switch the
+   * layout too quickly then it can potentially crash with a memory error. We first switch to empty, wait 50ms and the
+   * render the next state
+   * @param status
+   * @param data
+   * @private
+   */
+  private async updateRenderState(status: RenderStatus | null, data?: unknown): Promise<void> {
+    const current = this.getRenderState();
+    if (current?.status !== status) {
+      store.set(store.renderState, { status: RenderStatus.NOTHING, data: null });
+      await sleep(50);
+    }
+    store.set(store.renderState, { status, data });
+  }
+
+  // This is needed if we await any prompts. It makes the UI feel a lot more fluid since the await is no longer blocking
+  private async updateStateAndAwaitEvent<T>(fn: () => void, eventName: string): Promise<T> {
+    return (await Promise.all([
+      fn(),
+      this.awaitEvent(eventName)
+    ])).at(1) as T;
+  }
+
+  private awaitEvent<T>(name: string): Promise<T> {
+    return new Promise((resolve) => {
+      this.renderEmitter.once(name, resolve)
+    });
+  }
+}
+
+function enterFullScreen() {
+  process.stdout.write('\u001B[?1049h');
+  process.stdout.write('\u001B[?1000h');
+}
+
+function exitFullScreen() {
+  process.stdout.write('\u001B[?1049l');
+  process.stdout.write('\u001B[?1000l');
+}

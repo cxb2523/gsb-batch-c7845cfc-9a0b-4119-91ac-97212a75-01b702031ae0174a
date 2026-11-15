@@ -1,0 +1,158 @@
+import * as pty from 'node-pty';
+import { SpawnStatus } from '@codifycli/schemas';
+import { unlinkSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import stripAnsi from 'strip-ansi';
+
+import { SpawnError } from '../common/errors.js';
+import { ctx } from '../events/context.js';
+import { OsUtils } from './os-utils.js';
+import { Shell, ShellUtils } from './shell.js';
+import { VerbosityLevel } from './verbosity-level.js';
+
+export interface SpawnResult {
+  status: SpawnStatus;
+  exitCode: number;
+  data: string;
+}
+
+export interface SpawnOptions {
+  cwd?: string;
+  env?: Record<string, unknown>,
+  interactive?: boolean,
+  requiresRoot?: boolean,
+  requiresSudoAskpass?: boolean,
+  stdin?: boolean,
+  timeout?: number,
+  allowSudoInCommand?: boolean,
+}
+
+export async function spawn(cmd: string, options?: SpawnOptions, pluginName?: string, password?: string): Promise<SpawnResult> {
+  const spawnResult = await spawnSafe(cmd, options, pluginName, password);
+
+  if (spawnResult.status !== 'success') {
+    throw new SpawnError(Array.isArray(cmd) ? cmd.join('\n') : cmd, spawnResult.exitCode, spawnResult.data);
+  }
+
+  return spawnResult;
+}
+
+export async function spawnSafe(cmd: string, options?: SpawnOptions, pluginName?: string, password?: string): Promise<SpawnResult> {
+  if ((options?.requiresRoot || options?.requiresSudoAskpass) && !password) {
+    throw new Error('Password must be specified!');
+  }
+
+  if (cmd.toLowerCase().includes('sudo') && !options?.allowSudoInCommand) {
+    throw new Error(`Command must not include sudo. Plugin (${pluginName})`)
+  }
+
+  if (pluginName) {
+    ctx.pluginStdout(pluginName, `Running command: ${options?.requiresRoot ? 'sudo' : options?.requiresSudoAskpass ? 'sudo (askpass)' : ''} ${cmd}` + (options?.cwd ? `(${options?.cwd})` : '') + '\n')
+  } else {
+    ctx.log(`Running command: ${cmd}` + (options?.cwd ? `(${options?.cwd})` : '') + '\n');
+  }
+
+  let tmpFile: string | undefined;
+  if (options?.requiresSudoAskpass && password) {
+    tmpFile = join(tmpdir(), `codify-askpass-${Date.now()}.sh`);
+    const escapedPassword = password.replace(/'/g, "'\\''");
+    writeFileSync(tmpFile, `#!/bin/bash\necho '${escapedPassword}'`, { mode: 0o700 });
+  }
+
+  try {
+    return await new Promise<SpawnResult>((resolve) => {
+      const output: string[] = [];
+      const historyIgnore = ShellUtils.getShell() === Shell.ZSH ? { HISTORY_IGNORE: '*' } : { HISTIGNORE: '*' };
+
+      // If TERM_PROGRAM=Apple_Terminal is set then ANSI escape characters may be included
+      // in the response.
+      const env = {
+        ...process.env, ...options?.env,
+        ...(tmpFile ? { SUDO_ASKPASS: tmpFile } : {}),
+        TERM_PROGRAM: 'codify',
+        COMMAND_MODE: 'unix2003',
+        COLORTERM: 'truecolor',
+        ...historyIgnore
+      }
+
+      // Initial terminal dimensions
+      const initialCols = process.stdout.columns ?? 80;
+      const initialRows = process.stdout.rows ?? 24;
+
+      // zsh autocorrect prompts (e.g. "zsh: correct 'config' to '.config' [nyae]?") will hang
+      // the pty waiting for interactive input. Can't be disabled via env var; must unset the options explicitly.
+      const disableAutocorrect = ShellUtils.getShell() === Shell.ZSH ? 'unsetopt CORRECT CORRECT_ALL 2>/dev/null; ' : '';
+      const command = options?.requiresRoot
+        ? `sudo -k >/dev/null 2>&1; sudo -S <<< "${password}" -E ${ShellUtils.getDefaultShell()} ${options?.interactive ? '-i' : ''} -c "${(disableAutocorrect + cmd).replaceAll('"', '\\"')}"`
+        : `${disableAutocorrect}${cmd}`;
+      const args = options?.interactive ? ['-i', '-c', command] : ['-c', command]
+
+      // Run the command in a pty for interactivity
+      const mPty = pty.spawn(ShellUtils.getDefaultShell(), args, {
+        ...options,
+        cols: initialCols,
+        rows: initialRows,
+        env
+      });
+
+      mPty.onData((data) => {
+        if (options?.stdin) {
+          // Write directly — ctx.log appends '\n' to every chunk which breaks
+          // in-place spinner/cursor animations that rely on \r without \n.
+          process.stdout.write(data);
+        } else if (pluginName) {
+          ctx.pluginStdout(pluginName, data)
+        } else if (VerbosityLevel.get() > 0) {
+          ctx.log(data);
+        }
+
+        output.push(data.toString());
+      })
+
+      const resizeListener = () => {
+        const { columns, rows } = process.stdout;
+        mPty.resize(columns, rows);
+      }
+
+      const stdinListener = (data: Buffer | string) => {
+        // console.log('stdinListener', data);
+        mPty.write(data.toString('binary'));
+      }
+
+      // Listen to resize events for the terminal window;
+      process.stdout.on('resize', resizeListener);
+      if (options?.stdin) {
+        process.stdin.on('data', stdinListener)
+      }
+
+      mPty.onExit((result) => {
+        process.stdout.off('resize', resizeListener);
+        if (options?.stdin) {
+          process.stdin.off('data', stdinListener);
+        }
+
+        resolve({
+          status: result.exitCode === 0 ? SpawnStatus.SUCCESS : SpawnStatus.ERROR,
+          exitCode: result.exitCode,
+          data: stripAnsi(output.join('\n').trim()),
+        })
+      });
+
+      if (options?.timeout) {
+        setTimeout(() => {
+          mPty.kill();
+          resolve({
+            status: SpawnStatus.ERROR,
+            exitCode: -1,
+            data: '',
+          });
+        }, options.timeout);
+      }
+    });
+  } finally {
+    if (tmpFile) {
+      try { unlinkSync(tmpFile); } catch { /* best effort */ }
+    }
+  }
+}

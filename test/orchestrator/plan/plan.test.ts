@@ -1,0 +1,239 @@
+import path from 'path';
+
+import { describe, it, vi, afterEach, expect } from 'vitest';
+import { MockOs } from '../mocks/system.js';
+import { Plan } from '../../../src/entities/plan.js';
+import { ResourceOperation } from '@codifycli/schemas';
+import { MockReporter } from '../mocks/reporter.js';
+import { PlanOrchestrator } from '../../../src/orchestrators/plan';
+import {OsUtils} from "../../../src/utils/os-utils.js";
+import fs from 'node:fs/promises';
+import { PluginValidationError } from '../../../src/common/errors.js';
+
+// In-process MockPlugins spawn BackgroundPtys that are never killed between tests. On Linux their
+// pending writes can land in the pty validateShell spawns (fd reuse), causing spurious failures.
+vi.mock('../../../src/utils/shell.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../../src/utils/shell.js')>();
+  return {
+    ...actual,
+    ShellUtils: {
+      ...actual.ShellUtils,
+      validateShell: vi.fn(async () => {}),
+    },
+  }
+})
+
+vi.mock('../../../src/plugins/plugin.js', async () => {
+  const { MockPlugin } = await import('../mocks/plugin.js');
+  return { Plugin: MockPlugin };
+})
+
+// The apply orchestrator directly calls plan so this will test both
+describe('Plan orchestrator tests', () => {
+  it('Can plan a resource (create) including xcode-tools', { skip: !OsUtils.isMacOS() }, async () => {
+    const reporter = new MockReporter({
+      validatePlan(plan: Plan) {
+        // Xcode-tools will always show up in the plan
+        expect(plan.getResourcePlan('xcode-tools')).toMatchObject({
+          operation: ResourceOperation.CREATE
+        })
+        expect(plan.getResourcePlan('mock')).toMatchObject({
+          operation: ResourceOperation.CREATE,
+        });
+      },
+      promptConfirmation(): boolean {
+        return true;
+      }
+    });
+
+    MockOs.destroy('xcode-tools');
+    expect(MockOs.get('xcode-tools')).to.be.undefined;
+    expect(MockOs.get('mock')).to.be.undefined;
+
+    const {plan, project, pluginManager} = await PlanOrchestrator.run({
+      path: path.join(__dirname, 'create.codify.json')
+    }, reporter)
+
+    expect(plan).to.exist;
+    expect(project).to.exist;
+    expect(pluginManager).to.exist;
+
+    expect(project.evaluationOrder.length).to.eq(2);
+    expect(project.evaluationOrder[0]).to.eq('xcode-tools');
+    expect(project.evaluationOrder[1]).to.eq('mock');
+
+    // Nothing should be changed in the plan
+    expect(MockOs.get('xcode-tools')).to.be.undefined;
+    expect(MockOs.get('mock')).to.be.undefined;
+  });
+
+  it('Prioritizes xcode-tools in front of other resources', async () => {
+    const reporter = new MockReporter({
+      validatePlan(plan: Plan) {
+        if (OsUtils.isMacOS()) {
+          // Xcode-tools will always show up in the plan
+          expect(plan.getResourcePlan('xcode-tools')).toMatchObject({
+            operation: ResourceOperation.CREATE
+          })
+        } else {
+          // Xcode-tools should not be in the plan for linux or other OS
+          expect(plan.getResourcePlan('xcode-tools')).to.be.null;
+        }
+        expect(plan.getResourcePlan('mock.0')).toMatchObject({
+          operation: ResourceOperation.CREATE,
+        });
+        expect(plan.getResourcePlan('mock.5')).toMatchObject({
+          operation: ResourceOperation.CREATE,
+        });
+      },
+      promptConfirmation(): boolean {
+        return true;
+      }
+    });
+
+    MockOs.destroy('xcode-tools');
+    expect(MockOs.get('xcode-tools')).to.be.undefined;
+    expect(MockOs.get('mock')).to.be.undefined;
+
+    const {plan, project, pluginManager} = await PlanOrchestrator.run({
+      path: path.join(__dirname, 'create-xcode-tools.codify.json')
+    }, reporter)
+
+    expect(plan).to.exist;
+    expect(project).to.exist;
+    expect(pluginManager).to.exist;
+
+    if (OsUtils.isMacOS()) {
+      expect(project.evaluationOrder.length).to.eq(7);
+      expect(project.evaluationOrder[0]).to.eq('xcode-tools');
+    } else {
+      expect(project.evaluationOrder.length).to.eq(6);
+      expect(project.evaluationOrder[0]).to.not.eq('xcode-tools');
+    }
+
+    // Nothing should be changed in the plan
+    expect(MockOs.get('xcode-tools')).to.be.undefined;
+    expect(MockOs.get('mock')).to.be.undefined;
+  });
+
+  it('Can apply a resource (recreate)', async () => {
+    const reporter = new MockReporter({
+      validatePlan(plan: Plan) {
+        // As always these values are from recreate.codify.json
+        expect(plan.getResourcePlan('mock')).toMatchObject({
+          operation: ResourceOperation.RECREATE,
+          parameters: expect.arrayContaining([
+            expect.objectContaining({
+              name: 'propA',
+              previousValue: 'current',
+              newValue: 'current',
+              operation: 'noop'
+            }),
+            expect.objectContaining({
+              name: 'propB',
+              previousValue: 1,
+              newValue: 0,
+              operation: 'modify'
+            }),
+            // Special array filtering logic is happening here. Even though we requested ['a', 'b'] and the system has
+            // ['a', 'b', 'c'], we won't try to delete the additional elements.
+            expect.objectContaining({
+              name: 'array',
+              previousValue: expect.arrayContaining(['a', 'b']),
+              newValue: expect.arrayContaining(['a', 'b']),
+              operation: 'noop'
+            }),
+            expect.objectContaining({
+              name: 'directory',
+              previousValue: '~/home',
+              newValue: '/home',
+              operation: 'modify'
+            })
+          ])
+        });
+      }
+    });
+
+    MockOs.create('mock', {
+      propA: 'current',
+      propB: 1,
+      array: ['a', 'b', 'c'],
+      directory: '~/home'
+    })
+
+    const {project, pluginManager, plan} = await PlanOrchestrator.run({
+      path: path.join(__dirname, 'recreate.codify.json')
+    }, reporter)
+
+    expect(project).to.exist;
+    expect(pluginManager).to.exist;
+    expect(plan).to.exist;
+    expect(project.evaluationOrder.length).to.eq(1);
+  });
+
+  it('Prompts for missing required values and placeholders before planning', async () => {
+    const configPath = path.join(__dirname, 'missing-parameters.codify.json');
+    const originalFile = await fs.readFile(configPath, 'utf8');
+
+    const reporter = new MockReporter({
+      promptMissingParameters(requests) {
+        expect(requests).toHaveLength(1);
+        expect(requests[0].resource.type).to.eq('mock');
+        expect(requests[0].parameters.map((p) => [p.label, p.reason, p.type])).toEqual([
+          ['propA', 'placeholder', 'string'],
+          ['array[1]', 'placeholder', 'string'],
+          ['propB', 'missing', 'number'],
+        ]);
+
+        // Values are converted to the schema type (propB is a number)
+        return [['abc', 'b', '123']];
+      },
+      validatePlan(plan: Plan) {
+        expect(plan.getResourcePlan('mock')).toMatchObject({
+          operation: ResourceOperation.CREATE,
+          parameters: expect.arrayContaining([
+            expect.objectContaining({ name: 'propA', newValue: 'abc' }),
+            expect.objectContaining({ name: 'propB', newValue: 123 }),
+            expect.objectContaining({ name: 'array', newValue: ['a', 'b'] }),
+          ]),
+        });
+      },
+    });
+
+    const { project } = await PlanOrchestrator.run({ path: configPath }, reporter);
+
+    expect(project.resourceConfigs.find((r) => r.type === 'mock')?.parameters).toMatchObject({
+      propA: 'abc',
+      propB: 123,
+      array: ['a', 'b'],
+    });
+
+    // Values are never written back to the config
+    expect(await fs.readFile(configPath, 'utf8')).to.eq(originalFile);
+  });
+
+  it('Throws a validation error if a prompted value is invalid', async () => {
+    const reporter = new MockReporter({
+      promptMissingParameters: () => [['abc', 'b', 'not-a-number']],
+    });
+
+    await expect(PlanOrchestrator.run({
+      path: path.join(__dirname, 'missing-parameters.codify.json')
+    }, reporter)).rejects.toBeInstanceOf(PluginValidationError);
+  });
+
+  it('Does not prompt when nothing is missing', async () => {
+    // MockReporter throws if promptMissingParameters is called without being configured
+    const { plan } = await PlanOrchestrator.run({
+      path: path.join(__dirname, 'create.codify.json')
+    }, new MockReporter());
+
+    expect(plan).to.exist;
+  });
+
+  afterEach(() => {
+    vi.resetAllMocks();
+    MockOs.reset();
+  })
+
+})

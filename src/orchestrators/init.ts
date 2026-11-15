@@ -1,0 +1,135 @@
+import chalk from 'chalk';
+import { LinuxDistro, OS } from '@codifycli/schemas';
+import os from 'node:os';
+import path from 'node:path';
+
+import { PluginInitOrchestrator } from '../common/initialize-plugins.js';
+import { ResourceConfig } from '../entities/resource-config.js';
+import { ProcessName, SubProcessName, ctx } from '../events/context.js';
+import { ResourceDefinitionMap } from '../plugins/plugin-manager.js';
+import { Reporter } from '../ui/reporters/reporter.js';
+import { FileUtils } from '../utils/file.js';
+import { resolvePathWithVariables, tildify, untildify } from '../utils/index.js';
+import { ShellUtils } from '../utils/shell.js';
+import { removeSupersededTypes } from '../utils/superseded-types.js';
+
+export interface InitArgs {
+  path?: string;
+  verbosityLevel?: number;
+  includeSensitive?: boolean;
+  skipBanner?: boolean;
+}
+
+export const InitializeOrchestrator = {
+
+  async run(args: InitArgs, reporter: Reporter) {
+    await reporter.displayInitBanner(args.skipBanner)
+
+    ctx.processStarted(ProcessName.INIT)
+    await reporter.displayProgress();
+
+
+    const { pluginManager, resourceDefinitions } = await PluginInitOrchestrator.run({
+      ...args,
+      forceEmptyProject: true,
+    }, reporter);
+
+    ctx.subprocessStarted(SubProcessName.IMPORT_RESOURCE)
+
+    const currentDistro = os.type() === OS.Linux ? await ShellUtils.getLinuxDistro() : undefined;
+
+    // Omit sensitive resources and resources not supported on the current OS
+    const typeIdsToImport = removeSupersededTypes(
+      [...resourceDefinitions.keys()]
+        .filter((typeId) => args.includeSensitive || (!args.includeSensitive && (resourceDefinitions.get(typeId)?.sensitiveParameters ?? []).length === 0))
+        .filter((typeId) => this.filterByOperatingSystemAndDistro(typeId, resourceDefinitions, currentDistro)),
+      resourceDefinitions,
+    );
+
+    const importResults = await Promise.all(typeIdsToImport.map(async (typeId) => {
+      try {
+        return await pluginManager.importResource({
+          core: { type: typeId },
+          parameters: {}
+        }, true);
+      } catch {
+        return null;
+      }
+    }))
+    ctx.subprocessFinished(SubProcessName.IMPORT_RESOURCE)
+
+    const flattenedResults = importResults.filter(Boolean).flatMap(p => p?.result).filter(Boolean)
+
+    const userSelectedTypes = await reporter.promptInitResultSelection([...new Set(flattenedResults.map((r) => r!.core.type))])
+    ctx.log('Resource types were chosen to be imported.')
+
+    const locationToSave = args.path ?? await this.promptSaveLocation(reporter);
+    ctx.log(`Save results to ${locationToSave}`)
+    await reporter.hide();
+
+    const resourcesRaw = flattenedResults.filter((r) => r && userSelectedTypes.includes(r.core.type))
+      .map((r) => ResourceConfig.fromJson(r!))
+      .map((r) => r.raw);
+
+    await FileUtils.writeFile(locationToSave, JSON.stringify(resourcesRaw, null, 2));
+    ctx.log('File successfully saved');
+
+    await reporter.displayMessage(`
+🎉🎉 Codify successfully initialized. 🎉🎉   
+The imported configs were written to: ${locationToSave}
+
+Use ${chalk.bgMagenta.bold(' codify plan ')} to compute changes and ${chalk.bgMagenta.bold(' codify apply ')} to apply them.
+For more information visit: https://codifycli.com/docs.
+
+Enjoy!
+    `)
+
+    ctx.processFinished(ProcessName.INIT);
+
+    process.exit(0);
+  },
+
+  async promptSaveLocation(reporter: Reporter): Promise<string> {
+    let locationToSave = '';
+    let input = '';
+    let isValidSaveLocation = false;
+    let error = false;
+
+    while (!isValidSaveLocation) {
+      input = (await reporter.promptInput(
+          `Where to save the new Codify configs? ${chalk.grey.dim(`(leave blank for ${tildify(process.cwd())}/codify.jsonc)`)}`,
+          error ? `Invalid location: ${input} already exists` : undefined,
+          `${tildify(process.cwd())}/codify.jsonc`)
+      )
+      input = input ?? `${process.cwd()}/codify.jsonc`;
+
+      locationToSave = path.resolve(untildify(resolvePathWithVariables(input)));
+
+      try {
+        isValidSaveLocation = !(await FileUtils.fileExists(locationToSave));
+        error = !isValidSaveLocation;
+      } catch {
+        isValidSaveLocation = false;
+        error = true;
+      }
+    }
+
+    return locationToSave;
+  },
+
+  filterByOperatingSystemAndDistro(typeId: string, resourceDefinitions: ResourceDefinitionMap, linuxDistro?: LinuxDistro): boolean {
+    const supportedOperatingSystems = resourceDefinitions.get(typeId)?.operatingSystems;
+    if (supportedOperatingSystems) {
+      return supportedOperatingSystems.includes(os.type() as OS);
+    }
+
+    if (os.type() === OS.Linux && linuxDistro) {
+      const distros = resourceDefinitions.get(typeId)?.linuxDistros;
+      if (distros) {
+        return distros.includes(linuxDistro);
+      }
+    }
+
+    return true;
+  }
+};

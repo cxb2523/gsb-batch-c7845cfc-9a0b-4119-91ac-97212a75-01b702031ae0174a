@@ -1,0 +1,360 @@
+import { ErrorObject } from 'ajv';
+import chalk from 'chalk';
+import { PluginErrorData } from '@codifycli/schemas';
+
+import { ResourceConfig } from '../entities/resource-config.js';
+import { SourceMapCache } from '../parser/source-maps.js';
+import { formatAjvErrors } from '../utils/ajv.js';
+import { RemoveErrorMethods } from './types.js';
+
+export abstract class CodifyError extends Error {
+  abstract formattedMessage(): string
+}
+
+export class InternalError extends CodifyError {
+  name = 'InternalError'
+
+  formattedMessage(): string {
+    return `Internal error: ${this.message}`;
+  }
+}
+
+export class AjvValidationError extends CodifyError {
+  validationErrors: ErrorObject[];
+  sourceMapKey?: string;
+  sourceMaps?: SourceMapCache;
+  
+  constructor(
+    message: string,
+    validationErrors: ErrorObject[],
+    sourceMapKey?: string,
+    sourceMaps?: SourceMapCache,
+  ) {
+    super(message);
+    this.validationErrors = validationErrors;
+    this.sourceMapKey = sourceMapKey;
+    this.sourceMaps = sourceMaps;
+  }
+
+  formattedMessage(): string {
+    let errorMessage = `Validation error: ${this.message}.\n\n`;
+    errorMessage += formatAjvErrors(this.validationErrors, this.sourceMapKey, this.sourceMaps)
+    return errorMessage;
+  }
+}
+
+export type PluginValidationErrorParams = Array<{
+  customErrorMessage?: string,
+  resource: ResourceConfig,
+  schemaErrors: ErrorObject[],
+}>
+
+export class PluginValidationError extends CodifyError {
+  resourceErrors: PluginValidationErrorParams
+  sourceMaps?: SourceMapCache
+
+  constructor(
+    params: PluginValidationErrorParams,
+    sourceMaps?: SourceMapCache,
+  ) {
+    super('Validation error: the following parameters are not supported.\n\n');
+    this.resourceErrors = params
+    this.sourceMaps = sourceMaps;
+  }
+
+  formattedMessage(): string {
+    let errorMessage = `${this.message}`;
+
+    for (const resourceError of this.resourceErrors) {
+      const { customErrorMessage, resource, schemaErrors } = resourceError;
+
+      errorMessage += `Resource "${resource.id}" has invalid parameters.\n`
+      errorMessage += formatAjvErrors(schemaErrors, resource.sourceMapKey, this.sourceMaps)
+
+      if (customErrorMessage) {
+        let childMessage = `${schemaErrors.length + 1}. ${customErrorMessage}\n`
+
+        if (resource.sourceMapKey && this.sourceMaps) {
+          childMessage += `${this.sourceMaps.getCodeSnippet(resource.sourceMapKey)}\n`;
+        }
+
+        errorMessage += childMessage.split(/\n/)
+          .map((l) => `  ${l}`)
+          .join('\n')
+      }
+    }
+
+    return errorMessage;
+  }
+}
+
+export class TypeNotFoundError extends CodifyError {
+  invalidConfigs: ResourceConfig[];
+  sourceMaps?: SourceMapCache;
+
+  constructor(invalidConfigs: ResourceConfig[], sourceMaps?: SourceMapCache) {
+    super('Validation error: invalid type found. Resource type was not found in any plugins.')
+
+    this.invalidConfigs = invalidConfigs;
+    this.sourceMaps = sourceMaps;
+  }
+
+  formattedMessage(): string {
+    let errorMessage = `${this.message}\n\n`
+
+    for (const invalidConfig of this.invalidConfigs) {
+      if (!invalidConfig.sourceMapKey || !this.sourceMaps) {
+        errorMessage += `type ${invalidConfig.type} is not valid.`
+        continue;
+      }
+
+      const codeSnippet = this.sourceMaps?.getCodeSnippet(SourceMapCache.combineKeys(invalidConfig.sourceMapKey!, 'type'))
+      errorMessage += `Type "${invalidConfig.type}" is not valid\n${codeSnippet}`
+    }
+
+    return errorMessage;
+  }
+}
+
+export class OperatingSystemNotSupportedError extends CodifyError {
+  invalidConfigs: ResourceConfig[];
+  sourceMaps?: SourceMapCache;
+
+  constructor(invalidConfigs: ResourceConfig[], sourceMaps?: SourceMapCache) {
+    super('Validation error: invalid operating system found. Resource type is not supported on this operating system.')
+
+    this.invalidConfigs = invalidConfigs;
+    this.sourceMaps = sourceMaps;
+  }
+
+  formattedMessage(): string {
+    let errorMessage = `${this.message}\n\n`
+
+    for (const invalidConfig of this.invalidConfigs) {
+      if (!invalidConfig.sourceMapKey || !this.sourceMaps) {
+        errorMessage += `type ${invalidConfig.type} is not valid.`
+        continue;
+      }
+
+      const codeSnippet = this.sourceMaps?.getCodeSnippet(SourceMapCache.combineKeys(invalidConfig.sourceMapKey!, 'type'))
+      errorMessage += `Type "${invalidConfig.type}" is not valid\n${codeSnippet}`
+    }
+
+    return errorMessage;
+  }
+}
+
+export class LinuxDistroNotSupportedError extends CodifyError {
+  invalidConfigs: ResourceConfig[];
+  sourceMaps?: SourceMapCache;
+
+  constructor(invalidConfigs: ResourceConfig[], sourceMaps?: SourceMapCache) {
+    super('Validation error: invalid Linux distribution found. Resource type is not supported on this Linux distribution.')
+
+    this.invalidConfigs = invalidConfigs;
+    this.sourceMaps = sourceMaps;
+  }
+
+  formattedMessage(): string {
+    let errorMessage = `${this.message}\n\n`
+
+    for (const invalidConfig of this.invalidConfigs) {
+      if (!invalidConfig.sourceMapKey || !this.sourceMaps) {
+        errorMessage += `type ${invalidConfig.type} is not valid.`
+        continue;
+      }
+
+      const codeSnippet = this.sourceMaps?.getCodeSnippet(SourceMapCache.combineKeys(invalidConfig.sourceMapKey!, 'type'))
+      errorMessage += `Type "${invalidConfig.type}" is not valid\n${codeSnippet}`
+    }
+
+    return errorMessage;
+  }
+}
+
+
+export class InvalidResourceError extends Error {
+  name = 'InvalidResourceError'
+
+  message!: string;
+  fileName!: string;
+  resourceDefinition!: string;
+
+  constructor(props: RemoveErrorMethods<InvalidResourceError>) {
+    super(props.message)
+    Object.assign(this, props);
+  }
+}
+
+export class SyntaxError extends CodifyError {
+  name = 'JsonFileParseError'
+  fileName!: string;
+
+  constructor(props: RemoveErrorMethods<SyntaxError>) {
+    super(props.message)
+    Object.assign(this, props);
+  }
+
+  formattedMessage(): string {
+    return `Syntax error: found in ${this.fileName}: ${this.message}`
+  }
+}
+
+export class UnauthorizedError extends CodifyError {
+  name = 'UnauthorizedError'
+  requestName?: string
+
+  constructor(props: Omit<RemoveErrorMethods<UnauthorizedError>, 'message'>) {
+    super(`Unauthorized request to Codify. ${props.requestName ?? ''}`)
+    Object.assign(this, props);
+  }
+
+  formattedMessage(): string {
+    return this.message
+  }
+}
+
+export class SpawnError extends CodifyError {
+  name = 'SpawnError'
+  command: string;
+  exitCode: number;
+  data: string;
+
+  constructor(command: string, exitCode: number, data: string) {
+    super(`Command "${command}" failed with exit code ${exitCode}`)
+    this.command = command;
+    this.exitCode = exitCode;
+    this.data = data;
+  }
+
+  formattedMessage(): string {
+    return `Spawn error: ${this.message}\n\n${this.data}`
+  }
+}
+
+export class PluginError extends CodifyError {
+  name = 'PluginError';
+  pluginName: string;
+  resourceType: string;
+  errorData: PluginErrorData;
+
+  constructor(pluginName: string, resourceType: string, errorData: PluginErrorData) {
+    super(errorData.message);
+    this.pluginName = pluginName;
+    this.resourceType = resourceType;
+    this.errorData = errorData;
+  }
+
+  formattedMessage(): string {
+    return this.message;
+  }
+}
+
+export class ShellValidationError extends CodifyError {
+  name = 'ShellValidationError';
+  timedOut: boolean;
+  capturedOutput: string;
+  rcFiles: string[];
+
+  constructor(timedOut: boolean, capturedOutput: string, rcFiles: string[]) {
+    super(timedOut
+      ? 'Shell initialization timed out — a shell rc file may be waiting for input'
+      : 'Shell initialization produced unexpected output'
+    );
+    this.timedOut = timedOut;
+    this.capturedOutput = capturedOutput;
+    this.rcFiles = rcFiles;
+  }
+
+  formattedMessage(): string {
+    const rcFileList = this.rcFiles.map((f) => chalk.white(`  • ${f}`)).join('\n');
+    const indentedOutput = (text: string) => (text || '(none)')
+      .split('\n')
+      .map((l) => chalk.red('│ ') + chalk.white(l))
+      .join('\n');
+
+    if (this.timedOut) {
+      return [
+        chalk.bold('Shell Validation Error: Shell timed out after 10 seconds'),
+        '',
+        'Something in your shell initialization is waiting for interactive input',
+        chalk.white('(e.g. a password prompt, a `read` call, or an SSH key passphrase)'),
+        '',
+        chalk.white('Codify sources your interactive shell to install tools exactly as you would.') +
+          ' A shell that hangs on startup will prevent Codify from running.',
+        '',
+        chalk.bold('Output captured before timeout:'),
+        indentedOutput(this.capturedOutput),
+        '',
+        chalk.bold('Check the following shell rc files for interactive prompts:'),
+        rcFileList,
+      ].join('\n');
+    }
+
+    return [
+      chalk.bold('Shell Validation Error: Unexpected output detected on shell startup'),
+      '',
+      chalk.bold('Unexpected output:'),
+      indentedOutput(this.capturedOutput),
+      '',
+      'Your shell initialization is printing extra output',
+      chalk.white('(e.g. a greeting, banner, or debug message)'),
+      chalk.white('Codify sources your interactive shell to install tools exactly as you would.') +
+        ' Any extra output from your rc files will break plugin commands that parse shell output.',
+      '',
+      chalk.bold('Check the following rc files and wrap output-producing lines in an interactive guard:'),
+      rcFileList,
+      '',
+      chalk.bold('Example fix for .zshrc / .bashrc:'),
+      chalk.white('  if [[ "$TERM_PROGRAM" != "codify" ]]; then'),
+      chalk.white('    echo "your greeting here"  # skipped when Codify sources your shell'),
+      chalk.white('  fi'),
+    ].join('\n');
+  }
+}
+
+export function prettyPrintError(error: unknown): void {
+  if (error instanceof CodifyError) {
+    return console.error(chalk.red(error.formattedMessage()));
+  }
+
+  if (error instanceof Error) {
+    return console.error(chalk.red(error.message));
+  }
+
+  console.error(chalk.red(String(error)));
+}
+
+/**
+ * Thrown when Codify can't find a config to run. Includes usage help listing the different
+ * ways a config can be specified.
+ */
+export class NoCodifyFilesError extends CodifyError {
+  name = 'NoCodifyFilesError'
+
+  /** `location` isn't a file, directory, document id or template. */
+  static notFound(location: string): NoCodifyFilesError {
+    return new NoCodifyFilesError(`No Codify file, directory, or template found matching "${location}"`);
+  }
+
+  /** `dir` exists but doesn't contain any codify files. */
+  static emptyDir(dir: string): NoCodifyFilesError {
+    return new NoCodifyFilesError(`No Codify files found in ${dir}`);
+  }
+
+  formattedMessage(): string {
+    const usage = [
+      'Codify looks for files named *codify.jsonc, *codify.json, *codify.json5 or *codify.yaml.',
+      '',
+      'Usage:',
+      `  ${chalk.bold('codify apply')}                      Use the Codify file in the current directory`,
+      `  ${chalk.bold('codify apply ./path/to/file')}       Use a specific file or directory`,
+      `  ${chalk.bold('codify apply <template name>')}      Use a public template from the Codify registry`,
+      `  ${chalk.bold('codify apply <document id>')}        Use a document from the Codify dashboard (requires login)`,
+      '',
+      `Run ${chalk.bold('codify init')} to generate a Codify file from your current machine.`,
+    ].join('\n');
+
+    return `${this.message}\n\n${chalk.white(usage)}`;
+  }
+}

@@ -1,0 +1,272 @@
+import chalk from 'chalk';
+import { CommandRequestData } from '@codifycli/schemas';
+import readline from 'node:readline';
+
+import { PluginError } from '../../common/errors.js';
+import { ApplyResult } from '../../entities/apply-result.js';
+import { ResourceMissingParameters } from '../../entities/missing-parameter.js';
+import { Plan } from '../../entities/plan.js';
+import { applyEntryChalkColor, applyEntryLabel } from '../apply-result-formatter.js';
+import { formatApplyValidationError } from '../plugin-error-formatter.js';
+import { ResourceConfig } from '../../entities/resource-config.js';
+import { ResourceInfo } from '../../entities/resource-info.js';
+import { Event, ctx } from '../../events/context.js';
+import { FileModificationResult } from '../../generators/index.js';
+import { ImportResult } from '../../orchestrators/import.js';
+import { prettyFormatPlan } from '../plan-pretty-printer.js';
+import { PromptType, Reporter } from './reporter.js';
+
+export class PlainReporter implements Reporter {
+  private readonly rl = readline.createInterface(process.stdin, process.stdout);
+  silent = false;
+  
+  constructor(attachListeners = true) {
+    if (attachListeners) {
+      ctx.on(Event.OUTPUT, (args) => !this.silent && process.stdout.write(args))
+      ctx.on(Event.PROCESS_START, (name) => !this.silent && console.log(name))
+      ctx.on(Event.PROCESS_FINISH, (name) => !this.silent && console.log(name))
+      ctx.on(Event.SUB_PROCESS_START, (name) => !this.silent && console.log(name))
+      ctx.on(Event.SUB_PROCESS_FINISH, (name) => !this.silent && console.log(name))
+    }
+  }
+
+  promptPressKeyToContinue(message?: string | undefined): Promise<void> {
+    ctx.log(message);
+    ctx.log(chalk.dim.gray('<press any key to continue>'))
+    process.stdin.setRawMode(true)
+    return new Promise((resolve) => {
+      process.stdin.once('data', () => {
+        process.stdin.setRawMode(false)
+        resolve()
+      })
+    })
+  }
+
+  async hide(): Promise<void> {}
+
+  async setRawMode(): Promise<void> {
+    process.stdin.setRawMode(true);
+  }
+
+  async disableRawMode(): Promise<void> {
+    process.stdin.setRawMode(false);
+  }
+
+  async displayImportWarning(): Promise<void> {
+    ctx.log(chalk.bold('Additional information is required to continue import'))
+    ctx.log('Some of the resources specified in the import support multiple instances. Additional information is required to identify the specific instance to import. If importing multiple instances is desired (for ex: multiple git clones) additional imports can be added in the prompt.')
+  }
+
+  async promptOptions(message: string, options: string[]): Promise<number> {
+    ctx.log(message);
+    ctx.log('')
+
+    const response = await new Promise((resolve) => {
+      this.rl.question(`${options.map((o, idx) => `[${idx}] ${o} ` ).join(' ')}\n`, (answer) => resolve(answer));
+    });
+
+    const parsedNumber = Number.parseInt(response as string, 10);
+    if (!Number.isInteger(parsedNumber) || parsedNumber < 0 || parsedNumber > options.length - 1) {
+      throw new Error(`Invalid response ${response}`)
+    }
+
+    return Number.parseInt(response as string, 10);
+  }
+
+  async displayFileModifications(diffs: { file: string; modification: FileModificationResult; }[]): Promise<void> {
+    ctx.log(chalk.bold('File modifications\n'))
+
+    for (const diff of diffs) {
+      ctx.log(chalk.bold(diff.file))
+      ctx.log('')
+      ctx.log(diff.modification.diff)
+      ctx.log('')
+    }
+  }
+
+  async displayMessage(message: string): Promise<void> {
+    ctx.log(message);
+  }
+
+  async promptUserForValues(
+    resourceInfoList: ResourceInfo[],
+    promptType: PromptType
+  ): Promise<ResourceConfig[]> {
+    const requiredParameters = resourceInfoList.flatMap((r) => r.getRequiredParameters())
+    if (requiredParameters.length > 0) {
+      ctx.log('Some required information is needed for the import');
+    }
+
+    const result: ResourceConfig[] = [];
+    for (const resourceInfo of resourceInfoList) {
+      if (resourceInfo.getRequiredParameters().length > 0) {
+        ctx.log(`Resource: "${resourceInfo.type}" requires additional information:`)
+      }
+
+      const requiredParameter = resourceInfo.getRequiredParameters()
+      const configJson: Record<string, unknown> = { type: resourceInfo.type }
+      for (const parameter of requiredParameter) {
+        const response = await new Promise((resolve) => {
+          this.rl.question(`${parameter.name} [${parameter.type}]: `, (answer) => resolve(answer));
+        });
+
+        configJson[parameter.name] = response;
+      }
+
+      result.push(new ResourceConfig(configJson as any))
+    }
+
+    return result;
+  }
+
+  async promptMissingParameters(requests: ResourceMissingParameters[]): Promise<unknown[][]> {
+    ctx.log(chalk.bold('Some values are missing from the config. Please provide them to continue (they will not be saved to the config):'));
+
+    const answers: unknown[][] = [];
+    for (const { resource, parameters } of requests) {
+      ctx.log(`Resource: "${resource.id}"`);
+
+      const resourceAnswers: unknown[] = [];
+      for (const parameter of parameters) {
+        if (parameter.description) {
+          ctx.log(chalk.dim(parameter.description));
+        }
+
+        const question = `${parameter.label}${parameter.type ? ` [${parameter.type}]` : ''}: `;
+        resourceAnswers.push(await (parameter.sensitive ? this.questionHidden(question) : this.question(question)));
+      }
+
+      answers.push(resourceAnswers);
+    }
+
+    return answers;
+  }
+
+  private question(query: string): Promise<string> {
+    return new Promise((resolve) => this.rl.question(query, resolve));
+  }
+
+  /** Same as question but the typed characters are not echoed */
+  private async questionHidden(query: string): Promise<string> {
+    const rl = this.rl as unknown as { _writeToOutput: (s: string) => void };
+    const originalWrite = rl._writeToOutput;
+
+    process.stdout.write(query);
+    rl._writeToOutput = (s: string) => {
+      if (s.includes('\n') || s.includes('\r')) {
+        originalWrite.call(this.rl, s);
+      }
+    };
+
+    try {
+      return await this.question('');
+    } finally {
+      rl._writeToOutput = originalWrite;
+    }
+  }
+
+  async displayProgress(): Promise<void> {}
+
+  async promptInput(prompt: string, error?: string): Promise<string> {
+    return new Promise((resolve) => {
+      this.rl.question(prompt + (error ? chalk.red(`\n${error} `) : ''), (answer) => resolve(answer));
+    });
+  }
+
+  async promptInitResultSelection(availableTypes: string[]): Promise<string[]> {
+    return availableTypes;
+  }
+
+  async displayImportResult(importResult: ImportResult): Promise<void> {
+    ctx.log();
+    ctx.log(JSON.stringify(importResult.result.map((r) => r.raw), null, 2));
+
+    if (importResult.errors.length > 0) {
+      ctx.log('The following configs failed to import:')
+      ctx.log(JSON.stringify(importResult.errors, null, 2));
+    }
+  }
+
+  async promptSudo(pluginName: string, data: CommandRequestData): Promise<string | undefined> {
+    ctx.log(chalk.blue(`Plugin: "${pluginName}" requires root access to run command: "${data.command}"`));
+    return undefined;
+  }
+
+  async displayInitBanner(skipConfirmation?: boolean): Promise<void> {
+    ctx.log(`Codify is a configuration-as-code tool that helps you setup and manage your system.
+Use this init flow to get started quickly with Codify.
+    `);
+
+    if (!skipConfirmation) {
+      await this.promptConfirmation('Codify will scan your system for any supported programs or settings and automatically generate configs for you.')
+    }
+  }
+
+  async promptConfirmation(message: string): Promise<boolean> {
+    const response = await new Promise((resolve) => {
+      this.rl.question(`${message} (only 'yes' is accepted)`, (answer) => resolve(answer));
+    });
+
+    return response === 'yes';
+  }
+
+  async displayPlan(plan: Plan): Promise<void> {
+    ctx.log(
+      prettyFormatPlan(plan.filterNoopResources())
+    );
+  }
+
+  async displayPluginError(error: PluginError): Promise<void> {
+    if (error.errorData.errorType === 'apply_validation') {
+      ctx.log(chalk.red(formatApplyValidationError(error)));
+    } else {
+      ctx.log(chalk.red(error.message));
+    }
+  }
+
+  async displayApplyComplete(result: ApplyResult): Promise<void> {
+    if (result.isPartialFailure()) {
+      ctx.log(chalk.red('⚠ Apply completed with errors'));
+    } else {
+      ctx.log('🎉 Finished applying 🎉');
+    }
+
+    if (result.entries.length > 0) {
+      ctx.log('');
+      for (const entry of result.entries) {
+        ctx.log(`  ${entry.id.padEnd(30)}${applyEntryChalkColor(entry)(applyEntryLabel(entry))}`);
+      }
+    }
+
+    if (result.isPartialFailure()) {
+      ctx.log('');
+      for (const error of result.errors) {
+        await this.displayPluginError(error);
+      }
+    }
+
+    if (result.notes.length > 0) {
+      ctx.log('');
+      const grouped = groupNotesByMessage(result.notes);
+      for (const { message, resourceTypes } of grouped) {
+        const prefix = resourceTypes.length > 0 ? `${resourceTypes.join(', ')}: ` : '';
+        ctx.log(chalk.yellow(`⚠ ${prefix}${message}`));
+      }
+    }
+  }
+}
+
+function groupNotesByMessage(notes: ApplyResult['notes']): { message: string; resourceTypes: string[] }[] {
+  const map = new Map<string, string[]>();
+  for (const note of notes) {
+    const existing = map.get(note.message);
+    if (existing) {
+      if (note.resourceType && !existing.includes(note.resourceType)) {
+        existing.push(note.resourceType);
+      }
+    } else {
+      map.set(note.message, note.resourceType ? [note.resourceType] : []);
+    }
+  }
+  return [...map.entries()].map(([message, resourceTypes]) => ({ message, resourceTypes }));
+}

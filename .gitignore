@@ -1,0 +1,15 @@
+**/.DS_Store
+*-debug.log
+*-error.log
+/.idea
+/.nyc_output
+/dist
+/lib
+/tmp
+/.build
+/yarn.lock
+node_modules
+oclif.manifest.json
+.env
+.codify-files
+.npm-readme-backup.md

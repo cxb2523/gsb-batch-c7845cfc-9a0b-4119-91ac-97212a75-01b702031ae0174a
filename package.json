@@ -1,0 +1,165 @@
+{
+  "author": "kevinwang @kevinwang5658",
+  "bin": {
+    "codify": "./bin/run.js"
+  },
+  "dependencies": {
+    "@codifycli/ink-form": "0.0.12",
+    "@codifycli/schemas": "1.4.0",
+    "@homebridge/node-pty-prebuilt-multiarch": "npm:node-pty@1.2.0-beta.15",
+    "@mischnic/json-sourcemap": "^0.1.1",
+    "@oclif/core": "^4.0.8",
+    "@oclif/plugin-autocomplete": "^3.2.24",
+    "@oclif/plugin-help": "^6.2.4",
+    "@oclif/plugin-update": "^4.6.13",
+    "ajv": "^8.12.0",
+    "ajv-formats": "^3.0.1",
+    "chalk": "^5.3.0",
+    "cli-cursor": "^4.0.0",
+    "cli-spinners": "^3.4.0",
+    "cors": "^2.8.5",
+    "debug": "^4.3.4",
+    "detect-indent": "^7.0.1",
+    "diff": "^8.0.3",
+    "express": "^5.1.0",
+    "ink": "^5.2.1",
+    "ink-big-text": "^2.0.0",
+    "ink-gradient": "^3.0.0",
+    "ink-select-input": "^6.0.0",
+    "jju": "^1.4.0",
+    "jose": "^6.1.0",
+    "jotai": "^2.18.0",
+    "js-yaml": "^4.1.0",
+    "js-yaml-source-map": "^0.2.2",
+    "json-source-map": "^0.6.1",
+    "json5": "^2.2.3",
+    "kill-port": "^2.0.1",
+    "latest-semver": "^4.0.0",
+    "nanoid": "^5.0.9",
+    "node-pty": "1.2.0-beta.15",
+    "open": "^10.1.2",
+    "parse-json": "^8.1.0",
+    "react": "^18.3.1",
+    "uuid": "^10.0.0",
+    "ws": "^8.18.3"
+  },
+  "description": "Codify is a configuration-as-code tool that declaratively installs and manages developer tools and applications. Check out https://dashboard.codifycli.com for an editor.",
+  "devDependencies": {
+    "@codifycli/plugin-core": "^1.3.0",
+    "@oclif/prettier-config": "^0.2.1",
+    "@types/chalk": "^2.2.0",
+    "@types/cors": "^2.8.19",
+    "@types/debug": "^4.1.12",
+    "@types/diff": "^7.0.1",
+    "@types/express": "^5.0.3",
+    "@types/jju": "^1.4.5",
+    "@types/js-yaml": "^4.0.9",
+    "@types/json5": "^2.2.0",
+    "@types/mocha": "^10.0.10",
+    "@types/node": "^20",
+    "@types/react": "^18.3.1",
+    "@types/strip-ansi": "^5.2.1",
+    "@types/uuid": "^10.0.0",
+    "@types/ws": "^8.18.1",
+    "@typescript-eslint/eslint-plugin": "^8.16.0",
+    "esbuild": "^0.27.3",
+    "eslint": "^10.0.3",
+    "eslint-config-oclif": "^6.0.146",
+    "eslint-config-oclif-typescript": "^3.1.14",
+    "eslint-config-prettier": "^9.0.0",
+    "ink-testing-library": "^4.0.0",
+    "memfs": "^4.14.0",
+    "oclif": "^6.0.10",
+    "react-devtools-core": "4.28.5",
+    "shx": "^0.3.3",
+    "strip-ansi": "^7.1.0",
+    "tsx": "^4.7.3",
+    "typescript": "5.3.3",
+    "vitest": "^4.0.18"
+  },
+  "overrides": {
+    "ink-form": {
+      "ink": "^5"
+    }
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "files": [
+    "/bin",
+    "/dist",
+    "/npm-shrinkwrap.json",
+    "/oclif.manifest.json"
+  ],
+  "homepage": "https://github.com/codifycli/codify",
+  "license": "Apache-2.0",
+  "main": "dist/index.js",
+  "name": "codify",
+  "type": "module",
+  "oclif": {
+    "bin": "codify",
+    "dirname": "codify",
+    "commands": "./dist/commands",
+    "helpClass": "./dist/help",
+    "additionalVersionFlags": [
+      "-v"
+    ],
+    "additionalHelpFlags": [
+      "-h"
+    ],
+    "defaultCommand": "edit",
+    "plugins": [
+      "@oclif/plugin-help",
+      "@oclif/plugin-update",
+      "@oclif/plugin-autocomplete"
+    ],
+    "topicSeparator": " ",
+    "topics": {},
+    "macos": {
+      "identifier": "com.codify.cli",
+      "sign": "\"Developer ID Installer: Qingran Wang (PCG246DPVT)\"",
+      "application-certificate": "Developer ID Application: Qingran Wang (PCG246DPVT)"
+    },
+    "update": {
+      "s3": {
+        "host": "https://releases.codifycli.com",
+        "bucket": "cli-releases-v2"
+      }
+    }
+  },
+  "repository": "codifycli/codify",
+  "scripts": {
+    "postinstall": "[ -f node_modules/oclif/lib/tarballs/bin.js ] && tsx scripts/patch-oclif.ts || true; [ -f dist/patch-ink.mjs ] && node dist/patch-ink.mjs || true",
+    "build": "shx rm -rf dist && tsc -b",
+    "build:release": "npm run pkg && ./scripts/notarize.sh",
+    "lint": "tsc",
+    "postpack": "shx rm -f oclif.manifest.json",
+    "pretarball": "../../../scripts/pretarball.sh",
+    "pkg": "tsx ./scripts/pkg.ts",
+    "notarize": "./scripts/notarize.sh",
+    "upload": "./scripts/upload.sh",
+    "posttest": "npm run lint",
+    "prepack": "oclif manifest && oclif readme",
+    "test": "vitest",
+    "version": "oclif readme && git add README.md",
+    "start:dev": "./bin/dev.js",
+    "start:dev:beta": "CODIFY_BETA=1 ./bin/dev.js",
+    "start:vm": "npm run build && npm run pack:macos && npm run start:vm",
+    "deploy": "npm run pkg && npm run notarize && npm run upload",
+    "build:npm": "tsx ./scripts/build-npm.ts",
+    "restore-npm": "tsx ./scripts/restore-npm.ts",
+    "prepublishOnly": "npm run build && npm run build:npm",
+    "postpublish": "npm run restore-npm"
+  },
+  "version": "1.3.0",
+  "bugs": "https://github.com/codifycli/codify/issues",
+  "keywords": [
+    "oclif",
+    "codify",
+    "automated-installation",
+    "system-automation",
+    "configuration-as-code",
+    "system-configuration"
+  ],
+  "types": "dist/index.d.ts"
+}
