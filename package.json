@@ -1,0 +1,60 @@
+{
+  "name": "zenrows",
+  "version": "2.7.0",
+  "description": "Zenrows Node SDK: Fetch, Extract (structured data), Batch and Crawl APIs",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "engines": {
+    "node": ">=20"
+  },
+  "packageManager": "pnpm@9.4.0",
+  "exports": {
+    ".": {
+      "require": "./dist/index.cjs",
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsup src/index.ts --dts --format cjs,esm --clean",
+    "test": "vitest",
+    "test:e2e": "vitest run tests/e2e",
+    "format": "biome format --write .",
+    "check": "biome check ."
+  },
+  "keywords": [
+    "sdk",
+    "zenrows",
+    "scraping",
+    "proxy",
+    "extract",
+    "structured-data",
+    "data extraction",
+    "web scraping",
+    "web scraping api"
+  ],
+  "author": "ZenRows",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ZenRows/zenrows-node-sdk.git"
+  },
+  "homepage": "https://github.com/ZenRows/zenrows-node-sdk#readme",
+  "url": "https://github.com/ZenRows/zenrows-node-sdk/issues",
+  "type": "module",
+  "license": "MIT",
+  "devDependencies": {
+    "@biomejs/biome": "1.8.1",
+    "@types/async-retry": "^1.4.9",
+    "@types/node": "^20.19.39",
+    "@vitest/coverage-v8": "1.6.1",
+    "msw": "^2.13.4",
+    "tsup": "^8.5.1",
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.6"
+  },
+  "dependencies": {
+    "fastq": "^1.20.1",
+    "fetch-retry": "^6.0.0"
+  }
+}

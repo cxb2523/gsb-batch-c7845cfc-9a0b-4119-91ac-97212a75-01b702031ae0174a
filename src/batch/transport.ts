@@ -1,0 +1,231 @@
+import packageJson from "../../package.json" with { type: "json" };
+import { ZenRowsBatchError, parseProblem } from "./errors.js";
+import type { ProblemJson } from "./types.js";
+
+const RETRYABLE_STATUSES = new Set([429, 502, 503, 504]);
+const IDEMPOTENT_METHODS = new Set(["GET", "PUT", "DELETE", "HEAD", "OPTIONS"]);
+
+const BACKOFF_BASE_MS = 250;
+const BACKOFF_CAP_MS = 10_000;
+export const DEFAULT_RETRIES = 3;
+// A Retry-After above this waits only this long, so a large server value cannot hang a call.
+const RETRY_AFTER_CAP_MS = 30_000;
+
+function isIdempotent(method: string, hasIdempotencyKey: boolean): boolean {
+  return (
+    IDEMPOTENT_METHODS.has(method.toUpperCase()) ||
+    (method.toUpperCase() === "POST" && hasIdempotencyKey)
+  );
+}
+
+/** Jittered exponential backoff for retry `attempt` (0-based), in milliseconds. */
+function backoffMs(attempt: number): number {
+  const base = Math.min(BACKOFF_BASE_MS * 2 ** attempt, BACKOFF_CAP_MS);
+  return base * (1 + (Math.random() * 2 - 1) * 0.2);
+}
+
+function retryAfterMs(response: Response): number | undefined {
+  const raw = response.headers.get("Retry-After");
+  if (!raw) return undefined;
+  const secs = Number(raw);
+  if (Number.isNaN(secs) || secs < 0) return undefined;
+  return Math.min(secs * 1000, RETRY_AFTER_CAP_MS);
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Builds the error thrown for a non-2xx response. Defaults to `ZenRowsBatchError`. */
+export type ErrorFactory = (
+  response: Response,
+  problem: ProblemJson | undefined,
+  extras: Record<string, unknown> | undefined,
+) => Error;
+
+const batchError: ErrorFactory = (response, problem, extras) => {
+  const raw = response.headers.get("Retry-After");
+  const seconds = raw ? Number(raw) : Number.NaN;
+  const retryAfter = Number.isFinite(seconds) && seconds >= 0 ? seconds : undefined;
+  return new ZenRowsBatchError(response.status, problem, extras, retryAfter);
+};
+
+/**
+ * The Batch API's 429 `quota_exceeded` is an account limit (active jobs, scheduled jobs, or
+ * an open job's task cap). It clears only when a job finishes or is deleted, so retrying it
+ * only adds delay. Reads a clone, so the body stays available for the error.
+ */
+async function isQuotaExceeded(response: Response): Promise<boolean> {
+  if (response.status !== 429) return false;
+  try {
+    const body = (await response.clone().json()) as { code?: unknown } | null;
+    return body?.code === "quota_exceeded";
+  } catch {
+    return false;
+  }
+}
+
+export interface RequestOptions {
+  query?: object;
+  body?: unknown;
+  headers?: Record<string, string>;
+  idempotencyKey?: string;
+  /** Statuses retried on an idempotent request. Default 429/502/503/504. */
+  retryStatuses?: ReadonlySet<number>;
+}
+
+/** Aborts a request after `ms`; `clear()` stops the timer. */
+function deadline(ms: number | undefined): { signal?: AbortSignal; clear(): void } {
+  if (ms === undefined) return { clear() {} };
+  const controller = new AbortController();
+  const timer = setTimeout(
+    () =>
+      controller.abort(new DOMException(`request timed out after ${ms / 1000}s`, "TimeoutError")),
+    ms,
+  );
+  return { signal: controller.signal, clear: () => clearTimeout(timer) };
+}
+
+/**
+ * Thin HTTP transport for the Batch API: `X-API-Key` auth, retries for transient failures
+ * (429/502/503/504 + network errors) on idempotent requests only, and RFC 7807 → `ZenRowsBatchError`
+ * mapping. Mirrors the Python SDK's `_transport.py` exactly (250ms · 2^attempt backoff, ±20%
+ * jitter, capped at 10s, honors `Retry-After` up to 30s).
+ */
+export class BatchTransport {
+  constructor(
+    private readonly baseURL: string,
+    private readonly apiKey: string,
+    private readonly retries: number = DEFAULT_RETRIES,
+    private readonly errorFactory: ErrorFactory = batchError,
+    /** Milliseconds each attempt may take, body included; `requestRaw` stops at a 2xx's headers. None by default. */
+    private readonly timeoutMs?: number,
+  ) {}
+
+  /** Send a request, parse the response, throw the factory's error on non-2xx. */
+  async requestJson<T>(method: string, path: string, options: RequestOptions = {}): Promise<T> {
+    const text = await this.requestText(method, path, options);
+    if (!text) {
+      return undefined as T;
+    }
+    return JSON.parse(text) as T;
+  }
+
+  /** Send a request and return its body as text; throw the factory's error on non-2xx. */
+  async requestText(method: string, path: string, options: RequestOptions = {}): Promise<string> {
+    const { response, clear } = await this.send(method, path, options);
+    try {
+      await this.throwUnlessOk(response);
+      return await response.text();
+    } finally {
+      clear();
+    }
+  }
+
+  /**
+   * Send a request and return its body as bytes; throw the factory's error on non-2xx. The
+   * timeout covers reading the body.
+   */
+  async requestBytes(method: string, path: string, options: RequestOptions = {}): Promise<Buffer> {
+    const { response, clear } = await this.send(method, path, options);
+    try {
+      await this.throwUnlessOk(response);
+      return Buffer.from(await response.arrayBuffer());
+    } finally {
+      clear();
+    }
+  }
+
+  /**
+   * Send a request and return the raw `Response`, for bodies read as a stream. The timeout
+   * stops once the headers of a 2xx arrive; an error body is still read within it.
+   */
+  async requestRaw(method: string, path: string, options: RequestOptions = {}): Promise<Response> {
+    const { response, clear } = await this.send(method, path, options);
+    try {
+      await this.throwUnlessOk(response);
+    } finally {
+      clear();
+    }
+    return response;
+  }
+
+  private async throwUnlessOk(response: Response): Promise<void> {
+    if (!response.ok) {
+      const { problem, extras } = await parseProblem(response);
+      throw this.errorFactory(response, problem, extras);
+    }
+  }
+
+  private buildUrl(path: string, query?: object): URL {
+    const url = new URL(`${this.baseURL}${path}`);
+    if (query) {
+      for (const [key, value] of Object.entries(query as Record<string, unknown>)) {
+        if (value !== undefined) {
+          url.searchParams.append(key, String(value));
+        }
+      }
+    }
+    return url;
+  }
+
+  private async send(
+    method: string,
+    path: string,
+    options: RequestOptions,
+  ): Promise<{ response: Response; clear(): void }> {
+    const url = this.buildUrl(path, options.query);
+    const headers: Record<string, string> = {
+      "X-API-Key": this.apiKey,
+      "User-Agent": `zenrows/${packageJson.version} node`,
+      ...options.headers,
+    };
+    if (options.body !== undefined) {
+      headers["Content-Type"] = "application/json";
+    }
+    if (options.idempotencyKey) {
+      headers["Idempotency-Key"] = options.idempotencyKey;
+    }
+
+    const idempotent = isIdempotent(method, Boolean(options.idempotencyKey));
+    const retryStatuses = options.retryStatuses ?? RETRYABLE_STATUSES;
+    let attempt = 0;
+    while (true) {
+      const { signal, clear } = deadline(this.timeoutMs);
+      let response: Response;
+      try {
+        response = await fetch(url.toString(), {
+          method,
+          headers,
+          body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
+          signal,
+        });
+      } catch (error) {
+        clear();
+        if (idempotent && attempt < this.retries) {
+          await sleep(backoffMs(attempt));
+          attempt += 1;
+          continue;
+        }
+        throw error;
+      }
+
+      if (
+        idempotent &&
+        attempt < this.retries &&
+        retryStatuses.has(response.status) &&
+        !(await isQuotaExceeded(response))
+      ) {
+        // An unread body holds its connection until garbage collection.
+        response.body?.cancel().catch(() => {});
+        clear();
+        const wait = retryAfterMs(response) ?? backoffMs(attempt);
+        await sleep(wait);
+        attempt += 1;
+        continue;
+      }
+
+      return { response, clear };
+    }
+  }
+}
