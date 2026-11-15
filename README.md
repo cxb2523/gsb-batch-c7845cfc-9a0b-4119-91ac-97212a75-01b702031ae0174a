@@ -532,8 +532,14 @@ const apiKey = "YOUR-API-KEY";
   for await (const line of download.lines) {
     console.log(line.url, line.content);
   }
+  // How the reading ended: never rejects; resolve it after the loop drains `lines`.
+  const outcome = await download.outcome;
+  console.log(outcome);
+  // { deliveredLines: 10, skippedLines: 0, complete: true, failure: undefined }
 })();
 ```
+
+`download()` rejects with `ZenRowsCrawlError` on a non-2xx response, before any line is delivered. With a 2xx body, reading is resilient: a line that is not valid JSON is skipped instead of failing the iteration, and a stream error (the connection dropping mid-body) stops reading without losing the lines already delivered. After `lines` has drained, `download.outcome` resolves to `{ deliveredLines, skippedLines, complete, failure }`. `complete` is true only when the whole body was read; `failure` is undefined on a clean read, or holds the first failure: `{ kind: "bad_line", rawLine, message }` for a skipped line, or `{ kind: "stream", cause, message }` with the underlying error for a cut-off stream. A `bad_line` does not stop reading, so later lines can still arrive and the read can still complete; a `stream` failure always leaves `complete` false. Abandoning the loop early (e.g. `break`) resolves the outcome with `complete` false and the lines delivered so far.
 
 `client.crawl` also exposes `get()` (status, coverage and one page of results), `list()` (one page of the account's crawls, newest first, with `next_cursor` until the last page), and `stop()` (idempotent; a crawl that already ended answers as it ended). `create()` takes an `idempotencyKey` option, so a retried create does not start a second crawl.
 

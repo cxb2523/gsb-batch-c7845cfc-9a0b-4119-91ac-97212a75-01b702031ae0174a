@@ -4,6 +4,8 @@ import type {
   Crawl,
   CrawlDiscoveryStrategy,
   CrawlDownload,
+  CrawlDownloadFailure,
+  CrawlDownloadOutcome,
   CrawlExportLine,
   CrawlList,
   CrawlOutputFormat,
@@ -109,24 +111,79 @@ function contentIdOf(content: string | CrawlResult): string {
   return id;
 }
 
+/** Mutable reading state shared by a download's line generator and its `outcome` promise. */
+interface DownloadReadState {
+  deliveredLines: number;
+  skippedLines: number;
+  complete: boolean;
+  failure: CrawlDownloadFailure | undefined;
+}
+
+/**
+ * Yield one parsed object per NDJSON line, tracking how the reading went in `state`. A line that
+ * is not valid JSON is skipped (and recorded as the first failure) instead of thrown, so the
+ * following lines still arrive. A stream error stops the generator (also recorded as the first
+ * failure) but leaves every line already yielded in the caller's hands. `onDone` runs once, when
+ * the generator returns — body fully read, stream failed, or abandoned early — so the download's
+ * `outcome` can resolve.
+ */
 async function* ndjsonLines(
   body: AsyncIterable<Uint8Array> | null,
+  state: DownloadReadState,
+  onDone: () => void,
 ): AsyncGenerator<CrawlExportLine> {
-  if (!body) return;
-  const decoder = new TextDecoder();
-  let buffered = "";
-  for await (const chunk of body) {
-    buffered += decoder.decode(chunk, { stream: true });
-    let newline = buffered.indexOf("\n");
-    while (newline !== -1) {
-      const line = buffered.slice(0, newline).trim();
-      buffered = buffered.slice(newline + 1);
-      if (line) yield JSON.parse(line) as CrawlExportLine;
-      newline = buffered.indexOf("\n");
+  try {
+    if (body) {
+      const decoder = new TextDecoder();
+      let buffered = "";
+      for await (const chunk of body) {
+        buffered += decoder.decode(chunk, { stream: true });
+        let newline = buffered.indexOf("\n");
+        while (newline !== -1) {
+          const line = buffered.slice(0, newline).trim();
+          buffered = buffered.slice(newline + 1);
+          if (line) yield* parseLine(line, state);
+          newline = buffered.indexOf("\n");
+        }
+      }
+      const last = (buffered + decoder.decode()).trim();
+      if (last) yield* parseLine(last, state);
+    }
+    state.complete = true;
+  } catch (error) {
+    if (!state.failure) {
+      state.failure = {
+        kind: "stream",
+        cause: error,
+        message: `download stream ended before the body was fully read: ${describeError(error)}`,
+      };
+    }
+  } finally {
+    onDone();
+  }
+}
+
+/** Parse one NDJSON line, yielding it on success or recording and skipping it on a bad line. */
+async function* parseLine(line: string, state: DownloadReadState): AsyncGenerator<CrawlExportLine> {
+  try {
+    const parsed = JSON.parse(line) as CrawlExportLine;
+    state.deliveredLines += 1;
+    yield parsed;
+  } catch (error) {
+    state.skippedLines += 1;
+    if (!state.failure) {
+      state.failure = {
+        kind: "bad_line",
+        rawLine: line,
+        message: `skipping a download line that is not valid JSON: ${describeError(error)}`,
+      };
     }
   }
-  const last = (buffered + decoder.decode()).trim();
-  if (last) yield JSON.parse(last) as CrawlExportLine;
+}
+
+/** A stable, message-only description of an unknown thrown value. */
+function describeError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 /**
@@ -261,15 +318,36 @@ export class ZenRowsCrawlClient {
    * Every result of the crawl in one download: its `status` and the parsed lines (with the
    * page when the crawl has an `output_format`). On a running crawl, `status` is `running` and
    * the lines hold only what was kept so far.
+   *
+   * A line that is not valid JSON is skipped instead of failing the iteration, and a stream error
+   * stops reading without losing the lines already delivered. `outcome` (a promise) resolves once
+   * `lines` has drained with the delivered/skipped counts, whether the body was read to its end,
+   * and the first failure (a `bad_line`, carrying its raw text, or a `stream` error, carrying the
+   * underlying error). A non-2xx response still rejects with `ZenRowsCrawlError` before this
+   * returns.
    */
   async download(crawlId: string): Promise<CrawlDownload> {
     const response = await this.transport.requestRaw(
       "GET",
       `/crawls/${encodeURIComponent(crawlId)}/download`,
     );
+    const state: DownloadReadState = {
+      deliveredLines: 0,
+      skippedLines: 0,
+      complete: false,
+      failure: undefined,
+    };
+    let resolveOutcome!: (outcome: CrawlDownloadOutcome) => void;
+    const outcome = new Promise<CrawlDownloadOutcome>((resolve) => {
+      resolveOutcome = resolve;
+    });
+    const lines = ndjsonLines(response.body as AsyncIterable<Uint8Array> | null, state, () => {
+      resolveOutcome({ ...state });
+    });
     return {
       status: response.headers.get("X-Crawl-Status") ?? undefined,
-      lines: ndjsonLines(response.body as AsyncIterable<Uint8Array> | null),
+      lines,
+      outcome,
     };
   }
 

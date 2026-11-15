@@ -156,6 +156,52 @@ export interface CrawlExportLine {
   content?: string | Record<string, unknown>;
 }
 
+/** What ended a download's line reading, if it did not finish cleanly. */
+export type CrawlDownloadFailureKind =
+  /** A line that was not valid JSON: the line was skipped and reading continued. */
+  | "bad_line"
+  /** Reading the response body failed (e.g. the stream cut out): reading stopped. */
+  | "stream";
+
+/**
+ * The first reason a download's line reading did not finish cleanly. `bad_line` carries the raw
+ * text that was not valid JSON; `stream` carries the error the body read threw. A `bad_line`
+ * only skips that line, so later lines can still be delivered and the reading can complete; a
+ * `stream` failure stops it.
+ */
+export interface CrawlDownloadFailure {
+  kind: CrawlDownloadFailureKind;
+  /** The raw, unparsed line, for a `bad_line` failure. Undefined for a `stream` failure. */
+  rawLine?: string;
+  /** The error the stream read threw, for a `stream` failure. Undefined for a `bad_line` failure. */
+  cause?: unknown;
+  /** A short human-readable description of what failed. */
+  message: string;
+}
+
+/**
+ * How the line iterator of a `download()` ended. Resolved once `lines` has fully drained (or
+ * been abandoned early); never rejected. Read it after the `for await ... of download.lines`
+ * loop to learn how the reading went.
+ */
+export interface CrawlDownloadOutcome {
+  /** Lines parsed and delivered to the caller. */
+  deliveredLines: number;
+  /** Lines skipped because they were not valid JSON. */
+  skippedLines: number;
+  /**
+   * True when the whole body was read to its end without a stream error. False when the stream
+   * failed or the caller stopped iterating early.
+   */
+  complete: boolean;
+  /**
+   * The first failure encountered, if any: a skipped bad line (`kind: "bad_line"`) or the stream
+   * error that stopped reading (`kind: "stream"`). Undefined when every line parsed and the body
+   * ended cleanly.
+   */
+  failure?: CrawlDownloadFailure;
+}
+
 /** What `download()` returns. */
 export interface CrawlDownload {
   /**
@@ -163,5 +209,16 @@ export interface CrawlDownload {
    * `running` means a later download may hold more lines.
    */
   status: Extensible<CrawlStatus> | undefined;
+  /**
+   * One parsed object per NDJSON line, delivered in order. A line that is not valid JSON is
+   * skipped (recorded in `outcome`) instead of failing the iteration; a stream error stops the
+   * iteration but keeps every line already delivered.
+   */
   lines: AsyncIterable<CrawlExportLine>;
+  /**
+   * Resolves to the reading's ending once `lines` has fully drained (or been abandoned): how many
+   * lines were delivered and skipped, whether the body was read to its end, and the first failure
+   * with its raw line or underlying error. Never rejects.
+   */
+  outcome: Promise<CrawlDownloadOutcome>;
 }

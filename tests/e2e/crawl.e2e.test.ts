@@ -74,6 +74,11 @@ describe.skipIf(!apiKey || !startURL)("Crawl e2e", () => {
     const lines = [];
     for await (const line of download.lines) lines.push(line);
     expect(lines.length).toBe(results.length);
+    const outcome = await download.outcome;
+    expect(outcome.deliveredLines).toBe(results.length);
+    expect(outcome.skippedLines).toBe(0);
+    expect(outcome.complete).toBe(true);
+    expect(outcome.failure).toBeUndefined();
   }, 60_000);
 
   test("the crawl is on the first page of the list", async () => {

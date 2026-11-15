@@ -268,6 +268,183 @@ describe("ZenRowsCrawlClient — requests", () => {
     expect(got).toEqual(lines);
   });
 
+  test("download marks a fully read body complete in its outcome, with every line delivered", async () => {
+    const lines = [
+      { url: "u1", content_status: "fetched", content: "<html>1</html>" },
+      { url: "u2", content_status: "failed" },
+      { url: "u3" },
+    ];
+    const text = `${lines.map((l) => JSON.stringify(l)).join("\n")}\n`;
+    server.use(
+      http.get(`${BASE}/crawls/c_1/download`, () => {
+        const bytes = new TextEncoder().encode(text);
+        const stream = new ReadableStream({
+          start(controller) {
+            for (let i = 0; i < bytes.length; i += 5) controller.enqueue(bytes.slice(i, i + 5));
+            controller.close();
+          },
+        });
+        return new HttpResponse(stream, {
+          headers: { "Content-Type": "application/x-ndjson", "X-Crawl-Status": "completed" },
+        });
+      }),
+    );
+    const download = await client.download("c_1");
+    const got = [];
+    for await (const line of download.lines) got.push(line);
+    const outcome = await download.outcome;
+    expect(got).toEqual(lines);
+    expect(outcome).toEqual({
+      deliveredLines: 3,
+      skippedLines: 0,
+      complete: true,
+      failure: undefined,
+    });
+  });
+
+  test("download skips bad lines, keeps reading, and records only the first bad line", async () => {
+    const good = [{ url: "u1" }, { url: "u2" }, { url: "u3" }];
+    const text = [
+      JSON.stringify(good[0]),
+      "not-json-at-all",
+      "", // a blank line is not data: ignored, neither delivered nor skipped
+      JSON.stringify(good[1]),
+      '{"url": "u2b", broken',
+      JSON.stringify(good[2]),
+    ].join("\n");
+    server.use(
+      http.get(`${BASE}/crawls/c_1/download`, () =>
+        HttpResponse.text(text, { headers: { "X-Crawl-Status": "completed" } }),
+      ),
+    );
+    const download = await client.download("c_1");
+    const got = [];
+    for await (const line of download.lines) got.push(line);
+    const outcome = await download.outcome;
+    expect(got).toEqual(good);
+    expect(outcome.deliveredLines).toBe(3);
+    expect(outcome.skippedLines).toBe(2);
+    expect(outcome.complete).toBe(true);
+    expect(outcome.failure?.kind).toBe("bad_line");
+    expect(outcome.failure?.rawLine).toBe("not-json-at-all");
+    expect(outcome.failure?.cause).toBeUndefined();
+    expect(outcome.failure?.message).toContain("not valid JSON");
+  });
+
+  test("a bad last line without a trailing newline is skipped too, and the read stays complete", async () => {
+    const text = `${JSON.stringify({ url: "u1" })}\n{"url": "u2", broken`;
+    server.use(
+      http.get(`${BASE}/crawls/c_1/download`, () =>
+        HttpResponse.text(text, { headers: { "X-Crawl-Status": "completed" } }),
+      ),
+    );
+    const download = await client.download("c_1");
+    const got = [];
+    for await (const line of download.lines) got.push(line);
+    const outcome = await download.outcome;
+    expect(got).toEqual([{ url: "u1" }]);
+    expect(outcome).toMatchObject({
+      deliveredLines: 1,
+      skippedLines: 1,
+      complete: true,
+    });
+    expect(outcome.failure?.kind).toBe("bad_line");
+    expect(outcome.failure?.rawLine).toBe('{"url": "u2", broken');
+  });
+
+  test("download stops on a stream error but keeps the lines already delivered", async () => {
+    server.use(
+      http.get(`${BASE}/crawls/c_1/download`, () => {
+        const stream = new ReadableStream<Uint8Array>({
+          async start(controller) {
+            controller.enqueue(new TextEncoder().encode('{"url":"u1"}\n'));
+            await Promise.resolve();
+            controller.enqueue(new TextEncoder().encode('{"url":"u2"}\n'));
+            await new Promise((resolve) => setTimeout(resolve, 10));
+            controller.error(new Error("socket closed"));
+          },
+        });
+        return new HttpResponse(stream, {
+          headers: { "Content-Type": "application/x-ndjson", "X-Crawl-Status": "running" },
+        });
+      }),
+    );
+    const download = await client.download("c_1");
+    const got = [];
+    for await (const line of download.lines) got.push(line);
+    const outcome = await download.outcome;
+    expect(got).toEqual([{ url: "u1" }, { url: "u2" }]);
+    expect(outcome.deliveredLines).toBe(2);
+    expect(outcome.skippedLines).toBe(0);
+    expect(outcome.complete).toBe(false);
+    expect(outcome.failure?.kind).toBe("stream");
+    expect(outcome.failure?.rawLine).toBeUndefined();
+    expect(outcome.failure?.cause).toBeInstanceOf(Error);
+    expect((outcome.failure?.cause as Error).message).toBe("socket closed");
+    expect(outcome.failure?.message).toContain("socket closed");
+  });
+
+  test("a bad line before a stream error is the first failure; later good lines still arrive", async () => {
+    server.use(
+      http.get(`${BASE}/crawls/c_1/download`, () => {
+        const stream = new ReadableStream<Uint8Array>({
+          async start(controller) {
+            controller.enqueue(new TextEncoder().encode('{"url":"u1"}\nbroken\n{"url":"u2"}\n'));
+            await new Promise((resolve) => setTimeout(resolve, 10));
+            controller.error(new Error("cut"));
+          },
+        });
+        return new HttpResponse(stream, { headers: { "X-Crawl-Status": "running" } });
+      }),
+    );
+    const download = await client.download("c_1");
+    const got = [];
+    for await (const line of download.lines) got.push(line);
+    const outcome = await download.outcome;
+    expect(got).toEqual([{ url: "u1" }, { url: "u2" }]);
+    expect(outcome).toMatchObject({
+      deliveredLines: 2,
+      skippedLines: 1,
+      complete: false,
+    });
+    expect(outcome.failure?.kind).toBe("bad_line");
+    expect(outcome.failure?.rawLine).toBe("broken");
+  });
+
+  test("download on a non-2xx response rejects with ZenRowsCrawlError before any line is delivered", async () => {
+    server.use(
+      http.get(`${BASE}/crawls/c_missing/download`, () =>
+        problem(404, "crawl_not_found", "Crawl not found"),
+      ),
+    );
+    await expect(client.download("c_missing")).rejects.toSatisfy((error: unknown) => {
+      expect(error).toBeInstanceOf(ZenRowsCrawlError);
+      const err = error as ZenRowsCrawlError;
+      expect(err.status).toBe(404);
+      expect(err.code).toBe("crawl_not_found");
+      return true;
+    });
+  });
+
+  test("an empty body completes with zero lines and no failure", async () => {
+    server.use(
+      http.get(
+        `${BASE}/crawls/c_1/download`,
+        () => new HttpResponse(new Uint8Array(), { headers: { "X-Crawl-Status": "completed" } }),
+      ),
+    );
+    const download = await client.download("c_1");
+    const got = [];
+    for await (const line of download.lines) got.push(line);
+    expect(got).toEqual([]);
+    await expect(download.outcome).resolves.toEqual({
+      deliveredLines: 0,
+      skippedLines: 0,
+      complete: true,
+      failure: undefined,
+    });
+  });
+
   test("a request that outlasts the timeout fails", async () => {
     server.use(
       http.get(`${BASE}/crawls/c_1`, async () => {
@@ -336,6 +513,31 @@ describe("ZenRowsCrawlClient — requests", () => {
         .mockResolvedValueOnce(Response.json(crawl()));
       await client.get("c_1");
       expect(cancelled).toBe(true);
+    });
+
+    test("abandoning a download early leaves its outcome incomplete with the lines already delivered", async () => {
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          for (const u of ["u1", "u2", "u3", "u4"]) {
+            controller.enqueue(new TextEncoder().encode(`${JSON.stringify({ url: u })}\n`));
+          }
+          controller.close();
+        },
+      });
+      vi.spyOn(globalThis, "fetch").mockResolvedValue(
+        new Response(body, { status: 200, headers: { "X-Crawl-Status": "running" } }),
+      );
+      const download = await client.download("c_1");
+      let count = 0;
+      for await (const line of download.lines) {
+        expect(line.url).toBe(`u${count + 1}`);
+        count += 1;
+        if (count === 2) break;
+      }
+      const outcome = await download.outcome;
+      expect(outcome.deliveredLines).toBe(2);
+      expect(outcome.complete).toBe(false);
+      expect(outcome.failure).toBeUndefined();
     });
   });
 });

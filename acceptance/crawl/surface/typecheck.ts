@@ -2,6 +2,8 @@
 import {
   type Crawl,
   type CrawlDownload,
+  type CrawlDownloadFailure,
+  type CrawlDownloadOutcome,
   type CrawlList,
   type CrawlResult,
   type CrawlStop,
@@ -47,6 +49,17 @@ export async function main(): Promise<void> {
   }
   const d: CrawlDownload = await client.crawl.download(c.crawl_id);
   for await (const line of d.lines) console.log(line.url);
+  // Bad lines are skipped and stream errors keep the lines already delivered; outcome says how it ended.
+  const outcome: CrawlDownloadOutcome = await d.outcome;
+  const delivered: number = outcome.deliveredLines;
+  const skipped: number = outcome.skippedLines;
+  const complete: boolean = outcome.complete;
+  const failure: CrawlDownloadFailure | undefined = outcome.failure;
+  if (failure) {
+    const kind: "bad_line" | "stream" = failure.kind;
+    console.log(kind, failure.rawLine, failure.cause, failure.message);
+  }
+  console.log(delivered, skipped, complete);
   const s: CrawlStop = await client.crawl.stop(c.crawl_id);
   try {
     await client.crawl.get("x");
