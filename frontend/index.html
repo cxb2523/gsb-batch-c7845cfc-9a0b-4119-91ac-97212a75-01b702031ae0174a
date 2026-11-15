@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>DataTechStats Dashboard</title>
+    <meta name="description" content="An interactive dashboard for visualizing trends and statistics of popular data technology repositories on GitHub.">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=optional" rel="stylesheet" media="print" onload="this.media='all'">
+    <noscript><link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet"></noscript>
+    <link rel="stylesheet" href="style.css">
+    <link rel="modulepreload" href="js/main.js">
+    <link rel="modulepreload" href="js/api.js">
+    <link rel="modulepreload" href="js/charts/chartUtils.js">
+    <link rel="modulepreload" href="js/charts/repoCountsChart.js">
+    <link rel="modulepreload" href="js/charts/languagesCountsChart.js">
+    <!-- Chart.js CDN -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js" defer></script>
+    <script src="https://cdn.jsdelivr.net/npm/pako@2.1.0/dist/pako.min.js" defer></script>
+    <script src="js/config.js" defer></script>
+</head>
+<body>
+    <header class="site-header">
+        <div class="container">
+            <div>
+                <h1>DataTechStats</h1>
+                <p class="subtitle">Insights into popular data repositories</p>
+            </div>
+            <div class="range-switcher global-switcher" role="tablist" aria-label="Global Range selector">
+                <button class="range-btn active" data-range="weekly" role="tab" aria-selected="true">Weekly</button>
+                <button class="range-btn" data-range="monthly" role="tab" aria-selected="false">Monthly</button>
+            </div>
+        </div>
+    </header>
+
+    <main class="container">
+        <div class="dashboard">
+            <div class="graph-card" data-chart-type="repos">
+                <div class="card-top">
+                    <h2>Total Repositories by Topic</h2>
+                    <div class="controls">
+                        <div class="range-switcher" role="tablist" aria-label="Range selector" style="display: none;">
+                            <button class="range-btn active" data-range="weekly" role="tab" aria-selected="true">Weekly</button>
+                            <button class="range-btn" data-range="monthly" role="tab" aria-selected="false">Monthly</button>
+                        </div>
+                        <div id="repoViewSwitcher" class="range-switcher">
+                            <button class="range-btn" data-view="historical">Historical</button>
+                            <button class="range-btn active" data-view="comparison">Comparison</button>
+                        </div>
+                        <!-- legend will appear below the chart as the single control -->
+                    </div>
+                </div>
+                <div class="chart-wrap">
+                    <canvas id="repoCountsChart" aria-label="Repository counts over time" role="img"></canvas>
+                    <div class="loading-overlay">
+                        <div class="spinner"></div>
+                    </div>
+                </div>
+                <div id="repoLegend" class="chart-legend" aria-hidden="false"></div>
+            </div>
+            <div class="graph-card" data-chart-type="languages">
+                <div class="card-top">
+                    <h2>Main Languages of Repositories</h2>
+                    <div class="controls">
+                        <div id="languageSelectorContainer"></div>
+                        <div class="range-switcher" role="tablist" aria-label="Range selector" style="display: none;">
+                            <button class="range-btn active" data-range="weekly" role="tab" aria-selected="true">Weekly</button>
+                            <button class="range-btn" data-range="monthly" role="tab" aria-selected="false">Monthly</button>
+                        </div>
+                        <div id="languagesViewSwitcher" class="range-switcher">
+                            <button class="range-btn" data-view="historical">Historical</button>
+                            <button class="range-btn active" data-view="comparison">Comparison</button>
+                        </div>
+                    </div>
+                </div>
+                <div class="chart-wrap">
+                    <canvas id="languagesCountsChart" aria-label="Languages count over time" role="img"></canvas>
+                    <div class="loading-overlay">
+                        <div class="spinner"></div>
+                    </div>
+                </div>
+                <div id="languagesLegend" class="chart-legend" aria-hidden="false"></div>
+            </div>
+            
+            <!-- New Comparison Graph Card -->
+            <div class="graph-card" data-chart-type="comparison">
+                <div class="card-top">
+                    <h2>Repository Comparison</h2>
+                    <div class="controls">
+                        <div class="metric-switcher range-switcher" id="metricSwitcher">
+                            <button class="metric-btn range-btn active" data-metric="stars">Stars</button>
+                            <button class="metric-btn range-btn" data-metric="size">Size</button>
+                            <button class="metric-btn range-btn" data-metric="forks">Forks</button>
+                            <button class="metric-btn range-btn" data-metric="open_issues">Open Issues</button>
+                        </div>
+                        <div class="range-switcher" id="compRangeSwitcher" style="display: none;">
+                            <button class="range-btn active" data-range="weekly">Weekly</button>
+                            <button class="range-btn" data-range="monthly">Monthly</button>
+                        </div>
+                        <div class="range-switcher" id="compViewSwitcher">
+                            <button class="range-btn active" data-view="historical">Historical</button>
+                            <button class="range-btn" data-view="comparison">Comparison</button>
+                        </div>
+                    </div>
+                </div>
+                <div class="comparison-controls">
+                    <div class="repo-selector">
+                        <div id="selectedReposContainer"></div>
+                        <div class="repo-search-wrapper">
+                            <input type="text" id="repoSearch" placeholder="Search to add repositories...">
+                            <button id="repoListToggleBtn" class="repo-toggle-btn" type="button" title="Toggle repository list" style="transform: rotate(180deg);">
+                                <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" clip-rule="evenodd" /></svg>
+                            </button>
+                            <div id="repoListContainer" class="repo-list-container"></div>
+                        </div>
+                    </div>
+                </div>
+                <div class="chart-wrap">
+                    <canvas id="repoComparisonChart" aria-label="Repository comparison chart" role="img"></canvas>
+                    <div class="loading-overlay">
+                        <div class="spinner"></div>
+                    </div>
+                </div>
+                <div id="repoComparisonLegend" class="chart-legend" aria-hidden="false"></div>
+            </div>
+        </div>
+    </main>
+
+    <script type="module" src="js/main.js"></script>
+    <script>
+        document.addEventListener('DOMContentLoaded', () => {
+            const container = document.getElementById('languageSelectorContainer');
+            if (!container) return;
+
+            const updateDisabledState = () => {
+                const items = container.querySelectorAll('.language-selector-item');
+                const selectedCount = container.querySelectorAll('.language-selector-item.selected').length;
+                const MAX = 10;
+                items.forEach(item => {
+                    if (!item.classList.contains('selected')) {
+                        const disabled = selectedCount >= MAX;
+                        item.classList.toggle('disabled', disabled);
+                        item.style.cursor = disabled ? 'default' : '';
+                    } else {
+                        item.classList.remove('disabled');
+                        item.style.cursor = '';
+                    }
+                });
+            };
+
+            container.addEventListener('click', (e) => {
+                const item = e.target.closest('.language-selector-item');
+                if (item && item.classList.contains('disabled')) {
+                    e.stopPropagation();
+                    return;
+                }
+                setTimeout(updateDisabledState, 0);
+            }, true);
+
+            new MutationObserver(updateDisabledState).observe(container, { childList: true, subtree: true });
+
+            // Global Range Switcher Logic
+            const globalButtons = document.querySelectorAll('.global-switcher .range-btn');
+            globalButtons.forEach(btn => {
+                btn.addEventListener('click', () => {
+                    const range = btn.dataset.range;
+                    globalButtons.forEach(b => {
+                        const isActive = b.dataset.range === range;
+                        b.classList.toggle('active', isActive);
+                        b.setAttribute('aria-selected', isActive);
+                    });
+                    // Trigger hidden local switchers to update charts
+                    document.querySelectorAll(`.graph-card .range-switcher .range-btn[data-range="${range}"]`).forEach(b => b.click());
+                });
+            });
+        });
+    </script>
+</body>
+</html>

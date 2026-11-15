@@ -1,0 +1,24 @@
+from pydantic_settings import BaseSettings
+
+
+class Settings(BaseSettings):
+    bucket: str
+
+    aggregated_data_prefix: str = "aggregated_data"
+    github_data_prefix: str = "github_data"
+    profile: str = "default"
+    region: str = "eu-central-1"
+    logging_level: str = "INFO"
+
+
+    def get_repo_counts_path(self, interval: str) -> str:
+        return f"{self.aggregated_data_prefix}/repo_counts/{interval}.json"
+
+    def get_primary_langs_path(self, interval: str) -> str:
+        return f"{self.aggregated_data_prefix}/primary_langs_counts/{interval}.json"
+
+    def get_repo_comparison_path(self, interval: str) -> str:
+        return f"{self.aggregated_data_prefix}/repo_comparison/{interval}.json"
+
+    def get_repo_list_path(self) -> str:
+        return f"{self.aggregated_data_prefix}/repo_list/repo_list.json"

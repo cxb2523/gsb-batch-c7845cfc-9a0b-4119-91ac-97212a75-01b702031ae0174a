@@ -1,0 +1,466 @@
+export function isoWeekToDate(isoWeek) {
+    const m = isoWeek.match(/(\d{4})-W(\d{2})/);
+    if (!m) return new Date(isoWeek);
+    const year = Number(m[1]);
+    const week = Number(m[2]);
+    const jan4 = new Date(year, 0, 4);
+    const day = jan4.getDay() || 7;
+    const week1Monday = new Date(jan4);
+    week1Monday.setDate(jan4.getDate() - (day - 1));
+    const monday = new Date(week1Monday);
+    monday.setDate(week1Monday.getDate() + (week - 1) * 7);
+    return monday;
+}
+
+export function formatWeekLabel(dateStr, range = 'weekly') {
+    const optsDay = { month: 'short', day: 'numeric' };
+    const optsMonthYear = { month: 'short', year: 'numeric' };
+
+    if (range === 'weekly') {
+        const m = (dateStr || '').match(/(\d{4})-W(\d{2})/);
+        if (m) {
+            const start = isoWeekToDate(dateStr);
+            const end = new Date(start);
+            end.setDate(start.getDate() + 6);
+
+            const s = start.toLocaleDateString(undefined, optsDay);
+            const e = end.toLocaleDateString(undefined, optsDay);
+            return `${s} - ${e}, ${end.getFullYear()}`;
+        }
+        const d = new Date(dateStr);
+        return isNaN(d) ? String(dateStr) : d.toLocaleDateString(undefined, optsDay);
+    }
+
+    const d = (String(dateStr).match(/(\d{4})-W(\d{2})/)) ? isoWeekToDate(dateStr) : new Date(dateStr);
+    return isNaN(d) ? String(dateStr) : d.toLocaleDateString(undefined, optsMonthYear);
+}
+
+export function renderLegend(chart, container, onToggle) {
+    if (!chart || !chart.data.datasets || !container) return;
+    
+    container.innerHTML = '';
+    container.removeAttribute('style');
+    
+    // Handle Pie/Doughnut/PolarArea or Single-Dataset Bar (Comparison Views)
+    // These charts have 1 dataset but multiple labels/colors we want to toggle.
+    const isPieLike = ['pie', 'doughnut', 'polarArea'].includes(chart.config.type);
+    const isSingleDatasetBreakdown = chart.data.datasets.length === 1 && chart.data.labels.length > 1;
+    
+    // Skip legend for bar charts entirely (comparison view doesn't need it)
+    if (chart.config.type === 'bar') {
+        return;
+    }
+    
+    // For single-dataset line charts, skip the breakdown rendering and go to multi-dataset rendering
+    // This will show just the repo name, not all the dates
+    if (chart.config.type === 'line' && isSingleDatasetBreakdown) {
+        // Fall through to multi-dataset rendering below
+    } else if (isPieLike || isSingleDatasetBreakdown) {
+        const dataset = chart.data.datasets[0];
+        const labels = chart.data.labels;
+        
+        labels.forEach((label, index) => {
+            if (!label) return;
+
+            const chip = document.createElement('button');
+            chip.type = 'button';
+            
+            // Use getDataVisibility for data points (Chart.js 3+)
+            const isVisible = chart.getDataVisibility(index);
+            chip.className = isVisible ? 'legend-chip active' : 'legend-chip';
+            
+            let color = Array.isArray(dataset.backgroundColor) 
+                ? dataset.backgroundColor[index % dataset.backgroundColor.length] 
+                : dataset.backgroundColor;
+            
+            chip.style.borderLeft = `8px solid ${color}`;
+            chip.textContent = label;
+
+            chip.onclick = () => {
+                chart.toggleDataVisibility(index);
+                const nowVisible = chart.getDataVisibility(index);
+                chip.classList.toggle('active', nowVisible);
+                chart.update();
+                if (onToggle) onToggle(index, nowVisible);
+            };
+            container.appendChild(chip);
+        });
+        return;
+    }
+
+    const legendItems = chart.data.datasets.map((dataset, index) => ({
+        dataset,
+        index
+    }));
+
+    if (chart.config.type === 'line') {
+        legendItems.sort((a, b) => {
+            const getLast = (ds) => {
+                const data = ds.data;
+                if (!data || !data.length) return 0;
+                for (let i = data.length - 1; i >= 0; i--) {
+                    if (data[i] !== null && data[i] !== undefined) return data[i];
+                }
+                return 0;
+            };
+            return getLast(b.dataset) - getLast(a.dataset);
+        });
+    }
+
+    legendItems.forEach(({ dataset, index }) => {
+        const chip = document.createElement('button');
+        chip.type = 'button';
+        const isVisible = chart.isDatasetVisible(index);
+        chip.className = isVisible ? 'legend-chip active' : 'legend-chip';
+        chip.style.borderLeft = `8px solid ${dataset.borderColor}`;
+        chip.textContent = dataset.label;
+
+        chip.onclick = () => {
+            const currentlyVisible = chart.isDatasetVisible(index);
+            chart.setDatasetVisibility(index, !currentlyVisible);
+            chip.classList.toggle('active', !currentlyVisible);
+            chart.update();
+            if (onToggle) onToggle(index, !currentlyVisible);
+        };
+
+        container.appendChild(chip);
+    });
+}
+
+export function externalTooltip(context) {
+    const { chart, tooltip } = context;
+    const parent = chart.canvas.parentNode;
+    let tip = parent.querySelector('.chart-tooltip');
+    if (!tip) {
+        tip = document.createElement('div');
+        tip.className = 'chart-tooltip';
+        tip.innerHTML = '<div class="label"></div><div class="values"></div>';
+        parent.appendChild(tip);
+    }
+
+    tip.style.pointerEvents = 'none';
+
+    if (tooltip.opacity === 0) {
+        tip.style.opacity = 0;
+        return;
+    }
+
+    const title = tooltip.title && tooltip.title.length ? tooltip.title[0] : '';
+    const labelEl = tip.querySelector('.label');
+    const valuesEl = tip.querySelector('.values');
+    
+    const isComparison = chart.config.type === 'doughnut' || chart.config.type === 'pie' || chart.options.indexAxis === 'y';
+
+    labelEl.style.display = 'block';
+    labelEl.textContent = title;
+    valuesEl.style.marginTop = '6px';
+
+    valuesEl.innerHTML = '';
+
+    if (tooltip.dataPoints && tooltip.dataPoints.length) {
+        const sortedPoints = tooltip.dataPoints.slice()
+            .filter(dp => chart.getDataVisibility(dp.dataIndex) !== false)
+            .sort((a, b) => {
+            if (chart.options.indexAxis === 'y') {
+                return (b.parsed.x || 0) - (a.parsed.x || 0);
+            }
+            const valA = a.parsed && (typeof a.parsed.y !== 'undefined') ? a.parsed.y : (a.raw || 0);
+            const valB = b.parsed && (typeof b.parsed.y !== 'undefined') ? b.parsed.y : (b.raw || 0);
+            return valB - valA;
+        });
+
+        sortedPoints.forEach(dp => {
+            let name = dp.dataset.label;
+            if (isComparison) {
+                name = dp.label;
+            }
+            name = name || '';
+            let v;
+            if (chart.options.indexAxis === 'y') {
+                v = dp.parsed.x;
+            } else {
+                v = dp.parsed && (typeof dp.parsed.y !== 'undefined') ? dp.parsed.y : (dp.raw || '');
+            }
+            if (dp.dataset.originalData && typeof dp.dataset.originalData[dp.dataIndex] !== 'undefined') {
+                v = dp.dataset.originalData[dp.dataIndex];
+            }
+            
+            let rawColor = dp.dataset.borderColor;
+            if (isComparison) rawColor = dp.dataset.backgroundColor;
+            if (!rawColor) rawColor = dp.dataset.backgroundColor || dp.dataset.borderColor || '#000';
+            
+            const color = Array.isArray(rawColor) ? rawColor[dp.dataIndex] : rawColor;
+
+
+            let formattedValue = Number(v).toLocaleString();
+            if (chart.config.options.valueFormatter) {
+                formattedValue = chart.config.options.valueFormatter(v, dp);
+            }
+
+            const nameHtml = name ? `<span class="tt-name" style="max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${name}</span>` : '';
+            const row = document.createElement('div');
+            row.className = 'tt-line';
+            row.innerHTML = `
+                <span class="tt-dot" style="background:${color};"></span>
+                ${nameHtml}
+                <span class="tt-val">${formattedValue}</span>
+            `;
+            valuesEl.appendChild(row);
+        });
+    }
+
+    const canvasRect = chart.canvas.getBoundingClientRect();
+    const parentRect = parent.getBoundingClientRect();
+    const caretX = tooltip.caretX ?? (canvasRect.width / 2);
+    const caretY = tooltip.caretY ?? (canvasRect.height / 2);
+
+    const left = caretX + (canvasRect.left - parentRect.left);
+    const top = caretY + (canvasRect.top - parentRect.top);
+
+    // Reset styles to measure size
+    tip.style.opacity = 0;
+    tip.style.display = 'block';
+    tip.style.left = '0px';
+    tip.style.top = '0px';
+    tip.style.transform = 'translate(0,0)';
+
+    const tipWidth = tip.offsetWidth || 150;
+    const tipHeight = tip.offsetHeight || 60;
+    
+    const Y_OFFSET_ABOVE = 40; // Distance to place tooltip above the point
+    const Y_OFFSET_BELOW = 15; // Distance to place tooltip below the point
+    const PADDING = 8; // Padding from the container edges
+    const PADDING_BOTTOM = 35; // Extra padding at bottom to avoid X-axis labels
+
+    let tooltipX, tooltipY;
+
+    if (isComparison) {
+        // Always place tooltip on the right side
+        tooltipX = parentRect.width - tipWidth - PADDING;
+
+        if (caretY > canvasRect.height / 2) {
+            tooltipY = PADDING; // Top
+        } else {
+            tooltipY = parentRect.height - tipHeight - PADDING; // Bottom
+        }
+    } else {
+        // --- Y POSITIONING ---
+        // Default position is above the caret
+        tooltipY = top - tipHeight - Y_OFFSET_ABOVE;
+
+        // If it goes off the top, place it below the caret instead
+        if (tooltipY < PADDING) {
+            tooltipY = top + Y_OFFSET_BELOW;
+        }
+
+        // --- X POSITIONING ---
+        // Always place to the side to avoid covering points
+        const X_OFFSET = 20;
+        const spaceRight = parentRect.width - left;
+        
+        if (spaceRight > tipWidth + X_OFFSET) {
+            tooltipX = left + X_OFFSET;
+        } else {
+            tooltipX = left - tipWidth - X_OFFSET;
+        }
+    }
+
+    // --- CLAMPING to parent container ---
+    // Clamp X
+    if (tooltipX < PADDING) {
+        tooltipX = PADDING;
+    }
+    if (tooltipX + tipWidth > parentRect.width - PADDING) {
+        tooltipX = parentRect.width - tipWidth - PADDING;
+    }
+    
+    // Clamp Y
+    if (tooltipY < PADDING) {
+        tooltipY = PADDING;
+    }
+    if (tooltipY + tipHeight > parentRect.height - PADDING_BOTTOM) {
+        tooltipY = parentRect.height - tipHeight - PADDING_BOTTOM;
+    }
+
+    // Set final position and fade in
+    tip.style.left = tooltipX + 'px';
+    tip.style.top = tooltipY + 'px';
+    tip.style.transform = 'none';
+    tip.style.opacity = 1;
+}
+
+export function setupChartInteractions(canvas, getChartInstance) {
+    if (!canvas || canvas.hasChartInteractions) return;
+    
+    canvas.hasChartInteractions = true;
+    let pressTimer;
+    let isLongPressActive = false;
+    let lastTouchTime = 0;
+    let startX = 0;
+    let startY = 0;
+    let rafId;
+
+    const clearTooltip = () => {
+        clearTimeout(pressTimer);
+        isLongPressActive = false;
+        const chart = getChartInstance();
+        if (chart) {
+            chart.setActiveElements([]);
+            chart.tooltip.setActiveElements([], { x: 0, y: 0 });
+            chart.update();
+        }
+    };
+
+    const updateTooltip = (e) => {
+        const chart = getChartInstance();
+        if (!chart) return;
+
+        if (rafId) cancelAnimationFrame(rafId);
+
+        rafId = requestAnimationFrame(() => {
+            const interaction = chart.options.interaction || {};
+            const mode = interaction.mode || 'index';
+            const options = {
+                intersect: interaction.intersect ?? false,
+                axis: interaction.axis || 'x'
+            };
+            const elements = chart.getElementsAtEventForMode(e, mode, options, false);
+            const visibleElements = elements.filter(el => chart.getDataVisibility(el.index) !== false);
+            const activeElements = chart.tooltip.getActiveElements();
+            const hasChanged = visibleElements.length !== activeElements.length ||
+                !visibleElements.every((el, i) => el.datasetIndex === activeElements[i].datasetIndex && el.index === activeElements[i].index);
+
+            if (hasChanged) {
+                chart.setActiveElements(visibleElements);
+                chart.tooltip.setActiveElements(visibleElements);
+                chart.update();
+            }
+            rafId = null;
+        });
+    };
+
+    canvas.addEventListener('touchstart', (e) => {
+        lastTouchTime = Date.now();
+        const touch = e.touches[0];
+        startX = touch.clientX;
+        startY = touch.clientY;
+
+        isLongPressActive = false;
+        pressTimer = setTimeout(() => {
+            isLongPressActive = true;
+            updateTooltip(e);
+        }, 500);
+    }, { passive: true });
+
+    canvas.addEventListener('touchend', () => {
+        lastTouchTime = Date.now();
+        clearTooltip();
+    });
+    
+    canvas.addEventListener('touchmove', (e) => {
+        if (isLongPressActive) {
+            if (e.cancelable) e.preventDefault();
+            updateTooltip(e);
+        } else {
+            const touch = e.touches[0];
+            const diffX = Math.abs(touch.clientX - startX);
+            const diffY = Math.abs(touch.clientY - startY);
+            
+            if (diffX > 10 || diffY > 10) {
+                clearTimeout(pressTimer);
+            }
+        }
+    }, { passive: false });
+    
+    canvas.addEventListener('touchcancel', clearTooltip);
+
+    canvas.addEventListener('mousemove', (e) => {
+        if (Date.now() - lastTouchTime < 800) return;
+        updateTooltip(e);
+    });
+
+    canvas.addEventListener('mouseout', () => {
+        if (Date.now() - lastTouchTime < 800) return;
+        clearTooltip();
+    });
+}
+
+export function setupViewSwitcher(containerId, currentView, onSwitch) {
+    const switcher = document.getElementById(containerId);
+    if (!switcher) return;
+
+    // Ensure the correct button is active based on currentView
+    const buttons = switcher.querySelectorAll('.range-btn');
+    buttons.forEach(btn => {
+        if (btn.dataset.view === currentView) {
+            btn.classList.add('active');
+        } else {
+            btn.classList.remove('active');
+        }
+    });
+
+    // Store the callback on the element so the listener always uses the latest version
+    switcher._onSwitch = onSwitch;
+
+    if (switcher.dataset.listenerAttached) return;
+    switcher.dataset.listenerAttached = 'true';
+
+    switcher.addEventListener('click', (e) => {
+        if (e.target.classList.contains('range-btn')) {
+            const btn = e.target;
+            if (btn.classList.contains('active')) return;
+            const newView = btn.dataset.view;
+            if (newView) {
+                // Query buttons dynamically to ensure we handle current DOM state
+                const currentButtons = switcher.querySelectorAll('.range-btn');
+                currentButtons.forEach(b => b.classList.remove('active'));
+                btn.classList.add('active');
+                if (switcher._onSwitch) {
+                    switcher._onSwitch(newView);
+                }
+            }
+        }
+    });
+}
+
+export function setupRangeSwitcher(container, onSwitch) {
+    if (typeof container === 'string') {
+        container = document.getElementById(container);
+    }
+    if (!container) return;
+
+    // Store callback
+    container._onSwitch = onSwitch;
+
+    if (container.dataset.listenerAttached) return;
+    container.dataset.listenerAttached = 'true';
+
+    container.addEventListener('click', (e) => {
+        if (e.target.classList.contains('range-btn')) {
+            const btn = e.target;
+            if (btn.classList.contains('active')) return;
+            
+            const newRange = btn.dataset.range;
+            if (newRange) {
+                const buttons = container.querySelectorAll('.range-btn');
+                buttons.forEach(b => b.classList.remove('active'));
+                btn.classList.add('active');
+                
+                if (container._onSwitch) {
+                    container._onSwitch(newRange);
+                }
+            }
+        }
+    });
+}
+
+export function toggleLoading(canvasId, isLoading) {
+    const canvas = document.getElementById(canvasId);
+    if (!canvas) return;
+    const wrapper = canvas.parentElement;
+    const loader = wrapper.querySelector('.loading-overlay');
+    if (loader) {
+        if (isLoading) loader.classList.add('visible');
+        else loader.classList.remove('visible');
+    }
+}
