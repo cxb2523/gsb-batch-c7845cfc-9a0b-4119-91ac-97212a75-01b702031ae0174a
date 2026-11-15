@@ -6,7 +6,7 @@ import time
 
 logger = logging.getLogger(__name__)
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Optional
+from typing import TYPE_CHECKING, Callable, Optional
 
 from google.auth.exceptions import RefreshError
 from google.oauth2.credentials import Credentials
@@ -17,8 +17,11 @@ from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
 from sqlalchemy.orm import Session
 
 import config
-from models.models import DriveAccount, File
+from models.models import DriveAccount
 from services.auth_service import decrypt_token
+
+if TYPE_CHECKING:  # avoid a circular import at runtime
+    from services.sync_service import SyncSettlement
 
 SCOPES = ["https://www.googleapis.com/auth/drive"]
 PROFILE_FOLDER_NAME = "_DrivePool_"
@@ -461,44 +464,42 @@ def list_all_files(account: DriveAccount) -> list[dict]:
     return items
 
 
-def sync_files_from_drives(db: Session) -> int:
-    accounts = db.query(DriveAccount).filter(DriveAccount.is_connected == True).all()
-    total = 0
-    for account in accounts:
-        try:
-            drive_files = list_all_files(account)
-            drive_ids = {df["id"] for df in drive_files}
+def sync_files_from_drives(
+    db: Session,
+    *,
+    list_files_fn: "Callable[[DriveAccount], list[dict]] | None" = None,
+    run_id: str | None = None,
+) -> "SyncSettlement":
+    """Synchronise every connected account and return the per-account settlement.
 
-            db.query(File).filter(
-                File.account_index == account.account_index,
-                File.drive_file_id.notin_(drive_ids),
-            ).delete(synchronize_session=False)
+    The settlement logic lives in :mod:`services.sync_service` so it can be
+    exercised without Google credentials.  ``list_files_fn`` defaults to the
+    real Drive listing here; tests inject a fake.
+    """
+    from services.sync_service import sync_files_from_drives as _sync
 
-            for df in drive_files:
-                parent = df.get("parents", [None])[0] if df.get("parents") else None
-                existing = (
-                    db.query(File)
-                    .filter(File.drive_file_id == df["id"], File.account_index == account.account_index)
-                    .first()
-                )
-                if existing:
-                    existing.file_name = df.get("name", existing.file_name)
-                    existing.size = int(df.get("size") or 0)
-                    existing.thumbnail_link = df.get("thumbnailLink")
-                    existing.parent_drive_file_id = parent
-                else:
-                    db.add(File(
-                        file_name=df.get("name", ""),
-                        drive_file_id=df["id"],
-                        account_index=account.account_index,
-                        size=int(df.get("size") or 0),
-                        mime_type=df.get("mimeType"),
-                        thumbnail_link=df.get("thumbnailLink"),
-                        parent_drive_file_id=parent,
-                        created_at=_parse_drive_time(df.get("createdTime")),
-                    ))
-                total += 1
-            db.commit()
-        except Exception:
-            db.rollback()
-    return total
+    return _sync(
+        db,
+        list_files_fn=list_files_fn or list_all_files,
+        run_id=run_id,
+    )
+
+
+def run_sync_job(run_id: str | None = None) -> None:
+    """Background entry point: run a sync on its own database session.
+
+    FastAPI finalises request-scoped ``yield`` dependencies before background
+    tasks run, so the route must not hand its session to the task.  A fresh
+    session also guarantees the sync is not holding a request connection.
+    """
+    from database import SessionLocal
+
+    db = SessionLocal()
+    try:
+        sync_files_from_drives(db, run_id=run_id)
+    except Exception:
+        # sync_files_from_drives already records per-account failures; this only
+        # catches unexpected errors (e.g. the database itself being unavailable).
+        logger.exception("Background sync job %s crashed", run_id)
+    finally:
+        db.close()

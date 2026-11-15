@@ -1,6 +1,7 @@
 import io
 import logging
 import mimetypes
+import uuid
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Form, HTTPException, UploadFile, status
 
@@ -24,11 +25,12 @@ from services.drive_service import (
     rename_file,
     restore_file,
     share_file,
-    sync_files_from_drives,
+    run_sync_job,
     trash_drive_file,
     unshare_file,
     upload_file,
 )
+from services.sync_service import begin_sync, get_latest_settlement
 
 router = APIRouter(prefix="/files", tags=["files"])
 
@@ -57,8 +59,39 @@ def _file_to_dict(f: File) -> dict:
 
 @router.post("/sync")
 def sync_files(background_tasks: BackgroundTasks, db: Session = Depends(get_db), _=Depends(verify_token)):
-    background_tasks.add_task(sync_files_from_drives, db)
-    return {"ok": True}
+    """Start a background sync and immediately return a handle for its settlement.
+
+    The per-account results are published when the job finishes and can be read
+    from ``GET /api/files/sync/status``.
+    """
+    run_id = uuid.uuid4().hex
+    connected_indices = [
+        a.account_index for a in db.query(DriveAccount).filter(DriveAccount.is_connected == True).all()
+    ]
+    begin_sync(run_id, connected_indices)
+    background_tasks.add_task(run_sync_job, run_id)
+    return {"ok": True, "run_id": run_id, "status": "running", "account_count": len(connected_indices)}
+
+
+@router.get("/sync/status")
+def sync_status(_=Depends(verify_token)):
+    """Read-only view of the most recent sync settlement (running or finished)."""
+    settlement = get_latest_settlement()
+    if settlement is None:
+        return {
+            "run_id": None,
+            "status": "never_run",
+            "started_at": None,
+            "finished_at": None,
+            "account_count": 0,
+            "succeeded_count": 0,
+            "failed_count": 0,
+            "total_files": 0,
+            "total_deleted": 0,
+            "error": None,
+            "accounts": [],
+        }
+    return settlement
 
 
 @router.get("")

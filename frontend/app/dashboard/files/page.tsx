@@ -4,6 +4,8 @@ import { useEffect, useRef, useState, useMemo, useCallback } from "react";
 import { useFiles, type FileItem } from "@/hooks/useFiles";
 import { useStorage } from "@/hooks/useStorage";
 import { markStatsDirty } from "@/hooks/useStats";
+import { useSyncSettlement } from "@/hooks/useSyncSettlement";
+import { SyncResultPanel } from "@/components/SyncResultPanel";
 import { useUpload } from "@/contexts/UploadContext";
 
 type SortKey = "date-desc" | "date-asc" | "name-asc" | "name-desc" | "size-desc" | "size-asc";
@@ -852,7 +854,7 @@ export default function FilesPage() {
   const { files, refreshFiles } = useFiles();
   const { accounts, refreshStorage } = useStorage();
   const { upload, addCompleteListener, setCurrentFolder, toast, updateToast, confirm } = useUpload();
-  const [syncing, setSyncing] = useState(false);
+  const { settlement, syncing, error: syncError, loadLatest, startSync, dismiss } = useSyncSettlement();
   const [view, setView] = useState<"list" | "grid">("grid");
   const [breadcrumb, setBreadcrumb] = useState<BreadcrumbEntry[]>([{ id: null, name: "All Files" }]);
   const scrollStack = useRef<number[]>([]);
@@ -885,6 +887,10 @@ export default function FilesPage() {
     window.addEventListener("dragend", onDragEnd);
     return () => window.removeEventListener("dragend", onDragEnd);
   }, []);
+
+  useEffect(() => {
+    loadLatest();
+  }, [loadLatest]);
 
   const panelFolders = useMemo(() => {
     if (!draggedFile) return [];
@@ -1058,11 +1064,12 @@ export default function FilesPage() {
   }
 
   async function handleSync() {
-    setSyncing(true);
-    await fetch("/api/files/sync", { method: "POST", credentials: "include" });
-    await new Promise((r) => setTimeout(r, 1500));
+    // The settlement endpoint reports per-account results.  Refresh afterwards
+    // even on timeout/error: accounts that already committed did write data.
+    await startSync();
+    markStatsDirty();
     await refreshFiles();
-    setSyncing(false);
+    refreshStorage();
   }
 
   function handleFileInputChange(e: React.ChangeEvent<HTMLInputElement>) {
@@ -1164,6 +1171,8 @@ export default function FilesPage() {
           </div>
         </div>
       )}
+
+      <SyncResultPanel settlement={settlement} error={syncError} onDismiss={dismiss} />
 
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>

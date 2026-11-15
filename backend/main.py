@@ -10,6 +10,7 @@ from models.models import Base
 from routes import auth, accounts, files
 from routes import profile as profile_router
 from services.drive_service import sync_files_from_drives
+from services.sync_service import begin_sync
 
 
 def run_migrations():
@@ -30,7 +31,8 @@ async def lifespan(app: FastAPI):
     run_migrations()
     db = SessionLocal()
     try:
-        sync_files_from_drives(db)
+        run_id = begin_sync()["run_id"]
+        sync_files_from_drives(db, run_id=run_id)
     finally:
         db.close()
     yield

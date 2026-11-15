@@ -12,7 +12,7 @@ from services.auth_service import (
     verify_pin,
     verify_token,
 )
-from services.drive_service import get_oauth_flow, sync_files_from_drives
+from services.drive_service import get_oauth_flow, run_sync_job
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -123,7 +123,7 @@ def oauth_callback(
     account.is_connected = True
     db.commit()
 
-    background_tasks.add_task(sync_files_from_drives, db)
+    background_tasks.add_task(run_sync_job)
 
     return Response(
         status_code=302,
