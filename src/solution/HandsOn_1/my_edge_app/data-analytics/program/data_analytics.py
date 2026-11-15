@@ -55,9 +55,12 @@ class DataAnalyzer():
 
     def on_message(self, client, userdata, message):
         self.logger.info('New message received on topic: {}'.format(message.topic))
-        # print(message.payload)
-        # load = message.payload
-        new_msg = json.loads(message.payload)
+        try:
+            new_msg = json.loads(message.payload)
+        except (ValueError, TypeError) as err:
+            # Malformed payloads must not kill the MQTT callback thread.
+            self.logger.error('Skipping message on topic {}: payload is not valid JSON: {}'.format(message.topic, err))
+            return
         self.logger.info('new message: {}'.format(new_msg))
         try:
             self.topic_callback[message.topic](new_msg)
@@ -97,17 +100,77 @@ class DataAnalyzer():
     def power_mean(self, payload):
         self.logger.info('calculating power mean...')
 
-        current_values = [item['_value'] for item in payload['current_drive3_batch']]
-        voltage_values = [item['_value'] for item in payload['voltage_drive3_batch']]     
-        # Calculate mean of power 
-        power_batch_sum = sum([current*voltage for current, voltage in zip(current_values,voltage_values)])
-        
-        power_mean = round((power_batch_sum/payload['sample_number']),2)
+        # Validate the batch structure before touching any data. A malformed
+        # or empty batch is logged and skipped: no MeanResult is published and
+        # the service keeps running instead of raising.
+        if not isinstance(payload, dict):
+            self.logger.error('power_mean: skipping batch - payload is not an object: %r', payload)
+            return
+
+        missing_fields = [
+            key for key in ('sample_number', 'current_drive3_batch', 'voltage_drive3_batch')
+            if key not in payload
+        ]
+        if missing_fields:
+            self.logger.error('power_mean: skipping batch - missing field(s): %s', missing_fields)
+            return
+
+        sample_number = payload['sample_number']
+        current_batch = payload['current_drive3_batch']
+        voltage_batch = payload['voltage_drive3_batch']
+
+        if not isinstance(current_batch, list) or not isinstance(voltage_batch, list):
+            self.logger.error(
+                'power_mean: skipping batch - current_drive3_batch and '
+                'voltage_drive3_batch must be lists (got %s and %s)',
+                type(current_batch).__name__, type(voltage_batch).__name__
+            )
+            return
+
+        if len(current_batch) == 0 or len(voltage_batch) == 0:
+            self.logger.error(
+                'power_mean: skipping batch - empty pairing (current: %d samples, voltage: %d samples)',
+                len(current_batch), len(voltage_batch)
+            )
+            return
+
+        if len(current_batch) != len(voltage_batch):
+            self.logger.error(
+                'power_mean: skipping batch - batch lengths differ (current: %d, voltage: %d)',
+                len(current_batch), len(voltage_batch)
+            )
+            return
+
+        if not isinstance(sample_number, int) or isinstance(sample_number, bool) or sample_number <= 0:
+            self.logger.error(
+                'power_mean: skipping batch - invalid sample_number: %r', sample_number
+            )
+            return
+
+        if sample_number != len(current_batch):
+            self.logger.error(
+                'power_mean: skipping batch - sample_number (%d) does not match '
+                'the number of paired samples (%d)',
+                sample_number, len(current_batch)
+            )
+            return
+
+        try:
+            current_values = [item['_value'] for item in current_batch]
+            voltage_values = [item['_value'] for item in voltage_batch]
+        except (KeyError, TypeError) as err:
+            self.logger.error('power_mean: skipping batch - sample is missing _value field: %s', err)
+            return
+
+        # Calculate mean of power over the timestamp-aligned paired samples
+        power_batch_sum = sum([current * voltage for current, voltage in zip(current_values, voltage_values)])
+
+        power_mean = round((power_batch_sum / sample_number), 2)
         self.logger.info("power mean result: {}\n".format(power_mean))
 
         result = {
-            'power_mean_result' : power_mean,
-            'name' : 'powerdrive3_mean',
+            'power_mean_result': power_mean,
+            'name': 'powerdrive3_mean',
         }
         # publish result back on MQTT topic 'MeanResult'
         self.client.publish(topic='MeanResult', payload=json.dumps(result))
