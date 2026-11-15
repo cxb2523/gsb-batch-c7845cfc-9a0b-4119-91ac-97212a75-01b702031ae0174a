@@ -1,0 +1,349 @@
+"""Tests for setup_wizard.py."""
+
+import json
+import sys
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+from src.zulipchat_mcp import __version__
+from src.zulipchat_mcp.setup_wizard import (
+    generate_claude_code_command,
+    generate_mcp_config,
+    get_mcp_client_config_path,
+    scan_for_zuliprc_files,
+    select_identity,
+    validate_zuliprc,
+    write_config_to_file,
+)
+from src.zulipchat_mcp.setup_wizard import (
+    main as setup_main,
+)
+
+
+class TestScanForZuliprcFiles:
+    """Tests for scan_for_zuliprc_files."""
+
+    @pytest.fixture
+    def mock_home(self, tmp_path, monkeypatch):
+        """Mock home directory."""
+        monkeypatch.setenv("HOME", str(tmp_path))
+        # Also need to patch Path.home() because in some envs it might not check env var directly or if python started before env set?
+        # Python's Path.home() usually checks HOME.
+        return tmp_path
+
+    def test_finds_standard_locations(self, mock_home):
+        """Test scanning ~/.zuliprc and ~/.config/zulip/zuliprc."""
+        # Create .zuliprc
+        (mock_home / ".zuliprc").write_text("[api]\nkey=123", encoding="utf-8")
+
+        # Create .config/zulip/zuliprc
+        config_dir = mock_home / ".config" / "zulip"
+        config_dir.mkdir(parents=True)
+        (config_dir / "zuliprc").write_text("[api]\nkey=456", encoding="utf-8")
+
+        found = scan_for_zuliprc_files()
+        found_paths = [str(p.resolve()) for p in found]
+
+        assert str((mock_home / ".zuliprc").resolve()) in found_paths
+        assert str((config_dir / "zuliprc").resolve()) in found_paths
+
+    def test_finds_named_variants(self, mock_home):
+        """Test finding .zuliprc-* pattern files."""
+        (mock_home / ".zuliprc-dev").write_text("[api]\nkey=789", encoding="utf-8")
+        found = scan_for_zuliprc_files()
+        found_paths = [str(p.resolve()) for p in found]
+        assert str((mock_home / ".zuliprc-dev").resolve()) in found_paths
+
+    def test_validates_api_section_exists(self, mock_home):
+        """Test that files without [api] section are ignored."""
+        (mock_home / ".zuliprc-invalid").write_text("just some text", encoding="utf-8")
+        found = scan_for_zuliprc_files()
+        found_paths = [str(p.resolve()) for p in found]
+        assert str((mock_home / ".zuliprc-invalid").resolve()) not in found_paths
+
+
+class TestValidateZuliprc:
+    """Tests for validate_zuliprc."""
+
+    @pytest.fixture
+    def mock_client_cls(self):
+        with patch("src.zulipchat_mcp.setup_wizard.Client") as mock:
+            yield mock
+
+    def test_valid_credentials_user(self, mock_client_cls, tmp_path):
+        """Test validation of valid user credentials."""
+        # Setup mock
+        client_instance = MagicMock()
+        client_instance.get_profile.return_value = {
+            "result": "success",
+            "full_name": "Test User",
+            "email": "user@example.com",
+            "is_bot": False,
+        }
+        mock_client_cls.return_value = client_instance
+
+        # Create dummy file
+        zuliprc = tmp_path / "zuliprc"
+        zuliprc.write_text(
+            "[api]\nemail=file@example.com\nkey=file-key\nsite=https://file.example.com\n"
+        )
+
+        result = validate_zuliprc(zuliprc, silent=True)
+
+        assert result is not None
+        assert result["name"] == "Test User"
+        assert result["email"] == "user@example.com"
+        assert result["is_bot"] is False
+        assert result["path"] == str(zuliprc.resolve())
+
+    def test_valid_credentials_bot(self, mock_client_cls, tmp_path):
+        """Test validation of valid bot credentials."""
+        client_instance = MagicMock()
+        client_instance.get_profile.return_value = {
+            "result": "success",
+            "full_name": "Test Bot",
+            "email": "bot@example.com",
+            "is_bot": True,
+        }
+        mock_client_cls.return_value = client_instance
+
+        zuliprc = tmp_path / "zuliprc"
+        zuliprc.write_text(
+            "[api]\nemail=file@example.com\nkey=file-key\nsite=https://file.example.com\n"
+        )
+
+        result = validate_zuliprc(zuliprc, silent=True)
+
+        assert result is not None
+        assert result["is_bot"] is True
+
+    def test_invalid_credentials(self, mock_client_cls, tmp_path):
+        """Test handling of invalid credentials."""
+        client_instance = MagicMock()
+        client_instance.get_profile.return_value = {
+            "result": "error",
+            "msg": "Invalid API key",
+        }
+        mock_client_cls.return_value = client_instance
+
+        zuliprc = tmp_path / "zuliprc"
+        zuliprc.write_text(
+            "[api]\nemail=file@example.com\nkey=file-key\nsite=https://file.example.com\n"
+        )
+
+        result = validate_zuliprc(zuliprc, silent=True)
+        assert result is None
+
+    def test_file_not_found(self, tmp_path):
+        """Test handling of missing file."""
+        result = validate_zuliprc(tmp_path / "nonexistent", silent=True)
+        assert result is None
+
+
+class TestGenerateMcpConfig:
+    """Tests for config generation."""
+
+    def test_user_only_config(self):
+        """Test config generation with user credentials only."""
+        user_config = {"path": "/path/to/zuliprc"}
+        config = generate_mcp_config(user_config)
+
+        assert "uv" in config["command"]
+        assert "zulipchat-mcp" in config["args"][1]
+        assert "--zulip-config-file" in config["args"]
+        assert "/path/to/zuliprc" in config["args"]
+        assert "--zulip-bot-config-file" not in config["args"]
+
+    def test_user_and_bot_config(self):
+        """Test config generation with both identities."""
+        user_config = {"path": "/path/to/user"}
+        bot_config = {"path": "/path/to/bot"}
+        config = generate_mcp_config(user_config, bot_config)
+
+        assert "--zulip-bot-config-file" in config["args"]
+        assert "/path/to/bot" in config["args"]
+
+    def test_generate_claude_code_command(self):
+        """Test claude code command generation."""
+        user_config = {"path": "/path/to/user"}
+        bot_config = {"path": "/path/to/bot"}
+        cmd = generate_claude_code_command(user_config, bot_config)
+
+        assert "claude mcp add zulipchat" in cmd
+        assert "-e ZULIP_CONFIG_FILE=/path/to/user" in cmd
+        assert "-e ZULIP_BOT_CONFIG_FILE=/path/to/bot" in cmd
+
+
+class TestWriteConfigToFile:
+    """Tests for write_config_to_file."""
+
+    def test_creates_new_config(self, tmp_path):
+        """Test creating new config file."""
+        config_path = tmp_path / "config.json"
+        mcp_config = {"command": "test"}
+
+        success = write_config_to_file(config_path, "server", mcp_config)
+
+        assert success is True
+        assert config_path.exists()
+
+        content = json.loads(config_path.read_text())
+        assert content["mcpServers"]["server"] == mcp_config
+
+    def test_merges_with_existing(self, tmp_path):
+        """Test merging with existing config."""
+        config_path = tmp_path / "config.json"
+        existing = {"mcpServers": {"other": {}}}
+        config_path.write_text(json.dumps(existing))
+
+        mcp_config = {"command": "test"}
+        write_config_to_file(config_path, "server", mcp_config)
+
+        content = json.loads(config_path.read_text())
+        assert "other" in content["mcpServers"]
+        assert "server" in content["mcpServers"]
+
+    def test_creates_backup(self, tmp_path):
+        """Test that backup is created."""
+        config_path = tmp_path / "config.json"
+        config_path.write_text("{}")
+
+        write_config_to_file(config_path, "server", {})
+
+        backup = tmp_path / "config.json.bak"
+        assert backup.exists()
+
+
+class TestHelpers:
+    """Tests for helper functions."""
+
+    def test_get_mcp_client_config_path(self, monkeypatch, tmp_path):
+        """Test path resolution."""
+        monkeypatch.setenv("HOME", str(tmp_path))
+
+        # Claude Desktop (linux fallback)
+        if sys.platform not in ["darwin", "win32"]:
+            expected = tmp_path / ".config" / "Claude" / "claude_desktop_config.json"
+            assert get_mcp_client_config_path("claude-desktop") == expected
+
+        # Gemini (creates default path if not exists)
+        expected = tmp_path / ".gemini" / "settings.json"
+        assert get_mcp_client_config_path("gemini") == expected
+
+    def test_select_identity_manual_entry(self, monkeypatch):
+        """Test selecting identity with manual entry."""
+        monkeypatch.setattr("builtins.input", lambda _: "/manual/path")
+
+        with patch("src.zulipchat_mcp.setup_wizard.validate_zuliprc") as mock_validate:
+            mock_validate.return_value = {"valid": True}
+
+            # Empty list triggers manual entry prompt immediately?
+            # No, logic says: if not available: prompt(Enter path...)
+
+            result = select_identity([], "User")
+            assert result == {"valid": True}
+            mock_validate.assert_called()
+
+
+class TestSetupWizardCli:
+    """CLI behavior tests for setup wizard."""
+
+    def test_version_flag(self, capsys):
+        """Test --version exits cleanly and prints package version."""
+        with pytest.raises(SystemExit) as exc:
+            setup_main(["--version"])
+        assert exc.value.code == 0
+        out = capsys.readouterr().out
+        assert __version__ in out
+
+
+class TestIdentitySelectionHeuristics:
+    """Tests for identity ordering heuristics in selection."""
+
+    def test_user_selection_prefers_non_bot_like_zuliprc(self, tmp_path, monkeypatch):
+        """User identity should default to non-bot-looking config."""
+        bot_cfg = tmp_path / ".zuliprc-bot"
+        bot_cfg.write_text("[api]\nemail=assistant-bot@example.com\n", encoding="utf-8")
+        user_cfg = tmp_path / ".zuliprc-user"
+        user_cfg.write_text("[api]\nemail=human@example.com\n", encoding="utf-8")
+
+        monkeypatch.setattr("builtins.input", lambda _: "")
+
+        with patch("src.zulipchat_mcp.setup_wizard.validate_zuliprc") as mock_validate:
+            mock_validate.return_value = {"ok": True}
+
+            result = select_identity([bot_cfg, user_cfg], "User")
+            assert result == {"ok": True}
+            mock_validate.assert_called_once_with(user_cfg)
+
+    def test_bot_selection_prefers_bot_like_zuliprc(self, tmp_path, monkeypatch):
+        """Bot identity should default to bot-looking config."""
+        user_cfg = tmp_path / ".zuliprc-user"
+        user_cfg.write_text("[api]\nemail=human@example.com\n", encoding="utf-8")
+        bot_cfg = tmp_path / ".zuliprc-bot"
+        bot_cfg.write_text("[api]\nemail=assistant-bot@example.com\n", encoding="utf-8")
+
+        monkeypatch.setattr("builtins.input", lambda _: "")
+
+        with patch("src.zulipchat_mcp.setup_wizard.validate_zuliprc") as mock_validate:
+            mock_validate.return_value = {"ok": True}
+
+            result = select_identity([user_cfg, bot_cfg], "Bot")
+            assert result == {"ok": True}
+            mock_validate.assert_called_once_with(bot_cfg)
+
+
+class TestWizardSafety:
+    """The default choice, backups and what reaches the terminal."""
+
+    def test_your_own_zuliprc_is_listed_before_files_that_merely_arrived(
+        self, tmp_path, monkeypatch
+    ):
+        import os
+
+        home, checkout = tmp_path / "home", tmp_path / "checkout"
+        (home / "Downloads").mkdir(parents=True)
+        checkout.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.chdir(checkout)
+        mine = home / ".zuliprc"
+        named = home / ".zuliprc-lab"
+        downloaded = home / "Downloads" / "zuliprc-team"
+        shipped = checkout / "zuliprc"
+        for age, path in enumerate((downloaded, shipped, named, mine)):
+            path.write_text("[api]\nemail=x@example.com\n", encoding="utf-8")
+            os.utime(path, (2_000_000_000 - age, 2_000_000_000 - age))  # newest first
+        assert scan_for_zuliprc_files() == [mine, named, downloaded, shipped]
+
+    def test_a_second_run_keeps_the_first_backup_and_the_file_mode(self, tmp_path):
+        import os
+
+        config_path = tmp_path / "config.json"
+        config_path.write_text('{"original": true}')
+        os.chmod(config_path, 0o600)
+        assert write_config_to_file(config_path, "server", {"command": "a"})
+        assert write_config_to_file(config_path, "server", {"command": "b"})
+        assert (tmp_path / "config.json.bak").read_text() == '{"original": true}'
+        assert len(list(tmp_path.glob("config.json.bak-*"))) == 1
+        assert os.stat(config_path).st_mode & 0o777 == 0o600
+        assert not list(tmp_path.glob(".config.json.*"))  # no temp file left
+
+    def test_a_failed_write_leaves_the_client_config_untouched(self, tmp_path):
+        config_path = tmp_path / "config.json"
+        config_path.write_text('{"mcpServers": {"keep": {}}}')
+        assert not write_config_to_file(config_path, "server", {"bad": object()})
+        assert config_path.read_text() == '{"mcpServers": {"keep": {}}}'
+
+    def test_server_supplied_text_cannot_send_terminal_escapes(self):
+        from src.zulipchat_mcp.setup_wizard import _plain
+
+        assert _plain("Eve\x1b[2J\x1b]0;owned\x07 Admin\r\n") == "Eve[2J]0;owned Admin"
+
+    def test_generated_commands_pin_this_version(self):
+        from src.zulipchat_mcp import __version__
+
+        config = generate_mcp_config({"path": "/u"}, use_uvx=True)
+        assert config["args"][0] == f"zulipchat-mcp@{__version__}"
+        command = generate_claude_code_command({"path": "/u"})
+        assert f"-- uvx zulipchat-mcp@{__version__}" in command

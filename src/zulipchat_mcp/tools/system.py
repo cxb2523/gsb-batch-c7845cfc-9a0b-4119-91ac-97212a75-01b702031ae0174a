@@ -1,0 +1,83 @@
+"""System tools for ZulipChat MCP v0.4.0.
+
+System information and identity management tools.
+"""
+
+from typing import Any, Literal
+
+from ..config import get_client, get_config_manager, set_current_identity
+from ..core.security import local_access_allowed
+
+
+async def switch_identity(identity: Literal["user", "bot"]) -> dict[str, Any]:
+    """Switch between user and bot identity contexts.
+
+    This sets the global identity state that all tools will use.
+    """
+    if not local_access_allowed():
+        return {
+            "status": "error",
+            "error": "Identity switching is only available over stdio; HTTP uses the configured user identity",
+        }
+    config = get_config_manager()
+
+    try:
+        if identity == "bot" and not config.has_bot_credentials():
+            return {
+                "status": "error",
+                "error": "Bot credentials not configured",
+                "suggestion": "Use --zulip-bot-config-file to specify bot zuliprc",
+            }
+
+        # Persist the identity choice globally
+        set_current_identity(identity)
+
+        # Create client to verify and get info
+        client = get_client()
+
+        return {
+            "status": "success",
+            "identity": client.identity,
+            "identity_name": client.identity_name,
+            "current_email": client.current_email,
+        }
+
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
+
+async def server_info() -> dict[str, Any]:
+    """Get ZulipChat MCP server information and capabilities."""
+    config = get_config_manager()
+    account = config.resolved_account()
+    bot_available = config.has_bot_credentials()
+
+    return {
+        "status": "success",
+        "server_name": "ZulipChat MCP",
+        "version": "0.8.0",
+        "available_identities": {
+            "user": {
+                "available": True,
+                "email": account.user_email,
+                "site": account.site,
+            },
+            "bot": {
+                "available": bot_available,
+                "email": account.bot_email if bot_available else None,
+                "site": account.bot_site if bot_available else None,
+                "name": config.config.bot_name,
+                "name_source": "configured_label",
+            },
+        },
+        "features": [
+            "messaging",
+            "search_with_fuzzy_users",
+            "stream_management",
+            "user_management",
+            "event_system",
+            "file_uploads",
+            "dual_identity",
+        ],
+        "zulip_site": account.site,
+    }

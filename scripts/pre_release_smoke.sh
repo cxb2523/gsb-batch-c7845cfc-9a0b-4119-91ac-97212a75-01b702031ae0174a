@@ -1,0 +1,169 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage: scripts/pre_release_smoke.sh --version X.Y.Z [options]
+
+Options:
+  --python VERSION       Python version for wheel smoke venv (default: 3.12)
+  --allow-dirty          Skip clean working tree enforcement in preflight
+  --allow-existing-tag   Skip local tag-availability enforcement in preflight
+  --with-git             Also smoke-test GitHub install via uvx --from git+...
+  --git-ref REF          Git ref for --with-git (default: main)
+  --with-testpypi        Also smoke-test TestPyPI install for this version
+  -h, --help             Show this help text
+EOF
+}
+
+VERSION=""
+PYTHON_VERSION="3.12"
+ALLOW_DIRTY=0
+ALLOW_EXISTING_TAG=0
+WITH_GIT=0
+GIT_REF="main"
+WITH_TESTPYPI=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --version)
+      VERSION="${2:-}"
+      shift 2
+      ;;
+    --python)
+      PYTHON_VERSION="${2:-}"
+      shift 2
+      ;;
+    --allow-dirty)
+      ALLOW_DIRTY=1
+      shift
+      ;;
+    --allow-existing-tag)
+      ALLOW_EXISTING_TAG=1
+      shift
+      ;;
+    --with-git)
+      WITH_GIT=1
+      shift
+      ;;
+    --git-ref)
+      GIT_REF="${2:-}"
+      shift 2
+      ;;
+    --with-testpypi)
+      WITH_TESTPYPI=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "Unknown option: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+done
+
+if [[ -z "$VERSION" ]]; then
+  echo "ERROR: --version is required" >&2
+  usage >&2
+  exit 2
+fi
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT_DIR"
+
+SMOKE_TMP_DIR="$(mktemp -d /tmp/zulipchat-mcp-smoke-XXXXXX)"
+cleanup() {
+  rm -rf "$SMOKE_TMP_DIR"
+}
+trap cleanup EXIT
+SMOKE_VENV="$SMOKE_TMP_DIR/venv"
+SMOKE_CONFIG="$SMOKE_TMP_DIR/zuliprc"
+cat > "$SMOKE_CONFIG" <<'EOF'
+[api]
+email=test@example.com
+key=test-key
+site=http://127.0.0.1:9
+EOF
+
+smoke_command() {
+  # Configuration imports must not discover the operator's repository .env.
+  (cd "$SMOKE_TMP_DIR" && env \
+    ZULIP_CONFIG_FILE="$SMOKE_CONFIG" ZULIP_BOT_CONFIG_FILE="$SMOKE_CONFIG" \
+    ZULIP_EMAIL=test@example.com ZULIP_API_KEY=test-key \
+    ZULIP_BOT_EMAIL=test@example.com ZULIP_BOT_API_KEY=test-key \
+    ZULIP_SITE=http://127.0.0.1:9 XDG_STATE_HOME="$SMOKE_TMP_DIR/state" "$@")
+}
+
+PREFLIGHT_ARGS=(--version "$VERSION")
+if [[ "$ALLOW_DIRTY" -eq 1 ]]; then
+  PREFLIGHT_ARGS+=(--allow-dirty)
+fi
+if [[ "$ALLOW_EXISTING_TAG" -eq 1 ]]; then
+  PREFLIGHT_ARGS+=(--allow-existing-tag)
+fi
+
+echo "==> Release preflight checklist"
+uv run python scripts/release_preflight.py "${PREFLIGHT_ARGS[@]}"
+
+echo "==> Local entrypoint smoke (project env)"
+smoke_command uv run --project "$ROOT_DIR" zulipchat-mcp --version
+smoke_command uv run --project "$ROOT_DIR" zulipchat-mcp-setup --version
+smoke_command uv run --project "$ROOT_DIR" zulipchat-mcp-integrate --version
+smoke_command uv run --project "$ROOT_DIR" zulipchat-mcp-integrate list
+smoke_command uv run --project "$ROOT_DIR" zulipchat-mcp-agents --help > /dev/null
+
+echo "==> MCP stdio smoke (project env, fake credentials)"
+uv run python scripts/mcp_stdio_smoke.py --expected-version "$VERSION" -- uv run zulipchat-mcp
+
+echo "==> Build package artifacts"
+uv build
+
+uv venv "$SMOKE_VENV" --python "$PYTHON_VERSION"
+
+NORMALIZED_VERSION="$(uv run python -c 'import sys; from packaging.version import Version; print(Version(sys.argv[1]))' "$VERSION")"
+WHEEL_PATH="dist/zulipchat_mcp-${NORMALIZED_VERSION}-py3-none-any.whl"
+if [[ ! -f "$WHEEL_PATH" ]]; then
+  echo "ERROR: Expected wheel not found: $WHEEL_PATH" >&2
+  exit 1
+fi
+uv pip install --python "$SMOKE_VENV/bin/python" "$WHEEL_PATH"
+
+echo "==> Installed-wheel entrypoint smoke"
+smoke_command "$SMOKE_VENV/bin/zulipchat-mcp" --version
+smoke_command "$SMOKE_VENV/bin/zulipchat-mcp-setup" --version
+smoke_command "$SMOKE_VENV/bin/zulipchat-mcp-integrate" --version
+smoke_command "$SMOKE_VENV/bin/zulipchat-mcp-integrate" list
+smoke_command "$SMOKE_VENV/bin/zulipchat-mcp-agents" --help > /dev/null
+
+echo "==> Installed-wheel MCP stdio smoke (fake credentials)"
+uv run --no-project --python "$SMOKE_VENV/bin/python" scripts/mcp_stdio_smoke.py \
+  --expected-version "$VERSION" \
+  -- "$SMOKE_VENV/bin/zulipchat-mcp"
+
+echo "==> Companion commands resolve from the built wheel through uvx --from"
+for companion in zulipchat-mcp-setup zulipchat-mcp-integrate zulipchat-mcp-agents; do
+  smoke_command uvx --from "$ROOT_DIR/$WHEEL_PATH" "$companion" --help > /dev/null
+done
+
+if [[ "$WITH_GIT" -eq 1 ]]; then
+  echo "==> GitHub install smoke (ref: $GIT_REF)"
+  smoke_command uvx --from "git+https://github.com/akougkas/zulipchat-mcp.git@${GIT_REF}" zulipchat-mcp --version
+  smoke_command uvx --from "git+https://github.com/akougkas/zulipchat-mcp.git@${GIT_REF}" zulipchat-mcp-setup --version
+  smoke_command uvx --from "git+https://github.com/akougkas/zulipchat-mcp.git@${GIT_REF}" zulipchat-mcp-integrate --version
+  smoke_command uvx --from "git+https://github.com/akougkas/zulipchat-mcp.git@${GIT_REF}" zulipchat-mcp-agents --help > /dev/null
+fi
+
+if [[ "$WITH_TESTPYPI" -eq 1 ]]; then
+  echo "==> TestPyPI install smoke (version: $VERSION)"
+  smoke_command uvx \
+    --index-url https://test.pypi.org/simple/ \
+    --extra-index-url https://pypi.org/simple/ \
+    "zulipchat-mcp==${VERSION}" \
+    --version
+fi
+
+echo "==> Pre-release smoke completed"

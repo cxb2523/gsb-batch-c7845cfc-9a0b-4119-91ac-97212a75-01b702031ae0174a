@@ -1,0 +1,313 @@
+"""Scheduled messaging tools for ZulipChat MCP v0.4.0.
+
+Clean implementation of Zulip's scheduled message API endpoints.
+Direct mapping to API without unnecessary complexity.
+"""
+
+import asyncio
+from datetime import datetime, timezone
+from typing import Any, Literal
+
+from ..config import get_client
+from ..core.api_errors import api_error
+
+
+async def get_scheduled_messages() -> dict[str, Any]:
+    """Get all scheduled messages for the current user."""
+    client = get_client()
+
+    try:
+        result = await asyncio.to_thread(
+            lambda: client.client.call_endpoint(
+                "scheduled_messages", method="GET", request={}
+            )
+        )
+
+        if result.get("result") == "success":
+            return {
+                "status": "success",
+                "scheduled_messages": result.get("scheduled_messages", []),
+                "count": len(result.get("scheduled_messages", [])),
+            }
+        else:
+            return api_error(result, "Failed to get scheduled messages")
+
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
+
+async def create_scheduled_message(
+    type: Literal["stream", "private", "channel", "direct"],
+    to: int | list[int],  # Channel ID or list of user IDs
+    content: str,
+    scheduled_delivery_timestamp: int,
+    topic: str | None = None,
+    read_by_sender: bool = True,
+) -> dict[str, Any]:
+    """Create a scheduled message using Zulip's native API."""
+    client = get_client()
+
+    try:
+        # Validate required parameters
+        if type in ["stream", "channel"] and not topic:
+            return {
+                "status": "error",
+                "error": "Topic required for stream/channel messages",
+            }
+
+        # Prepare request data
+        request_data = {
+            "type": type,
+            "to": to,
+            "content": content,
+            "scheduled_delivery_timestamp": scheduled_delivery_timestamp,
+            "read_by_sender": read_by_sender,
+        }
+
+        if topic:
+            request_data["topic"] = topic
+
+        result = await asyncio.to_thread(
+            lambda: client.client.call_endpoint(
+                "scheduled_messages", method="POST", request=request_data
+            )
+        )
+
+        if result.get("result") == "success":
+            return {
+                "status": "success",
+                "scheduled_message_id": result.get("scheduled_message_id"),
+                "scheduled_at": datetime.fromtimestamp(
+                    scheduled_delivery_timestamp
+                ).isoformat(),
+            }
+        else:
+            return api_error(result, "Failed to create scheduled message")
+
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
+
+async def update_scheduled_message(
+    scheduled_message_id: int,
+    type: Literal["stream", "private", "channel", "direct"] | None = None,
+    to: int | list[int] | None = None,
+    content: str | None = None,
+    topic: str | None = None,
+    scheduled_delivery_timestamp: int | None = None,
+) -> dict[str, Any]:
+    """Update a scheduled message's attributes."""
+    client = get_client()
+
+    try:
+        # Build update data from provided parameters
+        request_data: dict[str, Any] = {}
+        if type is not None:
+            request_data["type"] = type
+        if to is not None:
+            request_data["to"] = to
+        if content is not None:
+            request_data["content"] = content
+        if topic is not None:
+            request_data["topic"] = topic
+        if scheduled_delivery_timestamp is not None:
+            request_data["scheduled_delivery_timestamp"] = scheduled_delivery_timestamp
+
+        if not request_data:
+            return {
+                "status": "error",
+                "error": "Must provide at least one field to update",
+            }
+
+        result = await asyncio.to_thread(
+            lambda: client.client.call_endpoint(
+                f"scheduled_messages/{scheduled_message_id}",
+                method="PATCH",
+                request=request_data,
+            )
+        )
+
+        if result.get("result") == "success":
+            return {
+                "status": "success",
+                "scheduled_message_id": scheduled_message_id,
+                "updated_fields": list(request_data.keys()),
+                "new_delivery_time": (
+                    datetime.fromtimestamp(scheduled_delivery_timestamp).isoformat()
+                    if scheduled_delivery_timestamp
+                    else None
+                ),
+            }
+        else:
+            return api_error(result, "Failed to update scheduled message")
+
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
+
+async def delete_scheduled_message(scheduled_message_id: int) -> dict[str, Any]:
+    """Delete (cancel) a scheduled message."""
+    client = get_client()
+
+    try:
+        result = await asyncio.to_thread(
+            lambda: client.client.call_endpoint(
+                f"scheduled_messages/{scheduled_message_id}",
+                method="DELETE",
+                request={},
+            )
+        )
+
+        if result.get("result") == "success":
+            return {
+                "status": "success",
+                "scheduled_message_id": scheduled_message_id,
+                "action": "deleted",
+            }
+        else:
+            return api_error(result, "Failed to delete scheduled message")
+
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
+
+async def manage_scheduled_message(
+    action: Literal["create", "update", "delete"],
+    # Create/update params
+    type: Literal["stream", "private", "channel", "direct"] | None = None,
+    to: int | list[int] | None = None,
+    content: str | None = None,
+    topic: str | None = None,
+    scheduled_delivery_timestamp: int | None = None,
+    read_by_sender: bool = True,
+    # Update/delete params
+    scheduled_message_id: int | None = None,
+) -> dict[str, Any]:
+    """Create, update, or delete a scheduled message."""
+    if action == "create":
+        if not type or to is None or not content or not scheduled_delivery_timestamp:
+            return {
+                "status": "error",
+                "error": "type, to, content, and scheduled_delivery_timestamp required for create",
+            }
+        return await create_scheduled_message(
+            type=type,
+            to=to,
+            content=content,
+            scheduled_delivery_timestamp=scheduled_delivery_timestamp,
+            topic=topic,
+            read_by_sender=read_by_sender,
+        )
+    elif action == "update":
+        if not scheduled_message_id:
+            return {
+                "status": "error",
+                "error": "scheduled_message_id required for update",
+            }
+        return await update_scheduled_message(
+            scheduled_message_id=scheduled_message_id,
+            type=type,
+            to=to,
+            content=content,
+            topic=topic,
+            scheduled_delivery_timestamp=scheduled_delivery_timestamp,
+        )
+    elif action == "delete":
+        if not scheduled_message_id:
+            return {
+                "status": "error",
+                "error": "scheduled_message_id required for delete",
+            }
+        return await delete_scheduled_message(scheduled_message_id)
+    else:
+        return {"status": "error", "error": f"Unknown action: {action}"}
+
+
+def _timestamp(value: datetime | str) -> int:
+    # Python 3.10 fromisoformat rejects a trailing Z.
+    when = (
+        datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if isinstance(value, str)
+        else value
+    )
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return int(when.timestamp())
+
+
+def _iso(timestamp: Any) -> str | None:
+    if not isinstance(timestamp, (int, float)):
+        return None
+    return datetime.fromtimestamp(timestamp, timezone.utc).isoformat()
+
+
+async def manage_reminders(
+    action: Literal["list", "create", "delete"],
+    message_id: int | None = None,
+    deliver_at: datetime | str | None = None,
+    note: str | None = None,
+    reminder_id: int | None = None,
+) -> dict[str, Any]:
+    """List, create, or delete message reminders (FL 381/399/415).
+
+    Naive deliver_at values are UTC.
+    """
+    client = get_client()
+    try:
+        if action == "list":
+            result = await asyncio.to_thread(
+                client.client.call_endpoint, "reminders", method="GET", request={}
+            )
+            if result.get("result") != "success":
+                return api_error(result, "Failed to list reminders")
+            reminders = [
+                {
+                    "reminder_id": r.get("reminder_id"),
+                    "message_id": r.get("reminder_target_message_id"),
+                    "deliver_at": _iso(r.get("scheduled_delivery_timestamp")),
+                    "failed": r.get("failed", False),
+                }
+                for r in result.get("reminders", [])
+            ]
+            return {
+                "status": "success",
+                "reminders": reminders,
+                "count": len(reminders),
+            }
+
+        if action == "create":
+            if message_id is None or deliver_at is None:
+                return {
+                    "status": "error",
+                    "error": "message_id and deliver_at are required to create",
+                }
+            request: dict[str, Any] = {
+                "message_id": message_id,
+                "scheduled_delivery_timestamp": _timestamp(deliver_at),
+            }
+            if note:
+                request["note"] = note
+            result = await asyncio.to_thread(
+                client.client.call_endpoint, "reminders", method="POST", request=request
+            )
+            if result.get("result") != "success":
+                return api_error(result, "Failed to create reminder")
+            return {
+                "status": "success",
+                "reminder_id": result.get("reminder_id"),
+                "deliver_at": _iso(request["scheduled_delivery_timestamp"]),
+            }
+
+        if reminder_id is None:
+            return {"status": "error", "error": "reminder_id is required to delete"}
+        result = await asyncio.to_thread(
+            client.client.call_endpoint,
+            f"reminders/{reminder_id}",
+            method="DELETE",
+            request={},
+        )
+        if result.get("result") != "success":
+            return api_error(result, "Failed to delete reminder")
+        return {"status": "success", "reminder_id": reminder_id, "deleted": True}
+    except Exception as e:
+        return {"status": "error", "error": str(e)}

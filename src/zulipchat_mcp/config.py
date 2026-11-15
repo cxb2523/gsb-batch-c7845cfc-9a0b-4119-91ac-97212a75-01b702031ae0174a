@@ -1,0 +1,405 @@
+"""Configuration management for ZulipChat MCP Server.
+
+Supports zuliprc files and environment-variable credentials.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+from collections.abc import Iterator
+from configparser import ConfigParser
+from configparser import Error as ConfigParserError
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass
+from functools import lru_cache
+from pathlib import Path
+from typing import TYPE_CHECKING
+from urllib.parse import urlsplit, urlunsplit
+
+if TYPE_CHECKING:
+    from .core.client import ZulipClientWrapper
+
+try:
+    from pathlib import Path
+
+    from dotenv import dotenv_values
+
+    # Load credentials from a .env file for development (current directory).
+    # Hosts start this server inside the project they have open, so that file
+    # can belong to an untrusted checkout. It supplies credentials and nothing
+    # else: never a config file path, a proxy, a CA bundle, TLS settings or a
+    # policy. A credential set comes from one source, so a key from the real
+    # environment is never paired with a site from the file.
+    # Blank entries are skipped: a templated .env leaves keys like `ZULIP_SITE=`
+    # present but empty, and the Zulip SDK would read "" over a config file.
+    _USER_KEYS = ("ZULIP_EMAIL", "ZULIP_API_KEY", "ZULIP_SITE")
+    _BOT_KEYS = ("ZULIP_BOT_EMAIL", "ZULIP_BOT_API_KEY")
+    env_path = Path.cwd() / ".env"
+    if env_path.exists():
+        _file = dotenv_values(env_path)
+        _present = {key for key in (*_USER_KEYS, *_BOT_KEYS) if key in os.environ}
+        for _keys in (
+            _USER_KEYS if not _present else (),
+            _BOT_KEYS if not _present.intersection(_BOT_KEYS) else (),
+        ):
+            for _key in _keys:
+                _value = _file.get(_key)
+                if _value and _value.strip():
+                    os.environ[_key] = _value
+except ImportError:
+    # python-dotenv not available, skip loading .env
+    pass
+
+
+@dataclass
+class ZulipConfig:
+    """Zulip configuration settings."""
+
+    email: str | None
+    api_key: str | None
+    site: str | None
+    config_file: str | None = None
+    debug: bool = False
+    port: int = 3000
+    # Bot credentials for AI agents
+    bot_email: str | None = None
+    bot_api_key: str | None = None
+    bot_name: str = "Claude Code"
+    bot_avatar_url: str | None = None
+    bot_config_file: str | None = None
+
+
+@dataclass(frozen=True)
+class ResolvedAccount:
+    """Non-secret effective account identity for persistent-state association."""
+
+    site: str
+    user_email: str
+    bot_site: str
+    bot_email: str
+
+    @property
+    def fingerprint(self) -> str:
+        identity = json.dumps(
+            [self.site, self.user_email, self.bot_site, self.bot_email]
+        )
+        return hashlib.sha256(identity.encode("utf-8")).hexdigest()
+
+
+def _normalize_site(site: str) -> str:
+    parsed = urlsplit(site)
+    return urlunsplit(
+        (parsed.scheme.lower(), parsed.netloc.lower(), parsed.path.rstrip("/"), "", "")
+    )
+
+
+def load_zuliprc_credentials(config_file: str) -> dict[str, str]:
+    """Resolve one file's credentials without SDK environment overrides."""
+    config_file = str(Path(config_file).expanduser())
+    parser = ConfigParser(interpolation=None)
+    try:
+        with open(config_file, encoding="utf-8") as handle:
+            parser.read_file(handle)
+        credentials = {
+            "email": parser.get("api", "email").strip(),
+            "api_key": parser.get("api", "key").strip(),
+            "site": parser.get("api", "site").strip(),
+            "config_file": config_file,
+        }
+    except ConfigParserError:
+        # The parser's own messages quote the offending lines, API key included.
+        raise ValueError(
+            f"{config_file} is not a valid zuliprc: it needs an [api] section "
+            "with email, key and site"
+        ) from None
+    if not all(credentials.values()):
+        raise ValueError("Zulip config file requires nonempty email, key, and site")
+    return credentials
+
+
+class ConfigManager:
+    """Configuration manager - Zuliprc First."""
+
+    def __init__(
+        self,
+        config_file: str | None = None,
+        bot_config_file: str | None = None,
+        debug: bool | None = None,
+    ) -> None:
+        self.config = self._load_config(
+            cli_config_file=config_file,
+            cli_bot_config_file=bot_config_file,
+            cli_debug=debug,
+        )
+
+    def _load_config(
+        self,
+        cli_config_file: str | None = None,
+        cli_bot_config_file: str | None = None,
+        cli_debug: bool | None = None,
+    ) -> ZulipConfig:
+        """Load configuration from env/CLI/defaults with zuliprc + env support."""
+        # Check environment for config file paths
+        final_config_file = self._get_config_file() or cli_config_file
+        final_bot_config_file = self._get_bot_config_file() or cli_bot_config_file
+
+        # Check standard locations if not provided
+        if not final_config_file:
+            final_config_file = self._find_default_config()
+
+        # Optional settings
+        final_debug = self._get_debug() if cli_debug is None else cli_debug
+        final_port = self._get_port()
+
+        return ZulipConfig(
+            email=self._env("ZULIP_EMAIL"),
+            api_key=self._env("ZULIP_API_KEY"),
+            site=self._env("ZULIP_SITE"),
+            config_file=(
+                str(Path(final_config_file).expanduser()) if final_config_file else None
+            ),
+            debug=final_debug,
+            port=final_port,
+            bot_email=self._env("ZULIP_BOT_EMAIL"),
+            bot_api_key=self._env("ZULIP_BOT_API_KEY"),
+            bot_config_file=(
+                str(Path(final_bot_config_file).expanduser())
+                if final_bot_config_file
+                else None
+            ),
+        )
+
+    def _find_default_config(self) -> str | None:
+        """Search for zuliprc in the home directory's standard locations.
+
+        The working directory is not searched: hosts start the server inside
+        the open project, and a checkout must not choose the Zulip server.
+        """
+        import os
+        from pathlib import Path
+
+        home = Path.home()
+        candidates = [
+            os.path.join(home, ".zuliprc"),
+            os.path.join(home, ".config", "zulip", "zuliprc"),
+        ]
+
+        for path in candidates:
+            if os.path.exists(path):
+                return path
+        return None
+
+    @staticmethod
+    def _env(name: str) -> str | None:
+        """Read an environment variable, treating blank values as unset.
+
+        A templated `.env` leaves keys like `ZULIP_SITE=` present but empty.
+        Returning "" here would shadow an explicitly passed --zulip-config-file
+        and surface later as an opaque "No host supplied" URL error, because the
+        Zulip SDK also honours these variables over the config file.
+        """
+        value = os.getenv(name)
+        if value is None:
+            return None
+        return value.strip() or None
+
+    def _get_config_file(self) -> str | None:
+        """Get Zulip config file path from environment variable."""
+        return self._env("ZULIP_CONFIG_FILE")
+
+    def _get_bot_config_file(self) -> str | None:
+        """Get bot config file path."""
+        return self._env("ZULIP_BOT_CONFIG_FILE")
+
+    def _get_debug(self) -> bool:
+        """Get debug mode setting."""
+        debug_str = os.getenv("MCP_DEBUG", "false").lower()
+        return debug_str in ("true", "1", "yes", "on")
+
+    def _get_port(self) -> int:
+        """Get MCP server port."""
+        try:
+            return int(os.getenv("MCP_PORT", "3000"))
+        except ValueError:
+            return 3000
+
+    def validate_config(self) -> bool:
+        """Validate that configuration is present."""
+        if self.config.config_file:
+            if not os.path.exists(self.config.config_file):
+                # Don't raise, just return False to let caller handle error
+                return False
+            return True
+
+        # Check for environment variables
+        if self.config.email and self.config.api_key and self.config.site:
+            return True
+
+        return False
+
+    def has_bot_credentials(self) -> bool:
+        """Check if bot credentials are configured."""
+        if self.config.bot_config_file and os.path.exists(self.config.bot_config_file):
+            return True
+        return bool(self.config.bot_email and self.config.bot_api_key)
+
+    def get_zulip_client_config(self, use_bot: bool = False) -> dict[str, str | None]:
+        """Get configuration dict for Zulip client initialization."""
+        use_bot = use_bot and self.has_bot_credentials()
+        config_file = (
+            self.config.bot_config_file if use_bot else self.config.config_file
+        )
+        if config_file:
+            # Resolve all credentials from the selected file before constructing
+            # the SDK client: its own environment fallback can otherwise replace
+            # bot credentials with the user's ZULIP_EMAIL/ZULIP_API_KEY.
+            return dict(load_zuliprc_credentials(config_file))
+        if use_bot and self.has_bot_credentials():
+            site = self.get_zulip_client_config(use_bot=False)["site"]
+            return {
+                "email": self.config.bot_email,
+                "api_key": self.config.bot_api_key,
+                "site": site,  # Bot uses same site
+                "config_file": self.config.bot_config_file,
+            }
+
+        return {
+            "email": self.config.email,
+            "api_key": self.config.api_key,
+            "site": self.config.site,
+            "config_file": self.config.config_file,
+        }
+
+    def resolved_account(self) -> ResolvedAccount:
+        """Resolve the same selected sources used by SDK client construction."""
+        user = self.get_zulip_client_config(use_bot=False)
+        bot = self.get_zulip_client_config(use_bot=True)
+        if (
+            not user.get("site")
+            or not user.get("email")
+            or not bot.get("site")
+            or not bot.get("email")
+        ):
+            raise ValueError("Account association requires complete Zulip credentials")
+        return ResolvedAccount(
+            _normalize_site(str(user["site"])),
+            str(user["email"]).lower(),
+            _normalize_site(str(bot["site"])),
+            str(bot["email"]).lower(),
+        )
+
+
+# Module-level singleton for ConfigManager
+_config_manager: ConfigManager | None = None
+
+# Global identity state - tracks whether to use bot or user identity
+_current_identity: str = "user"  # "user" or "bot"
+
+
+def init_config_manager(
+    config_file: str | None = None,
+    bot_config_file: str | None = None,
+    debug: bool | None = None,
+) -> ConfigManager:
+    """Initialize the global ConfigManager singleton.
+
+    Must be called once at server startup before any tools access config.
+    Subsequent calls will reinitialize (useful for testing).
+
+    Args:
+        config_file: Path to user zuliprc file
+        bot_config_file: Path to bot zuliprc file
+        debug: Enable debug mode
+
+    Returns:
+        The initialized ConfigManager instance
+    """
+    global _config_manager, _current_identity
+    _config_manager = ConfigManager(
+        config_file=config_file,
+        bot_config_file=bot_config_file,
+        debug=debug,
+    )
+    _current_identity = "user"
+    _get_cached_client.cache_clear()
+    return _config_manager
+
+
+def get_config_manager() -> ConfigManager:
+    """Get the global ConfigManager singleton.
+
+    Returns:
+        The ConfigManager instance
+
+    Raises:
+        RuntimeError: If init_config_manager() was not called first
+    """
+    if _config_manager is None:
+        raise RuntimeError(
+            "ConfigManager not initialized. Call init_config_manager() first."
+        )
+    return _config_manager
+
+
+def set_current_identity(identity: str) -> None:
+    """Set the current identity ('user' or 'bot')."""
+    global _current_identity
+    if identity not in ("user", "bot"):
+        raise ValueError(f"Invalid identity: {identity}. Must be 'user' or 'bot'.")
+    _current_identity = identity
+
+
+_operation_client: ContextVar[ZulipClientWrapper | None] = ContextVar(
+    "zulipchat_operation_client", default=None
+)
+
+
+@contextmanager
+def bind_client(client: ZulipClientWrapper) -> Iterator[None]:
+    """Keep compound operations on one client across awaits and worker threads.
+
+    The binding is local to the current task and is restored even on cancellation.
+    Concurrent identity switches still select the client for subsequent operations.
+    """
+    token = _operation_client.set(client)
+    try:
+        yield
+    finally:
+        _operation_client.reset(token)
+
+
+def get_client() -> ZulipClientWrapper:
+    """Get a ZulipClientWrapper with the current identity.
+
+    Compound operations retain their bound client. Otherwise, use the current
+    identity setting from switch_identity().
+    """
+    bound = _operation_client.get()
+    if bound is not None:
+        return bound
+    config = get_config_manager()
+    use_bot = _current_identity == "bot" and config.has_bot_credentials()
+    return _get_cached_client(config, use_bot)
+
+
+@lru_cache(maxsize=8)
+def _get_cached_client(config: ConfigManager, use_bot: bool) -> ZulipClientWrapper:
+    """Reuse a client and its private caches until configuration is reinitialized."""
+    from .core.client import ZulipClientWrapper
+
+    return ZulipClientWrapper(config, use_bot_identity=use_bot)
+
+
+def get_bot_client() -> ZulipClientWrapper:
+    """Get a ZulipClientWrapper that ALWAYS uses bot identity.
+
+    Use this for operations that must always run as bot regardless
+    of current identity setting (e.g., Agents-Channel operations).
+    """
+    config = get_config_manager()
+    if not config.has_bot_credentials():
+        raise ValueError("Bot credentials not configured")
+    return _get_cached_client(config, True)
