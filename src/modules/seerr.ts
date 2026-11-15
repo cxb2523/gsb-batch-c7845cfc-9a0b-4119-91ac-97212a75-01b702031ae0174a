@@ -1,0 +1,85 @@
+import { ToolModule } from "../types.js";
+import { SeerrClient } from "../seerr.js";
+import { seerrProfileTools, seerrProfileSettings, seerrSetProfile, seerrProfileSchema } from "../tools/seerr-profiles.js";
+import { seerrRequestTools, seerrSearch, seerrCreateRequest, SeerrSearchSchema, SeerrCreateRequestSchema } from "../tools/seerr-requests.js";
+import * as impl from "../tools/seerr.js";
+
+export function seerrModule(client: SeerrClient): ToolModule {
+  return {
+    domain: "Seerr",
+    tools: [
+      ...seerrProfileTools,
+      ...seerrRequestTools,
+      { name: "seerr_get_request", description: "Inspect a request, media availability, season statuses and linked Arr IDs.",
+        inputSchema: { type: "object", properties: { request_id: { type: "integer", minimum: 1 } }, required: ["request_id"] } },
+      { name: "seerr_retry_request", description: "Preview or retry a failed request in Seerr. Applying sends it to the configured Arr service.",
+        inputSchema: { type: "object", properties: { request_id: { type: "integer", minimum: 1 }, preview_only: { type: "boolean", default: true } }, required: ["request_id"] } },
+      {
+        name: "seerr_list_requests",
+        description: "List media requests from family members in Seerr.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            filter: {
+              type: "string",
+              enum: ["all", "pending", "approved", "declined", "available", "processing", "failed", "completed", "unavailable"],
+              description: "Filter by status (default: all)",
+            },
+            take: { type: "integer", minimum: 1, maximum: 100, description: "Number of results (default 20)" },
+            skip: { type: "integer", minimum: 0, description: "Pagination offset (default 0)" },
+            include_titles: { type: "boolean", default: false, description: "Fetch titles using extra metadata calls; disabled by default for speed" },
+          },
+        },
+      },
+      {
+        name: "seerr_approve_request",
+        description: "Approve a pending media request in Seerr.",
+        inputSchema: {
+          type: "object",
+          properties: { request_id: { type: "integer", minimum: 1, description: "Request ID" }, preview_only: { type: "boolean", default: true, description: "Preview by default; false only after human approval" } },
+          required: ["request_id"],
+        },
+      },
+      {
+        name: "seerr_decline_request",
+        description: "Decline a media request in Seerr.",
+        inputSchema: {
+          type: "object",
+          properties: { request_id: { type: "integer", minimum: 1, description: "Request ID" }, preview_only: { type: "boolean", default: true, description: "Preview by default; false only after human approval" } },
+          required: ["request_id"],
+        },
+      },
+      {
+        name: "seerr_delete_request",
+        description: "Delete a media request from Seerr entirely.",
+        inputSchema: {
+          type: "object",
+          properties: { request_id: { type: "integer", minimum: 1, description: "Request ID" }, preview_only: { type: "boolean", default: true, description: "Preview by default; false only after human approval" } },
+          required: ["request_id"],
+        },
+      },
+      {
+        name: "seerr_stats",
+        description: "Show request statistics from Seerr: total, pending, approved, declined, etc.",
+        inputSchema: { type: "object", properties: {}, required: [] },
+      },
+    ],
+
+    async handle(name, args) {
+      switch (name) {
+        case "seerr_get_quality_profile_settings": return seerrProfileSettings(client);
+        case "seerr_set_quality_profile": return seerrSetProfile(client,seerrProfileSchema.parse(args));
+        case "seerr_search": return seerrSearch(client, SeerrSearchSchema.parse(args));
+        case "seerr_create_request": return seerrCreateRequest(client, SeerrCreateRequestSchema.parse(args));
+        case "seerr_get_request": return impl.seerrGetRequest(client, impl.SeerrRequestSchema.parse(args));
+        case "seerr_retry_request": return impl.seerrRetryRequest(client, impl.SeerrRequestActionSchema.parse(args));
+        case "seerr_list_requests":  return impl.seerrListRequests(client, impl.SeerrListSchema.parse(args));
+        case "seerr_approve_request": return impl.seerrApproveRequest(client, impl.SeerrRequestActionSchema.parse(args));
+        case "seerr_decline_request": return impl.seerrDeclineRequest(client, impl.SeerrRequestActionSchema.parse(args));
+        case "seerr_delete_request": return impl.seerrDeleteRequest(client, impl.SeerrRequestActionSchema.parse(args));
+        case "seerr_stats":          return impl.seerrGetStats(client);
+        default: return null;
+      }
+    },
+  };
+}

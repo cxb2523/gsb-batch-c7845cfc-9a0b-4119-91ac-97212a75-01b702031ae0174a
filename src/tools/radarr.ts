@@ -1,0 +1,743 @@
+import { z } from "zod";
+import { ArrClient, ArrCommand, ArrMediaFile, ArrLanguage, describeArrFile, filterArrLanguages, getArrRecords, listArrLanguages, listArrQualityProfiles, submitArrCommand } from "../arr.js";
+import { bytes, QualityProfile } from "../utils.js";
+
+interface RadarrMovie {
+  id: number;
+  title: string;
+  year: number;
+  tmdbId: number;
+  imdbId?: string;
+  overview?: string;
+  status: string;
+  hasFile: boolean;
+  monitored: boolean;
+  sizeOnDisk: number;
+  genres?: string[];
+  ratings?: { imdb?: { value: number } };
+  qualityProfileId?: number;
+  rootFolderPath?: string;
+}
+
+interface RadarrQueueItem {
+  movieId?: number;
+  outputPath?: string;
+  errorMessage?: string;
+  trackedDownloadState?: string;
+  statusMessages?: Array<{ title: string; messages: string[] }>;
+  id: number;
+  title: string;
+  status: string;
+  trackedDownloadStatus: string;
+  size: number;
+  sizeleft: number;
+  timeleft?: string;
+  protocol: string;
+  downloadClient?: string;
+  downloadId?: string;
+}
+
+
+// ─── Schemas ──────────────────────────────────────────────────────────────────
+
+export const RadarrSearchSchema = z.object({
+  title: z.string().describe("Movie title to search for"),
+});
+
+export const RadarrAddMovieSchema = z.object({
+  tmdb_id: z.number().int().positive().optional().describe("Exact TMDB ID; required when applying"),
+  title: z.string().trim().min(1).optional().describe("Title lookup for preview only; choose an exact TMDB ID before applying"),
+  quality_profile: z.string().trim().min(1).optional().describe("Quality profile name (default: Any or first available)"),
+  monitored: z.boolean().default(false),
+  search_for_movie: z.boolean().default(false),
+  preview_only: z.boolean().default(true),
+}).strict().superRefine((input, ctx) => {
+  if (!input.tmdb_id && !input.title) ctx.addIssue({ code: "custom", message: "Provide tmdb_id or title" });
+  if (!input.preview_only && !input.tmdb_id) ctx.addIssue({ code: "custom", message: "Choose an exact tmdb_id before applying" });
+  if (!input.monitored && input.search_for_movie) ctx.addIssue({ code: "custom", message: "An unmonitored addition cannot start an automatic search" });
+});
+
+export const RadarrRemoveMovieSchema = z.object({
+  tmdb_id: z.number().describe("TMDB ID of the movie to remove"),
+  delete_files: z.boolean().optional().default(false).describe("Also delete downloaded files (default false)"),
+});
+
+export const RadarrForceSearchSchema = z.object({
+  tmdb_id: z.number().describe("TMDB ID of the movie to search for"),
+});
+
+export const RadarrListMoviesSchema = z.object({
+  filter: z
+    .enum(["all", "missing", "downloaded", "unmonitored"])
+    .optional()
+    .default("all")
+    .describe("Filter: 'missing' = monitored but no file, 'downloaded' = has file, 'unmonitored' (default: all)"),
+  search: z.string().optional().describe("Only show titles containing this text (case-insensitive)"),
+  limit: z.number().int().positive().optional().default(100).describe("Max titles to return (default 100)"),
+});
+
+// ─── Implementations ──────────────────────────────────────────────────────────
+
+/** Look up a library movie by TMDB ID using Radarr's server-side filter (avoids fetching the whole library). */
+async function getMovieByTmdbId(client: ArrClient, tmdbId: number): Promise<RadarrMovie | undefined> {
+  const matches = await client.get<RadarrMovie[]>("/movie", { tmdbId });
+  return matches[0];
+}
+
+export async function radarrSearchMovie(
+  client: ArrClient,
+  input: z.infer<typeof RadarrSearchSchema>
+): Promise<string> {
+  const results = await client.get<RadarrMovie[]>("/movie/lookup", { term: input.title });
+  if (!results.length) return "No results found.";
+  return results
+    .slice(0, 8)
+    .map((m) => {
+      const rating = m.ratings?.imdb?.value ? ` | IMDb ${m.ratings.imdb.value}` : "";
+      const genres = m.genres?.slice(0, 3).join(", ") ?? "";
+      return `[tmdbId: ${m.tmdbId}] ${m.title} (${m.year})${rating}\n  ${genres}\n  ${(m.overview ?? "").slice(0, 120)}...`;
+    })
+    .join("\n\n");
+}
+
+export async function radarrAddMovie(
+  client: ArrClient,
+  input: z.infer<typeof RadarrAddMovieSchema>
+): Promise<string> {
+  const tmdbId = input.tmdb_id;
+  if (!tmdbId) {
+    const results = await client.get<RadarrMovie[]>("/movie/lookup", { term: input.title });
+    return JSON.stringify({ preview: true, submitted: false, message: "Choose an exact tmdb_id, then preview again before applying.", candidates: results.slice(0, 8).map(m => ({ tmdb_id: m.tmdbId, title: m.title, year: m.year })) });
+  }
+
+  const already = await getMovieByTmdbId(client, tmdbId);
+  if (already) {
+    return JSON.stringify({ preview: input.preview_only, submitted: false, already_exists: true, tmdb_id: tmdbId, title: already.title, movie_id: already.id, monitored: already.monitored, has_file: already.hasFile, message: "Already in the library; existing settings were left unchanged." });
+  }
+
+  const profiles = await client.get<QualityProfile[]>("/qualityprofile");
+  const profile = input.quality_profile
+    ? profiles.find(p => p.name.toLowerCase() === input.quality_profile!.toLowerCase())
+    : profiles.find(p => p.name.toLowerCase() === "any") ?? profiles[0];
+  if (!profile) throw new Error("No matching Radarr quality profile. Use radarr_list_quality_profiles.");
+
+  const roots = await client.get<Array<{ path: string }>>("/rootfolder");
+  const rootFolder = process.env.RADARR_ROOT_FOLDER ?? (roots.length === 1 ? roots[0].path : undefined);
+  if (!rootFolder) throw new Error("Set RADARR_ROOT_FOLDER to choose between Radarr root folders before adding a movie");
+  if (!roots.some(root => root.path === rootFolder)) throw new Error("Configured RADARR_ROOT_FOLDER is not a Radarr root folder");
+
+  const lookup = await client.get<Array<RadarrMovie & { titleSlug?: string; images?: unknown[] }>>("/movie/lookup", { term: `tmdb:${tmdbId}` });
+  const movie = lookup.find(m => m.tmdbId === tmdbId);
+  if (!movie) throw new Error(`Movie with tmdbId ${tmdbId} not found`);
+  const preview = {
+    preview: true, submitted: false, tmdb_id: tmdbId, title: movie.title, year: movie.year,
+    quality_profile: profile.name, quality_profile_id: profile.id, root_folder: rootFolder,
+    monitored: input.monitored, search_for_movie: input.search_for_movie,
+    future_automatic_downloads_possible: input.monitored,
+  };
+  if (input.preview_only) return JSON.stringify(preview);
+
+  try {
+    await client.postOnce<RadarrMovie>("/movie", {
+      title: movie.title,
+      tmdbId: movie.tmdbId,
+      year: movie.year,
+      titleSlug: movie.titleSlug,
+      images: movie.images ?? [],
+      qualityProfileId: profile.id,
+      rootFolderPath: rootFolder,
+      monitored: input.monitored,
+      minimumAvailability: "released",
+      addOptions: { searchForMovie: input.search_for_movie, monitor: input.monitored ? "movieOnly" : "none" },
+    });
+  } catch {
+    throw new Error("Radarr add response was unsuccessful or uncertain. Inspect radarr_list_movies before retrying; the movie may have been added.");
+  }
+  const saved = await getMovieByTmdbId(client, tmdbId);
+  if (!saved || saved.monitored !== input.monitored || saved.qualityProfileId !== profile.id) {
+    throw new Error("Radarr accepted the add, but library verification did not match. Inspect radarr_list_movies before any retry.");
+  }
+  return JSON.stringify({ ...preview, preview: false, submitted: true, verified: true, movie_id: saved.id });
+}
+
+export async function radarrListMovies(
+  client: ArrClient,
+  input: z.infer<typeof RadarrListMoviesSchema>
+): Promise<string> {
+  const movies = await client.get<RadarrMovie[]>("/movie");
+  if (!movies.length) return "No movies in library yet.";
+
+  let filtered = movies;
+  if (input.filter === "missing") filtered = movies.filter((m) => m.monitored && !m.hasFile);
+  else if (input.filter === "downloaded") filtered = movies.filter((m) => m.hasFile);
+  else if (input.filter === "unmonitored") filtered = movies.filter((m) => !m.monitored);
+  if (input.search) {
+    const needle = input.search.toLowerCase();
+    filtered = filtered.filter((m) => m.title.toLowerCase().includes(needle));
+  }
+  if (!filtered.length) return `No movies match (library has ${movies.length} total).`;
+
+  const sorted = [...filtered].sort((a, b) => a.title.localeCompare(b.title));
+  const shown = sorted.slice(0, input.limit);
+  const lines = shown.map((m) => {
+    const status = m.hasFile ? `✓ ${bytes(m.sizeOnDisk)}` : m.monitored ? "⬇ missing" : "○ unmonitored";
+    return `[${m.tmdbId}] ${m.title} (${m.year}) — ${status} | movieId=${m.id} | profileId=${m.qualityProfileId ?? "unknown"}`;
+  });
+
+  const header =
+    shown.length < sorted.length
+      ? `Showing ${shown.length} of ${sorted.length} matching movies (${movies.length} in library) — use filter/search/limit to narrow.\n`
+      : `${sorted.length} movie(s) (${movies.length} in library):\n`;
+  return header + lines.join("\n");
+}
+
+export async function radarrRemoveMovie(
+  client: ArrClient,
+  input: z.infer<typeof RadarrRemoveMovieSchema>
+): Promise<string> {
+  const movie = await getMovieByTmdbId(client, input.tmdb_id);
+  if (!movie) throw new Error(`No movie with tmdbId ${input.tmdb_id} in library`);
+  await client.delete(`/movie/${movie.id}`, { deleteFiles: input.delete_files });
+  return `Removed "${movie.title}" from Radarr${input.delete_files ? " (files deleted)" : ""}.`;
+}
+
+export async function radarrGetQueue(client: ArrClient): Promise<string> {
+  const records = await getArrRecords<RadarrQueueItem>(client, "/queue");
+  if (!records.length) return "No active downloads in Radarr queue.";
+  return records.map((item) => {
+    const pct = item.size > 0 ? (((item.size - item.sizeleft) / item.size) * 100).toFixed(1) : "?";
+    const lines = [
+      `[queueId:${item.id}] ${item.title}`,
+      `  Status: ${item.status} | ${pct}% | ETA: ${item.timeleft ?? "unknown"} | ${item.protocol}`,
+    ];
+    if (item.downloadId) lines.push(`  Download ID: ${item.downloadId}`);
+    if (item.trackedDownloadStatus) lines.push(`  Download status: ${item.trackedDownloadStatus}`);
+    if (item.trackedDownloadState) lines.push(`  Download state: ${item.trackedDownloadState}`);
+    if (item.outputPath) lines.push(`  Output path: ${item.outputPath}`);
+    if (item.errorMessage) lines.push(`  Error: ${item.errorMessage}`);
+    for (const warning of item.statusMessages ?? []) {
+      lines.push(`  ${warning.title}: ${warning.messages.join("; ")}`);
+    }
+    return lines.join("\n");
+  }).join("\n\n");
+}
+
+export const RadarrCommandStatusSchema = z.object({
+  command_id: z.number().int().positive().describe("Command ID returned by a submitted operation"),
+});
+
+export async function radarrGetCommand(
+  client: ArrClient,
+  input: z.infer<typeof RadarrCommandStatusSchema>
+): Promise<string> {
+  const command = await client.get<ArrCommand>(`/command/${input.command_id}`);
+  return `[commandId:${command.id}] ${command.name ?? "Command"} | Status: ${command.status}${command.message ? `\n${command.message}` : ""}`;
+}
+
+export async function radarrForceSearch(
+  client: ArrClient,
+  input: z.infer<typeof RadarrForceSearchSchema>
+): Promise<string> {
+  const movie = await getMovieByTmdbId(client, input.tmdb_id);
+  if (!movie) throw new Error(`No movie with tmdbId ${input.tmdb_id} in library`);
+
+  await client.post("/command", { name: "MoviesSearch", movieIds: [movie.id] });
+  return `Triggered search for "${movie.title}" — check radarr_get_queue in a moment to see what was grabbed.`;
+}
+
+export async function radarrGetHistory(client: ArrClient): Promise<string> {
+  const h = await client.get<{ records: Array<{ movieId: number; eventType: string; date: string; data?: { fileId?: number }; quality?: { quality?: { name: string } }; sourceTitle?: string }> }>("/history", { pageSize: 20, sortKey: "date", sortDir: "desc" });
+  if (!h.records.length) return "No history yet.";
+  const movies = await client.get<RadarrMovie[]>("/movie");
+  const movieMap = new Map(movies.map((m) => [m.id, m.title]));
+  return h.records
+    .map((r) => {
+      const title = movieMap.get(r.movieId) ?? "Unknown";
+      const date = new Date(r.date).toLocaleDateString();
+      const quality = r.quality?.quality?.name ?? "";
+      return `${date} | ${r.eventType} | ${title}${quality ? ` [${quality}]` : ""}`;
+    })
+    .join("\n");
+}
+
+// ─── Queue & blocklist management ────────────────────────────────────────────
+
+export async function radarrClearQueue(client: ArrClient): Promise<string> {
+  const records = await getArrRecords<{ id: number }>(client, "/queue");
+  if (!records.length) return "Radarr queue is already empty.";
+  const ids = records.map((r) => r.id);
+  await client.deleteWithBody("/queue/bulk", { ids }, { removeFromClient: true, blocklist: false });
+  return `Cleared ${ids.length} item(s) from Radarr queue.`;
+}
+
+export async function radarrClearBlocklist(client: ArrClient): Promise<string> {
+  const records = await getArrRecords<{ id: number }>(client, "/blocklist");
+  if (!records.length) return "Radarr blocklist is already empty.";
+  const ids = records.map((r) => r.id);
+  await client.deleteWithBody("/blocklist/bulk", { ids });
+  return `Cleared ${ids.length} blocklist entry(s) from Radarr.`;
+}
+
+// ─── Path mappings ────────────────────────────────────────────────────────────
+
+interface PathMapping { id?: number; host: string; remotePath: string; localPath: string; }
+
+export const PathMappingSchema = z.object({
+  host: z.string().describe("Download client host (e.g. qbittorrent)"),
+  remote_path: z.string().describe("Path as seen by the download client (e.g. /downloads/)"),
+  local_path: z.string().describe("Path as seen by Radarr (e.g. /data/downloads/)"),
+});
+
+export async function radarrListPathMappings(client: ArrClient): Promise<string> {
+  const mappings = await client.get<PathMapping[]>("/remotepathmapping");
+  if (!mappings.length) return "No remote path mappings configured.";
+  return mappings.map((m) => `[${m.id}] ${m.host}: ${m.remotePath} → ${m.localPath}`).join("\n");
+}
+
+export async function radarrSetPathMapping(
+  client: ArrClient,
+  input: z.infer<typeof PathMappingSchema>
+): Promise<string> {
+  const existing = await client.get<PathMapping[]>("/remotepathmapping");
+  const match = existing.find((m) => m.host.toLowerCase() === input.host.toLowerCase() && m.remotePath === input.remote_path);
+  if (match) {
+    await client.put(`/remotepathmapping/${match.id}`, { ...match, remotePath: input.remote_path, localPath: input.local_path });
+    return `Updated path mapping: ${input.host}: ${input.remote_path} → ${input.local_path}`;
+  }
+  await client.post("/remotepathmapping", { host: input.host, remotePath: input.remote_path, localPath: input.local_path });
+  return `Added path mapping: ${input.host}: ${input.remote_path} → ${input.local_path}`;
+}
+
+// ─── Custom formats ───────────────────────────────────────────────────────────
+
+interface CustomFormat {
+  id: number;
+  name: string;
+  includeCustomFormatWhenRenaming: boolean;
+  specifications: unknown[];
+}
+
+interface QualityProfileFull extends QualityProfile {
+  formatItems?: Array<{ format: number; name: string; score: number }>;
+}
+
+export const CustomFormatSetSchema = z.object({
+  name: z.string().describe("Custom format name (creates or updates by name)"),
+  specifications: z
+    .string()
+    .optional()
+    .describe(
+      'JSON array of specification objects. Each spec needs at minimum: { "name": "...", "implementationName": "...", "implementation": "...", "negate": false, "required": false, "fields": [...] }. Omit to create a format with no conditions (score-only).'
+    ),
+  include_when_renaming: z.boolean().optional().default(false).describe("Include format tag in renamed files (default false)"),
+});
+
+export const CustomFormatDeleteSchema = z.object({
+  name: z.string().describe("Name of the custom format to delete"),
+});
+
+export const CustomFormatScoreSchema = z.object({
+  format_name: z.string().describe("Custom format name"),
+  profile_name: z.string().optional().describe("Quality profile name (default: first available)"),
+  score: z.number().int().describe("Score to assign (positive = prefer, negative = reject, 0 = ignore)"),
+});
+
+export async function radarrListCustomFormats(client: ArrClient): Promise<string> {
+  const [formats, profiles] = await Promise.all([
+    client.get<CustomFormat[]>("/customformat"),
+    client.get<QualityProfileFull[]>("/qualityprofile"),
+  ]);
+
+  if (!formats.length) return "No custom formats configured in Radarr.";
+
+  const scoreMap = new Map<number, Map<string, number>>();
+  for (const p of profiles) {
+    for (const fi of p.formatItems ?? []) {
+      if (!scoreMap.has(fi.format)) scoreMap.set(fi.format, new Map());
+      scoreMap.get(fi.format)!.set(p.name, fi.score);
+    }
+  }
+
+  return formats
+    .map((f) => {
+      const scores = scoreMap.get(f.id);
+      const scoreStr = scores && scores.size
+        ? Array.from(scores.entries())
+            .filter(([, s]) => s !== 0)
+            .map(([p, s]) => `${p}: ${s > 0 ? "+" : ""}${s}`)
+            .join(", ")
+        : "no score";
+      const specs = f.specifications.length;
+      return `[${f.id}] ${f.name} | ${specs} condition(s) | ${scoreStr}`;
+    })
+    .join("\n");
+}
+
+export async function radarrSetCustomFormat(
+  client: ArrClient,
+  input: z.infer<typeof CustomFormatSetSchema>
+): Promise<string> {
+  const specs = input.specifications ? JSON.parse(input.specifications) : [];
+  const existing = await client.get<CustomFormat[]>("/customformat");
+  const match = existing.find((f) => f.name.toLowerCase() === input.name.toLowerCase());
+
+  const payload = {
+    name: input.name,
+    includeCustomFormatWhenRenaming: input.include_when_renaming ?? false,
+    specifications: specs,
+  };
+
+  if (match) {
+    await client.put<CustomFormat>(`/customformat/${match.id}`, { ...payload, id: match.id });
+    return `Updated custom format "${input.name}" (id: ${match.id}).`;
+  }
+
+  const created = await client.post<CustomFormat>("/customformat", payload);
+  return `Created custom format "${input.name}" (id: ${created.id}).`;
+}
+
+export async function radarrDeleteCustomFormat(
+  client: ArrClient,
+  input: z.infer<typeof CustomFormatDeleteSchema>
+): Promise<string> {
+  const existing = await client.get<CustomFormat[]>("/customformat");
+  const match = existing.find((f) => f.name.toLowerCase() === input.name.toLowerCase());
+  if (!match) throw new Error(`Custom format "${input.name}" not found`);
+  await client.delete(`/customformat/${match.id}`);
+  return `Deleted custom format "${input.name}".`;
+}
+
+export async function radarrSetCfScore(
+  client: ArrClient,
+  input: z.infer<typeof CustomFormatScoreSchema>
+): Promise<string> {
+  const [formats, profiles] = await Promise.all([
+    client.get<CustomFormat[]>("/customformat"),
+    client.get<QualityProfileFull[]>("/qualityprofile"),
+  ]);
+
+  const format = formats.find((f) => f.name.toLowerCase() === input.format_name.toLowerCase());
+  if (!format) throw new Error(`Custom format "${input.format_name}" not found`);
+
+  let profile: QualityProfileFull;
+  if (input.profile_name) {
+    const p = profiles.find((p) => p.name.toLowerCase() === input.profile_name!.toLowerCase());
+    if (!p) throw new Error(`Quality profile "${input.profile_name}" not found. Available: ${profiles.map((p) => p.name).join(", ")}`);
+    profile = p;
+  } else {
+    profile = profiles[0];
+    if (!profile) throw new Error("No quality profiles found in Radarr");
+  }
+
+  const formatItems = (profile.formatItems ?? []).map((fi) =>
+    fi.format === format.id ? { ...fi, score: input.score } : fi
+  );
+
+  if (!formatItems.find((fi) => fi.format === format.id)) {
+    formatItems.push({ format: format.id, name: format.name, score: input.score });
+  }
+
+  await client.put(`/qualityprofile/${profile.id}`, { ...profile, formatItems });
+  return `Set score ${input.score > 0 ? "+" : ""}${input.score} for "${format.name}" in profile "${profile.name}".`;
+}
+
+// ─── Blocklist & release checker ─────────────────────────────────────────────
+
+export const RadarrBlocklistReleaseSchema = z.object({
+  queue_id: z.number().describe("Queue item ID from radarr_get_queue (shown as queueId:X)"),
+  retry: z.boolean().optional().default(true).describe("Trigger a new search after blocklisting (default true)"),
+});
+
+export const RadarrCheckReleasesSchema = z.object({
+  tmdb_id: z.number().describe("TMDB ID of the movie to check releases for"),
+});
+
+export async function radarrBlocklistRelease(
+  client: ArrClient,
+  input: z.infer<typeof RadarrBlocklistReleaseSchema>
+): Promise<string> {
+  const records = await getArrRecords<RadarrQueueItem>(client, "/queue");
+  const item = records.find((r) => r.id === input.queue_id);
+  if (!item) throw new Error(`No queue item with id ${input.queue_id}`);
+
+  await client.delete(`/queue/${input.queue_id}`, {
+    blocklist: true,
+    removeFromClient: true,
+  });
+
+  if (!input.retry) return `Blocklisted and removed "${item.title}" from queue.`;
+
+  if (item.movieId) {
+    await client.post("/command", { name: "MoviesSearch", movieIds: [item.movieId] });
+    return `Blocklisted "${item.title}", removed from queue, and triggered a new search.`;
+  }
+
+  return `Blocklisted and removed "${item.title}" from queue. No retry submitted because the queue did not identify the movie.`;
+}
+
+export async function radarrCheckReleases(
+  client: ArrClient,
+  input: z.infer<typeof RadarrCheckReleasesSchema>
+): Promise<string> {
+  const movie = await getMovieByTmdbId(client, input.tmdb_id);
+  if (!movie) throw new Error(`No movie with tmdbId ${input.tmdb_id} in library`);
+
+  const releases = await client.get<Array<{ title: string; rejections: string[]; indexer?: string; size?: number; quality?: { quality?: { name: string } } }>>(`/release?movieId=${movie.id}`);
+
+  const grabbable = releases.filter((r) => !r.rejections?.length);
+  const rejected = releases.filter((r) => r.rejections?.length && !r.rejections.some((x) => x.includes("Unknown")));
+
+  const lines: string[] = [`Releases for "${movie.title}" (${releases.length} total):\n`];
+
+  if (grabbable.length) {
+    lines.push("GRABBABLE:");
+    grabbable.slice(0, 5).forEach((r) => {
+      const size = r.size ? ` ${bytes(r.size)}` : "";
+      const q = r.quality?.quality?.name ?? "";
+      lines.push(`  ✓ ${r.title}${size}${q ? ` [${q}]` : ""}`);
+    });
+  } else {
+    lines.push("GRABBABLE: none");
+  }
+
+  lines.push("\nREJECTED:");
+  rejected.slice(0, 8).forEach((r) => {
+    lines.push(`  ✗ ${r.title}`);
+    r.rejections.forEach((rej) => lines.push(`      → ${rej}`));
+  });
+
+  return lines.join("\n");
+}
+
+// ─── Interactive search & grab ────────────────────────────────────────────────
+
+interface Release {
+  languages?: ArrLanguage[];
+  guid: string;
+  indexerId: number;
+  indexer?: string;
+  title: string;
+  size: number;
+  age: number;
+  seeders?: number;
+  rejections: string[];
+  quality?: { quality?: { name: string } };
+  customFormatScore?: number;
+  customFormats?: Array<{ name: string }>;
+  downloadAllowed?: boolean;
+}
+
+export const RadarrInteractiveSearchSchema = z.object({
+  tmdb_id: z.number().describe("TMDB ID of the movie"),
+  include_rejected: z.boolean().optional().default(false).describe("Also show rejected releases (default: false — only grabbable)"),
+  limit: z.number().int().min(1).max(100).optional().default(20).describe("Maximum releases to show (default 20, maximum 100)"),
+  language: z.string().trim().min(1).optional().describe("Filter by a reported language name, such as German or English. Use include_rejected: true for alternatives to existing files."),
+});
+
+export const RadarrGrabReleaseSchema = z.object({
+  tmdb_id: z.number().describe("TMDB ID of the movie (same as used in radarr_interactive_search)"),
+  guid: z.string().describe("Release GUID from radarr_interactive_search output"),
+  indexer_id: z.number().int().positive().optional().describe("Indexer ID shown alongside the release GUID"),
+  allow_rejected: z.boolean().optional().default(false).describe("Allow a rejected release only after its rejection reasons have been reviewed and explicitly approved"),
+  preview_only: z.boolean().optional().default(true).describe("Preview the selected download and replacement risk (default true). Apply only after human approval."),
+});
+
+export async function radarrInteractiveSearch(
+  client: ArrClient,
+  input: z.infer<typeof RadarrInteractiveSearchSchema>
+): Promise<string> {
+  const movie = await getMovieByTmdbId(client, input.tmdb_id);
+  if (!movie) throw new Error(`No movie with tmdbId ${input.tmdb_id} in library`);
+
+  const releases = await client.get<Release[]>(`/release?movieId=${movie.id}`);
+  if (!releases.length) return `No releases found for "${movie.title}".`;
+
+  const relevant = filterArrLanguages(releases, input.language);
+  const grabbable = relevant.filter((r) => !r.rejections?.length);
+  const rejected = relevant.filter((r) => r.rejections?.length);
+  const shown = [...(input.include_rejected ? relevant : grabbable)].sort((a, b) => (b.customFormatScore ?? 0) - (a.customFormatScore ?? 0));
+
+  if (!relevant.length) return `No releases match${input.language ? ` language "${input.language}"` : ""}. Language filtering uses reported release metadata, not verified audio tracks.`;
+
+  if (!shown.length) {
+    return `No grabbable releases for "${movie.title}" (${rejected.length} rejected). Pass include_rejected: true to see why.`;
+  }
+
+  const lines: string[] = [`Interactive search for "${movie.title}" — ${grabbable.length} grabbable, ${rejected.length} rejected:\n`];
+  lines.push("Pass the guid to radarr_grab_release to download a specific release.\n");
+
+  lines.push(`Showing ${Math.min(shown.length, input.limit)} of ${shown.length} matching releases, highest profile custom-format score first (limit: ${input.limit}, maximum 100).\n`);
+  shown.slice(0, input.limit).forEach((r, i) => {
+    const q = r.quality?.quality?.name ?? "?";
+    const size = bytes(r.size);
+    const age = `${r.age}d`;
+    const score = r.customFormatScore !== undefined ? ` | CF score: ${r.customFormatScore > 0 ? "+" : ""}${r.customFormatScore}` : "";
+    const status = r.rejections?.length ? ` REJECTED: ${r.rejections.join("; ")}` : " Allowed";
+    const languages = r.languages?.map((language) => language.name).join(", ") || "unknown";
+    const formats = r.customFormats?.map((format) => format.name).join(", ") || "none reported";
+    lines.push(`[${i + 1}] guid:${r.guid} | indexerId:${r.indexerId}`);
+    lines.push(`     ${r.title}`);
+    lines.push(`     ${q} | ${size} | ${age} old | ${r.indexer ?? r.indexerId} | Languages: ${languages}${score} | Matched formats: ${formats}${status}`);
+  });
+
+  return lines.join("\n");
+}
+
+export async function radarrGrabRelease(
+  client: ArrClient,
+  input: z.infer<typeof RadarrGrabReleaseSchema>
+): Promise<string> {
+  const movie = await getMovieByTmdbId(client, input.tmdb_id);
+  if (!movie) throw new Error(`No movie with tmdbId ${input.tmdb_id} in library`);
+
+  const releases = await client.get<Release[]>(`/release?movieId=${movie.id}`);
+  const matches = releases.filter((r) => r.guid === input.guid && (input.indexer_id === undefined || r.indexerId === input.indexer_id));
+  if (matches.length > 1) throw new Error("This GUID appears on multiple indexers. Provide indexer_id from the search results.");
+  const release = matches[0];
+  if (!release) throw new Error(`Release with guid "${input.guid}" not found. Re-run radarr_interactive_search to get fresh GUIDs.`);
+
+  const languages = release.languages?.map((language) => language.name).join(", ") || "unknown";
+  const warnings = release.rejections?.join("; ") || "none";
+  if (input.preview_only) return `Preview only: "${release.title}" | Languages: ${languages} | Rejections: ${warnings}. Importing this release may replace existing media. After human approval, set preview_only: false to download${release.rejections?.length ? " and allow_rejected: true to acknowledge the rejection reasons" : ""}.`;
+  if (release.rejections?.length && !input.allow_rejected) throw new Error(`Release rejected: ${warnings}. Review these reasons and obtain human approval before setting allow_rejected: true.`);
+  await client.post("/release", release);
+  const q = release.quality?.quality?.name ?? "?";
+  return `Grab submitted for "${release.title}" [${q}]. Not confirmed yet: check radarr_get_queue or radarr_get_history before reporting it as downloading.`;
+}
+
+// ─── Manual import ────────────────────────────────────────────────────────────
+
+interface ManualImportItem {
+  folderName?: string;
+  downloadId?: string;
+  indexerFlags?: number;
+  path: string;
+  name: string;
+  size: number;
+  quality?: { quality?: { name: string } };
+  movie?: { id: number; title: string };
+  rejections?: Array<{ reason: string }>;
+  releaseGroup?: string;
+  languages?: Array<{ id: number; name: string }>;
+}
+
+export const RadarrManualImportSchema = z.object({
+  folder: z.string().describe("Absolute path of the folder to scan for importable files"),
+  preview_only: z.boolean().optional().default(true).describe("Show matches without importing (default true). Set false to submit an import."),
+  import_mode: z.enum(["auto", "copy", "move"]).optional().default("copy").describe("Import mode (default copy preserves source files; move removes them; auto lets the service decide)"),
+  filter_existing: z.boolean().optional().default(true).describe("Skip files already in the library (default true)"),
+});
+
+export async function radarrManualImport(
+  client: ArrClient,
+  input: z.infer<typeof RadarrManualImportSchema>
+): Promise<string> {
+  const items = await client.get<ManualImportItem[]>("/manualimport", {
+    folder: input.folder,
+    filterExistingFiles: input.filter_existing,
+  });
+
+  if (!items.length) return `No importable files found in "${input.folder}".`;
+
+  const matched = items.filter((i) => i.movie?.id && !i.rejections?.length);
+  const unmatched = items.filter((i) => !i.movie?.id || i.rejections?.length);
+
+  const lines: string[] = [`Manual import scan of "${input.folder}" — ${items.length} file(s):\n`];
+
+  if (matched.length) {
+    lines.push(`READY TO IMPORT (${matched.length}):`);
+    matched.forEach((i) => {
+      const q = i.quality?.quality?.name ?? "?";
+      lines.push(`  ✓ ${i.movie!.title} | ${q} | ${bytes(i.size)}`);
+      lines.push(`      ${i.path}`);
+    });
+  }
+
+  if (unmatched.length) {
+    lines.push(`\nNEEDS ATTENTION (${unmatched.length}):`);
+    unmatched.forEach((i) => {
+      const reason = i.rejections?.map((r) => r.reason).join("; ") || "no movie match";
+      lines.push(`  ✗ ${i.name} — ${reason}`);
+      lines.push(`      ${i.path}`);
+    });
+  }
+
+  if (input.preview_only) {
+    lines.push("\n(Preview only — pass preview_only: false to apply the import.)");
+    return lines.join("\n");
+  }
+
+  if (!matched.length) return lines.join("\n") + "\n\nNothing to import — all files need manual attention.";
+
+  const payload = matched.map((i) => ({
+    path: i.path,
+    folderName: i.folderName,
+    indexerFlags: i.indexerFlags ?? 0,
+    movieId: i.movie!.id,
+    quality: i.quality,
+    languages: i.languages ?? [],
+    releaseGroup: i.releaseGroup ?? "",
+    downloadId: i.downloadId,
+  }));
+
+  const command = await client.post<ArrCommand>("/command", {
+    name: "ManualImport",
+    files: payload,
+    importMode: input.import_mode,
+  });
+  lines.push(`\nSubmitted import of ${matched.length} file(s). [commandId:${command.id}] Status: ${command.status}. Use radarr_get_command to check completion.`);
+  return lines.join("\n");
+}
+
+export const RadarrExistingItemSchema = z.object({
+  tmdb_id: z.number().int().positive().describe("External ID of an existing library item"),
+  preview_only: z.boolean().optional().default(true).describe("Preview the change (default true). Apply only after human approval."),
+});
+
+export const RadarrSetQualityProfileSchema = RadarrExistingItemSchema.extend({
+  quality_profile: z.string().trim().min(1).describe("Exact name from radarr_list_quality_profiles"),
+});
+
+export async function radarrListLanguages(client: ArrClient): Promise<string> {
+  return listArrLanguages(client);
+}
+export async function radarrListQualityProfiles(client: ArrClient): Promise<string> {
+  return listArrQualityProfiles(client);
+}
+
+export async function radarrRefreshMovie(client: ArrClient, input: z.infer<typeof RadarrExistingItemSchema>): Promise<string> {
+  const item = await getMovieByTmdbId(client, input.tmdb_id);
+  if (!item) throw new Error("Item not found in the library");
+  return submitArrCommand(client, "RefreshMovie", { movieIds: [item.id] }, input.preview_only, "radarr_get_command");
+}
+
+export async function radarrRescanMovie(client: ArrClient, input: z.infer<typeof RadarrExistingItemSchema>): Promise<string> {
+  const item = await getMovieByTmdbId(client, input.tmdb_id);
+  if (!item) throw new Error("Item not found in the library");
+  return submitArrCommand(client, "RescanMovie", { movieId: item.id }, input.preview_only, "radarr_get_command");
+}
+
+export async function radarrSetQualityProfile(client: ArrClient, input: z.infer<typeof RadarrSetQualityProfileSchema>): Promise<string> {
+  const item = await getMovieByTmdbId(client, input.tmdb_id);
+  if (!item) throw new Error("Item not found in the library");
+  const profiles = await client.get<QualityProfile[]>("/qualityprofile");
+  const profile = profiles.find((candidate) => candidate.name.toLowerCase() === input.quality_profile.toLowerCase());
+  if (!profile) throw new Error(`Quality profile not found. Available: ${profiles.map((candidate) => candidate.name).join(", ")}`);
+  if (item.qualityProfileId === profile.id) return `"${item.title}" already uses "${profile.name}".`;
+  const previous = profiles.find((candidate) => candidate.id === item.qualityProfileId)?.name ?? String(item.qualityProfileId);
+  if (input.preview_only) return `Preview only: "${item.title}": "${previous}" -> "${profile.name}". This may allow future upgrades. After human approval, set preview_only: false to apply.`;
+  await client.put("/movie/" + item.id, { ...item, qualityProfileId: profile.id });
+  return `Updated "${item.title}" to quality profile "${profile.name}". No immediate search was submitted.`;
+}
+
+export const RadarrInspectMovieFileSchema = z.object({
+  tmdb_id: z.number().int().positive(),
+});
+
+export async function radarrGetMovieFile(client: ArrClient, input: z.infer<typeof RadarrInspectMovieFileSchema>): Promise<string> {
+  const movie = await getMovieByTmdbId(client, input.tmdb_id);
+  if (!movie) throw new Error("Movie not found in the library");
+  const files = await client.get<ArrMediaFile[]>("/moviefile", { movieId: movie.id });
+  if (!files.length) return `No downloaded file for "${movie.title}".`;
+  return `Files for "${movie.title}":\n` + files.map(describeArrFile).join("\n\n");
+}

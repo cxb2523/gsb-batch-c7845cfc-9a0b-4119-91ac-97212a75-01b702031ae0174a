@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "homelab": {
+      "command": "node",
+      "args": ["/absolute/path/to/homelab-mcp/dist/index.js"],
+      "cwd": "/absolute/path/to/homelab-mcp"
+    }
+  }
+}

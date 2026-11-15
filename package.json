@@ -1,0 +1,79 @@
+{
+  "name": "homelab-mcp",
+  "version": "2.4.3",
+  "description": "MCP server for Proxmox homelab — modular, AI-extensible. 65+ tools across 17 domains.",
+  "author": "Nino Meier <home.ninomeier@gmail.com>",
+  "main": "dist/index.js",
+  "bin": {
+    "homelab-mcp": "./dist/index.js"
+  },
+  "files": [
+    "dist/",
+    "assets/",
+    "README.md",
+    "LICENSE",
+    ".env.example"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Nainounen/homelab-mcp"
+  },
+  "homepage": "https://github.com/Nainounen/homelab-mcp#readme",
+  "bugs": {
+    "url": "https://github.com/Nainounen/homelab-mcp/issues"
+  },
+  "keywords": [
+    "mcp",
+    "mcp-server",
+    "model-context-protocol",
+    "claude-code",
+    "homelab",
+    "proxmox",
+    "plex",
+    "radarr",
+    "sonarr",
+    "sabnzbd",
+    "prowlarr",
+    "seerr",
+    "overseerr",
+    "jellyseerr",
+    "lidarr",
+    "readarr",
+    "tautulli",
+    "bazarr",
+    "docker",
+    "prometheus",
+    "grafana",
+    "qnap",
+    "adguard",
+    "tailscale",
+    "uptime-kuma",
+    "telegram"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "node --max-old-space-size=4096 node_modules/typescript/bin/tsc",
+    "start": "node dist/index.js",
+    "dev": "ts-node src/index.ts",
+    "new-module": "node scripts/new-module.js",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "precommit": "node scripts/precommit.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "axios": "^1.7.0",
+    "dotenv": "^16.4.0",
+    "fast-xml-parser": "^5.11.2",
+    "node-ssh": "^13.2.0",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "ts-node": "^10.9.0",
+    "typescript": "^5.4.0",
+    "vitest": "^4.1.8"
+  }
+}
