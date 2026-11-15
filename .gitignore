@@ -1,0 +1,40 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+
+# Distribution / packaging
+.Python
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+.coverage
+
+# virtualenv
+.venv
+venv/
+ENV/
+
+
+# mypy
+.mypy_cache/
+
+# Editors folders
+.idea/
+
+# System folders/files
+.DS_Store
+
+# Local test data
+tests/test_*.json
