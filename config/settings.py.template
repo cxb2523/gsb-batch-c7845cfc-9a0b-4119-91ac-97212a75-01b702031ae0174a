@@ -5,6 +5,10 @@ DATA_SOURCE = "csv"  # options: csv, sqlite, mysql, postgres, gsheet
 CSV_FILE_PATH = "data/sales_data.csv"
 SQLITE_DB_PATH = "data/sales_data.db"
 
+# Report output paths
+PDF_PATH = "output/weekly_customer_spend.pdf"
+CHART_PATH = "output/top5_customers.png"
+
 # Google Sheet
 GSHEET_SHEET_NAME = "SalesData"
 GSHEET_WORKSHEET_NAME = "Sheet1"

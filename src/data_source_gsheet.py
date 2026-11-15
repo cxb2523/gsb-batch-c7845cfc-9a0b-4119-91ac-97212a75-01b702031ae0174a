@@ -1,9 +1,11 @@
 import pandas as pd
-import gspread
-from oauth2client.service_account import ServiceAccountCredentials
 
 
 def load_data_from_gsheet(sheet_name, worksheet_name):
+    # Imported lazily so CSV/SQLite runs don't require gspread installed.
+    import gspread
+    from oauth2client.service_account import ServiceAccountCredentials
+
     scope = ["https://spreadsheets.google.com/feeds",
              "https://www.googleapis.com/auth/drive"]
     creds = ServiceAccountCredentials.from_json_keyfile_name(
@@ -15,8 +17,9 @@ def load_data_from_gsheet(sheet_name, worksheet_name):
     worksheet = sheet.worksheet(worksheet_name)
 
     data = worksheet.get_all_records()
+    # Raw load only — date parsing/cleaning is done centrally
+    # by src.data_cleaning.clean_sales_data.
     df = pd.DataFrame(data)
-    df["invoice_date"] = pd.to_datetime(df["invoice_date"], format="%d-%m-%Y")
 
     print(f"✅ Loaded {len(df)} rows from {sheet_name}/{worksheet_name}")
     return df

@@ -1,10 +1,12 @@
 from .data_source_csv import load_data_from_csv
 from .data_source_sql import load_data_from_sql
 from .data_source_gsheet import load_data_from_gsheet
+from .data_cleaning import clean_sales_data
 from config.settings import DATA_SOURCE as DEFAULT_SOURCE, GSHEET_SHEET_NAME, GSHEET_WORKSHEET_NAME
 
 
 def load_data(source_type=None, **kwargs):
+    """Load the raw sales DataFrame from the configured source (no cleaning)."""
     source = source_type or DEFAULT_SOURCE
 
     if source == "csv":
@@ -22,3 +24,16 @@ def load_data(source_type=None, **kwargs):
 
     else:
         raise ValueError(f"Unsupported data source: {source}")
+
+
+def load_clean_data(source_type=None, **kwargs):
+    """Load data from any source and apply the shared cleaning logic.
+
+    Every source (CSV, SQLite, MySQL, PostgreSQL, Google Sheets) goes
+    through the same clean_sales_data() step.
+
+    Returns:
+        (cleaned_df, dropped_rows)
+    """
+    df = load_data(source_type=source_type, **kwargs)
+    return clean_sales_data(df)

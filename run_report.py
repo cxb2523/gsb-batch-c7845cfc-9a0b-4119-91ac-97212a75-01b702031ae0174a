@@ -1,5 +1,6 @@
 import argparse
-from src.report import generate_and_send_report
+import sys
+from src.report import generate_and_send_report, STATUS_ERROR
 
 
 if __name__ == "__main__":
@@ -13,8 +14,11 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    generate_and_send_report(
+    result = generate_and_send_report(
         source_type=args.source,
         sheet_name=args.sheet_name,
         worksheet_name=args.worksheet_name
     )
+
+    print(f"Report run finished: {result}")
+    sys.exit(1 if result.status == STATUS_ERROR else 0)
