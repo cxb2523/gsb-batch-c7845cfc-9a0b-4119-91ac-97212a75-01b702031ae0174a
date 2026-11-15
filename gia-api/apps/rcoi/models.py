@@ -251,19 +251,38 @@ def send_subscriptions():
             adapter.send_mail(template_prefix, email, {"context": context})
 
 
+class RcoiUpdateError(Exception):
+    """Data update failed for all data sources."""
+
+    def __init__(self, message, errors=None):
+        """Initialize RcoiUpdateError.
+
+        :param message: error message
+        :type message: str
+        :param errors: list of per-source error dicts
+        :type errors: list
+        """
+        super().__init__(message)
+        self.errors = errors or []
+
+
 class RcoiUpdater:
     """Data processing class.
 
     :type data: dict
     :type updated_files: list
+    :type errors: list
     """
 
     def __init__(self):
+        self.errors = []
         try:
             self.data, self.updated_files = self.__prepare_data()
         except Exception:
             logger.exception("Prepare data for update failed!")
             raise
+        if self.errors:
+            logger.warning("sources processed with errors: %s", self.errors)
 
     def run(self):
         """Run data processing."""
@@ -281,20 +300,72 @@ class RcoiUpdater:
                 raise
         return None
 
-    @staticmethod
-    def __prepare_data():
+    def __prepare_data(self):
         """Check if new data available and prepare it for processing."""
         import csv
         import shutil
         import tempfile
         from collections import defaultdict
 
-        urls = DataSource.objects.all()
-        files_info = [xlsx_to_csv.get_files_info(url.url) for url in urls]
-        files_info_flat = [file for files in files_info for file in files]
+        sources = DataSource.objects.all()
+        files_info, discovery_failed = self.__get_files_info(sources)
 
+        updated_files, created_files = self.__filter_updated_files(files_info)
+
+        if not updated_files:
+            if discovery_failed and discovery_failed == len(sources):
+                msg = "get files info failed for all data sources"
+                raise RcoiUpdateError(msg, errors=self.errors)
+            return None, None
+
+        tmp_path = Path(tempfile.mkdtemp())
+        downloaded_files = self.__download_files(updated_files, created_files, tmp_path)
+        if not downloaded_files:
+            logger.debug("cleanup downloaded files")
+            shutil.rmtree(tmp_path)
+            msg = "download failed for all files"
+            raise RcoiUpdateError(msg, errors=self.errors)
+
+        csv_stream = xlsx_to_csv.save_to_stream(tmp_path)
+
+        data = defaultdict(list)
+        for row in csv.DictReader(csv_stream, delimiter="\t"):
+            for k, v in row.items():
+                data[k].append(v)
+        logger.debug("cleanup downloaded files")
+        shutil.rmtree(tmp_path)
+        return data, downloaded_files
+
+    def __get_files_info(self, sources):
+        """Get files info from all sources, recording failed sources."""
+        files_info = []
+        discovery_failed = 0
+        for source in sources:
+            try:
+                files_info.extend(xlsx_to_csv.get_files_info(source.url))
+            except Exception as exc:
+                discovery_failed += 1
+                logger.exception(
+                    "get files info failed for source: %s (%s)",
+                    source.name,
+                    source.url,
+                )
+                self.errors.append(
+                    {
+                        "source": source.name,
+                        "url": source.url,
+                        "stage": "get_files_info",
+                        "error": repr(exc),
+                    },
+                )
+        return files_info, discovery_failed
+
+    @staticmethod
+    def __filter_updated_files(files_info):
+        """Filter files that need to be downloaded."""
         updated_files = []
-        for file in files_info_flat:
+        created_files = set()
+        for file in files_info:
             name = file["name"]
             minutes_ago = dt.datetime.now() - dt.timedelta(minutes=5)  # noqa: DTZ005
             try:
@@ -314,25 +385,36 @@ class RcoiUpdater:
             except DataFile.DoesNotExist:
                 logger.debug("%s: file not found, DOWNLOAD", name)
                 DataFile.objects.create(**file)
+                created_files.add(name)
                 updated_files.append(file)
+        return updated_files, created_files
 
-        if not updated_files:
-            return None, None
-
-        tmp_path = Path(tempfile.mkdtemp())
-        [
-            xlsx_to_csv.download_file(file["url"], file["name"], tmp_path)
-            for file in updated_files
-        ]
-        csv_stream = xlsx_to_csv.save_to_stream(tmp_path)
-
-        data = defaultdict(list)
-        for row in csv.DictReader(csv_stream, delimiter="\t"):
-            for k, v in row.items():
-                data[k].append(v)
-        logger.debug("cleanup downloaded files")
-        shutil.rmtree(tmp_path)
-        return data, updated_files
+    def __download_files(self, updated_files, created_files, tmp_path):
+        """Download files, recording failed downloads."""
+        downloaded_files = []
+        for file in updated_files:
+            try:
+                xlsx_to_csv.download_file(file["url"], file["name"], tmp_path)
+            except Exception as exc:
+                logger.exception(
+                    "download failed for file: %s (%s)",
+                    file["name"],
+                    file["url"],
+                )
+                self.errors.append(
+                    {
+                        "source": file["name"],
+                        "url": file["url"],
+                        "stage": "download_file",
+                        "error": repr(exc),
+                    },
+                )
+                if file["name"] in created_files:
+                    DataFile.objects.filter(name=file["name"]).delete()
+                    created_files.discard(file["name"])
+            else:
+                downloaded_files.append(file)
+        return downloaded_files
 
     @staticmethod
     def __cleanup():

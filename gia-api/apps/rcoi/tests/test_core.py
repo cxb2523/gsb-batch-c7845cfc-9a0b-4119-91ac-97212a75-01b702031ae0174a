@@ -155,6 +155,122 @@ def test_rcoi_updater_if_data_is_bad(mocker):
     mocker.resetall()
 
 
+def test_rcoi_updater_partial_source_failure(mocker, exams_csv, exam_file):
+    """
+    Test - DB Updater - one source fails, other sources are still processed
+    """
+    G(models.DataSource, name="broken", url="http://broken")
+    G(models.DataSource, name="working", url="http://working")
+
+    def fake_get_files_info(url):
+        if url == "http://broken":
+            msg = "connection failed"
+            raise ConnectionError(msg)
+        return [exam_file]
+
+    mocker.patch(
+        "apps.rcoi.xlsx_to_csv.get_files_info",
+        side_effect=fake_get_files_info,
+    )
+    mocker.patch("apps.rcoi.xlsx_to_csv.download_file")
+    mocker.patch("apps.rcoi.xlsx_to_csv.save_to_stream", return_value=exams_csv)
+
+    updater = models.RcoiUpdater()
+    assert updater.run() is True
+
+    assert models.Exam.objects.count() == 1
+    assert models.DataFile.objects.filter(name=exam_file["name"]).exists()
+    assert len(updater.errors) == 1
+    error = updater.errors[0]
+    assert error["source"] == "broken"
+    assert error["stage"] == "get_files_info"
+    assert "connection failed" in error["error"]
+
+
+def test_rcoi_updater_all_sources_failed(mocker):
+    """
+    Test - DB Updater - all sources fail, nothing is written to db
+    """
+    G(models.DataSource, name="broken1", url="http://broken1")
+    G(models.DataSource, name="broken2", url="http://broken2")
+    mocker.patch(
+        "apps.rcoi.xlsx_to_csv.get_files_info",
+        side_effect=ConnectionError("connection failed"),
+    )
+
+    with pytest.raises(models.RcoiUpdateError) as exc_info:
+        models.RcoiUpdater()
+
+    assert len(exc_info.value.errors) == 2
+    assert models.Exam.objects.count() == 0
+    assert models.DataFile.objects.count() == 0
+
+
+def test_rcoi_updater_all_downloads_failed(mocker, exam_file):
+    """
+    Test - DB Updater - all downloads fail, nothing is written to db
+    """
+    G(models.DataSource, name="source", url="http://source")
+    mocker.patch(
+        "apps.rcoi.xlsx_to_csv.get_files_info",
+        return_value=[exam_file],
+    )
+    mocker.patch(
+        "apps.rcoi.xlsx_to_csv.download_file",
+        side_effect=ConnectionError("connection failed"),
+    )
+
+    with pytest.raises(models.RcoiUpdateError) as exc_info:
+        models.RcoiUpdater()
+
+    assert len(exc_info.value.errors) == 1
+    assert exc_info.value.errors[0]["stage"] == "download_file"
+    assert models.Exam.objects.count() == 0
+    assert not models.DataFile.objects.filter(name=exam_file["name"]).exists()
+
+
+def test_rcoi_updater_single_file_download_failure(mocker, exams_csv, exam_file):
+    """
+    Test - DB Updater - failed file download does not affect other files of the same source
+    """
+    exam_file_2 = exam_file.copy()
+    exam_file_2.update(
+        {
+            "name": "2020-06-14__11__.xlsx",
+            "url": "https://rcoi.mcko.ru/2020-06-14__11__rab_ppe_test.xlsx",
+        },
+    )
+    G(models.DataSource, name="source", url="http://source")
+
+    mocker.patch(
+        "apps.rcoi.xlsx_to_csv.get_files_info",
+        return_value=[exam_file, exam_file_2],
+    )
+
+    def fake_download_file(url, name, path):
+        if name == exam_file_2["name"]:
+            msg = "file not found"
+            raise FileNotFoundError(msg)
+
+    mocker.patch(
+        "apps.rcoi.xlsx_to_csv.download_file",
+        side_effect=fake_download_file,
+    )
+    mocker.patch("apps.rcoi.xlsx_to_csv.save_to_stream", return_value=exams_csv)
+
+    updater = models.RcoiUpdater()
+    assert updater.run() is True
+
+    assert models.Exam.objects.count() == 1
+    assert models.DataFile.objects.filter(name=exam_file["name"]).exists()
+    assert not models.DataFile.objects.filter(name=exam_file_2["name"]).exists()
+    assert len(updater.errors) == 1
+    error = updater.errors[0]
+    assert error["source"] == exam_file_2["name"]
+    assert error["stage"] == "download_file"
+    assert "file not found" in error["error"]
+
+
 def test_exam_importer(mocker_xlsx_to_csv_simple, exam_file_diff_date):
     """
     Test - Exam Importer
