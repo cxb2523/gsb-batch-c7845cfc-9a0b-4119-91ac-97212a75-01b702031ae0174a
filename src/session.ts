@@ -6,7 +6,16 @@ import type { Browser as PPBrowser } from 'puppeteer-core';
 import type { BrowserOptions, Driver, DriverTypes, ExtractionSchema, NetworkStats, RequestOptions } from './types.js';
 import type { LaunchedBrowser } from './launcher.js';
 import { extract, request, type EvaluationPage } from './page-tools.js';
-import { waitForChallenge, ChallengeTimeoutError, type ChallengeOptions } from './challenge.js';
+import { waitForChallenge, ChallengeTimeoutError, type ChallengeOptions, type ChallengeResult } from './challenge.js';
+
+/** Automatic recovery could not replace the unresponsive page; the session may be inconsistent. */
+export class PageRecoveryError extends Error {
+  readonly code = 'PAGE_RECOVERY_FAILED';
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = 'PageRecoveryError';
+  }
+}
 
 export class BrowserSession<D extends Driver> {
   readonly stats: NetworkStats = { requests: 0, blocked: 0, transferredBytes: 0 };
@@ -136,7 +145,7 @@ export class BrowserSession<D extends Driver> {
     return extract(page as EvaluationPage, schema);
   }
 
-  async waitForChallenge(options: ChallengeOptions = {}, page: DriverTypes[D]['page'] = this.page) {
+  async waitForChallenge(options: ChallengeOptions = {}, page: DriverTypes[D]['page'] = this.page): Promise<ChallengeResult & { page?: DriverTypes[D]['page'] }> {
     this.ensureOpen();
     try {
       return await waitForChallenge(page as DriverTypes['playwright']['page'], options, () => this.challenged.get(page) ?? false);
@@ -146,6 +155,17 @@ export class BrowserSession<D extends Driver> {
           await bounded(page.screenshot({ path: options.screenshotOnTimeout as `${string}.png`, type: 'png' }), 2000);
           error.diagnostics.screenshotPath = options.screenshotOnTimeout;
         } catch { error.diagnostics.screenshotError = 'Screenshot unavailable or capture exceeded 2000ms'; }
+      }
+      // Opt-in automatic recovery: only a page-unresponsive timeout qualifies, and never
+      // after the caller's signal aborted. recoverPage opens a blank page; nothing is replayed.
+      if (options.autoRecover && error instanceof ChallengeTimeoutError &&
+          error.diagnostics?.reason === 'page-unresponsive' && !options.signal?.aborted) {
+        const diagnostics = error.diagnostics;
+        let replacement: DriverTypes[D]['page'];
+        try { replacement = await this.recoverPage(page); }
+        catch (cause) { throw new PageRecoveryError('Automatic recovery failed: the unresponsive page could not be replaced', { cause }); }
+        return { status: 'recovered', detected: diagnostics.detected, clicks: diagnostics.clicks,
+          elapsedMs: diagnostics.elapsedMs, recovered: true, page: replacement };
       }
       throw error;
     }

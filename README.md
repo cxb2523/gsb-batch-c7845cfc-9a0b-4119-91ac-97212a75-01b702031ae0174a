@@ -303,6 +303,7 @@ or a claim of universal bypass. Use browser automation where you have permission
 | `maxClicks` | `3` |
 | `readySelector`, `readyUrl` | Unset |
 | `signal`, `onState`, `screenshotOnTimeout` | Unset |
+| `autoRecover` | `false` |
 
 <a id="recovery"></a>
 
@@ -348,6 +349,20 @@ stage; a locally owned browser also has a process termination fallback. A borrow
 browser is never killed. A disconnected remote server can still retain its context.
 Request deadlines bound the caller even if the renderer hangs; they cannot undo a
 POST already accepted by the server. Recovery never retries that POST.
+
+`waitForChallenge` (including the wait inside `goto`) can run this recovery
+automatically. Pass `autoRecover: true` and a timeout diagnosed as `page-unresponsive`
+closes the stuck page, swaps in a configured blank page, and resolves with
+`{ status: 'recovered', recovered: true, page }` instead of throwing. `page` is the
+replacement; `session.page` is updated only when the default page was recovered.
+Timeouts for an uncleared challenge or a missing ready selector still throw, an
+aborted `signal` never recovers, and a failed recovery throws `PageRecoveryError`.
+No navigation or POST is replayed: the replacement starts blank.
+
+```js
+const result = await session.waitForChallenge({ timeout: 10_000, autoRecover: true });
+if (result.recovered) await result.page.goto(url); // The caller decides what to reload.
+```
 
 <a id="sessions"></a>
 

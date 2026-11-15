@@ -5,6 +5,8 @@ async function nativeTypes() {
   await puppeteer.page.type('#name', 'NDT');
   await (await puppeteer.recoverPage()).type('#name', 'replacement');
   await puppeteer.waitForChallenge({ readyUrl: 'https://example.com/', screenshotOnTimeout: 'timeout.png' });
+  const recovered = await puppeteer.waitForChallenge({ autoRecover: true });
+  if (recovered.status === 'recovered') await recovered.page!.type('#name', 'replacement');
   // @ts-expect-error Playwright's getByRole is not a Puppeteer API.
   puppeteer.page.getByRole('button');
   await puppeteer.close();

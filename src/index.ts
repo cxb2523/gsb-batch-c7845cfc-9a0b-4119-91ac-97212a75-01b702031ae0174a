@@ -2,7 +2,7 @@ import { validateOptions, normalizeProxy } from './config.js';
 import { launch } from './launcher.js';
 import { BrowserSession } from './session.js';
 import type { BrowserOptions, Driver } from './types.js';
-export { BrowserSession } from './session.js';
+export { BrowserSession, PageRecoveryError } from './session.js';
 export type * from './types.js';
 export { ChallengeTimeoutError } from './challenge.js';
 export type { ChallengeOptions, ChallengeResult, ChallengeDiagnostics } from './challenge.js';

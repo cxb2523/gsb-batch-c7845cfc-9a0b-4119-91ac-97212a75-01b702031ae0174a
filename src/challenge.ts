@@ -13,12 +13,25 @@ export interface ChallengeOptions {
   readyUrl?: string;
   /** Session helper only: optional PNG captured on challenge timeout. */
   screenshotOnTimeout?: string;
+  /**
+   * Session helper only: when a timeout is diagnosed as `page-unresponsive`, close the
+   * stuck page, replace it with a configured blank page, and return a recovered result
+   * instead of throwing. No navigation or request is replayed. Disabled by default.
+   */
+  autoRecover?: boolean;
   /** Best-effort native click on a recognized widget only. Disabled by default. */
   clickTurnstile?: boolean;
   maxClicks?: number;
   signal?: AbortSignal;
 }
-export interface ChallengeResult { status: 'ready'; detected: boolean; clicks: number; elapsedMs: number }
+export interface ChallengeResult {
+  status: 'ready' | 'recovered';
+  detected: boolean;
+  clicks: number;
+  elapsedMs: number;
+  /** Session helper only: true when an unresponsive page was automatically replaced (see `autoRecover`). */
+  recovered?: boolean;
+}
 export interface ChallengeDiagnostics {
   url?: string;
   elapsedMs: number;
