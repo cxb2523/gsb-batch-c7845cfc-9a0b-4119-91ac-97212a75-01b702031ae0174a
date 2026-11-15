@@ -1,0 +1,105 @@
+{
+  "name": "top-crawler-agents",
+  "description": "Curated list of common web crawler and bot User-Agent strings used across the internet.",
+  "homepage": "https://github.com/Kikobeats/top-crawler-agents",
+  "version": "1.0.43",
+  "main": "index.js",
+  "author": {
+    "email": "josefrancisco.verdu@gmail.com",
+    "name": "Kiko Beats",
+    "url": "https://kikobeats.com"
+  },
+  "contributors": [
+    {
+      "name": "omrilotan",
+      "email": "omrilotan@hotmail.com"
+    }
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Kikobeats/top-crawler-agents.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Kikobeats/top-crawler-agents/issues"
+  },
+  "keywords": [
+    "agents",
+    "bot",
+    "crawler",
+    "detect",
+    "googlebot",
+    "list",
+    "scraping",
+    "spider",
+    "ua",
+    "user-agent"
+  ],
+  "devDependencies": {
+    "@commitlint/cli": "latest",
+    "@commitlint/config-conventional": "latest",
+    "bottleneck": "latest",
+    "browserless": "latest",
+    "cheerio": "latest",
+    "ci-publish": "latest",
+    "crawler-user-agents": "latest",
+    "finepack": "latest",
+    "git-authors-cli": "latest",
+    "github-generate-release": "latest",
+    "nano-staged": "latest",
+    "p-every": "latest",
+    "p-filter": "2",
+    "puppeteer": "latest",
+    "signal-exit": "latest",
+    "simple-git-hooks": "latest",
+    "standard": "latest",
+    "standard-version": "latest"
+  },
+  "engines": {
+    "node": ">= 18"
+  },
+  "files": [
+    "index.js",
+    "index.json"
+  ],
+  "scripts": {
+    "clean": "rm -rf node_modules",
+    "contributors": "(npx git-authors-cli && npx finepack && git add package.json && git commit -m 'build: contributors' --no-verify) || true",
+    "cronjob": "npm run update:crawler-agents && npm run healthcheck",
+    "healthcheck": "curl -fsS -m 10 --retry 5 -o /dev/null https://hc-ping.com/b7995d4b-75cb-4434-9338-8c1aa4679dc6",
+    "lint": "exit 0",
+    "postrelease": "npm run release:tags && npm run release:github && (ci-publish || npm publish --access=public)",
+    "pretest": "npm run lint",
+    "release": "standard-version -a",
+    "release:github": "github-generate-release",
+    "release:tags": "git push --follow-tags origin HEAD:master",
+    "test": "node --test",
+    "update:crawler-agents": "node scripts/generate.mjs && git add index.json && (git diff --cached --quiet || git commit -m 'build(update): crawlers' --no-verify) && git push"
+  },
+  "license": "MIT",
+  "commitlint": {
+    "extends": [
+      "@commitlint/config-conventional"
+    ],
+    "rules": {
+      "body-max-line-length": [
+        0
+      ]
+    }
+  },
+  "nano-staged": {
+    "*.js": [
+      "npx @kikobeats/prettier-standard",
+      "standard --fix"
+    ],
+    "package.json": [
+      "finepack"
+    ]
+  },
+  "pnpm": {
+    "neverBuiltDependencies": []
+  },
+  "simple-git-hooks": {
+    "commit-msg": "npx commitlint --edit",
+    "pre-commit": "npx nano-staged"
+  }
+}
