@@ -3,38 +3,55 @@ import re
 from unidecode import unidecode
 
 class HelperUtils():
+    # Characters that are not legal inside a Windows file/directory name.
+    _INVALID_FILE_NAME_CHARS = set('<>:"/\\|?*')
+
     @staticmethod
-    def _check_path_valid(how: str, directory: str, file_name: str) -> bool:
+    def _check_path_valid(directory: str, file_name: str) -> bool:
         '''
-        Checks if path given in export() is valid.
+        Checks if the path given in export() is valid.
+
+        This method is only responsible for path-level validation:
+            1. The directory must exist on disk.
+            2. The file name must be a legal, non-empty name (no path
+               separators or other reserved characters).
+            3. Whether a file already exists at the target location.
+
+        It deliberately does NOT validate the export method (`how`) against
+        the file extension. That matching is handled centrally by
+        ``ObjectTree.export`` so the same extension rule cannot be enforced
+        twice with conflicting logic.
+
             Args:
                 directory (str): directory path
                 file_name (str): desired file_name
-                how (str): which export option: spreadsheet, text, etc...
             Returns:
-                bool: True if file with same path already exists.
-                Reason is that SAP gives options: generate and replace when
-                saving file. Need to replace if file already exists. 
+                bool: True if a file with the same path already exists.
+                The reason is that SAP gives the options "generate" and
+                "replace" when saving a file; the caller must choose
+                "replace" when the file already exists.
         '''
+        if not isinstance(directory, str) or not isinstance(file_name, str):
+            raise ValueError('Directory and file name must be strings')
+
         if not os.path.isdir(directory):
             raise ValueError(f"Directory: {directory} does not exist")
-        
-        directory = os.path.abspath(directory)
 
-        file_ext = os.path.splitext(file_name)[1]
-        if how == 'spreadsheet':
-            if file_ext.lower() != '.xlsx':
-                raise ValueError("File extension should be '.xlsx'")
-        elif how == 'local_file':
-            pass # Add validation check
+        if not file_name or file_name.strip() == '':
+            raise ValueError('File name cannot be empty')
 
-        elif how == 'word_processing':
-            pass # Add validation check
+        # A file name must not contain path separators or reserved
+        # characters, otherwise it would not resolve to a file inside
+        # the given directory.
+        if any(char in HelperUtils._INVALID_FILE_NAME_CHARS for char in file_name):
+            raise ValueError(
+                f"File name: {file_name} is not valid. "
+                "It must not contain path separators or any of "
+                '< > : " / \\ | ? *'
+            )
 
-        file_path = os.path.join(directory, file_name)
-        file_exists = os.path.exists(file_path)
-
-        return file_exists
+        file_path = os.path.abspath(os.path.join(directory, file_name))
+        return os.path.exists(file_path)
     
     @staticmethod
     def _clean_field_text(name: str) -> str:

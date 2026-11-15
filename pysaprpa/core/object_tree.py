@@ -1,7 +1,8 @@
 import json
+import os
 from typing import Union
 from pysaprpa.utils import HelperUtils as helper_utils, SAPGUIParameterUtils
-from pysaprpa.core.run_connect_SAP import connect_SAP 
+from pysaprpa.core.run_connect_SAP import connect_SAP
 
 class ObjectTree:
     def __init__(self, session: object = None, date_format: str = '%m/%d/%Y'):
@@ -469,13 +470,18 @@ class ObjectTree:
         >>> object_tree.export(how='spreadsheet', directory='/fake/path', file_name='EXAMPLE.XLSX')
         >>> Exported SAP data as spreadsheet
         """
-        import os
-
-        file_exists = helper_utils._check_path_valid(how, directory, file_name)
-        
-        if file_name.split('.')[-1].upper() not in ['XLSX', 'XLS']:
+        # The extension/export-method match is enforced here, in one place.
+        # HelperUtils._check_path_valid only validates the path itself.
+        file_ext = os.path.splitext(file_name)[1].lower()
+        if file_ext not in ['.xlsx', '.xls']:
             raise ValueError('Library only supports exporting excel files for the time being')
-        
+
+        # Fully validate and resolve the write path BEFORE touching SAP so an
+        # invalid directory never opens the SAP save dialog, and the
+        # generate/replace decision is based on the real on-disk location.
+        file_exists = helper_utils._check_path_valid(directory, file_name)
+        export_path = os.path.abspath(os.path.join(directory, file_name))
+
         if self.export_options_dict:
             export_option_id = self.export_options_dict.get(how, None)
             self.session.FindById(export_option_id).select()
@@ -496,6 +502,6 @@ class ObjectTree:
         else:
             self.session.findById("wnd[1]").sendVKey(0)  # Generate
 
-        self.path = os.path.join(directory, file_name)
-        return self
+        self.path = export_path
+        return export_path
 
