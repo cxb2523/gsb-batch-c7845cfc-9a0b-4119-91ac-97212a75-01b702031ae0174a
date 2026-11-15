@@ -1,0 +1,23 @@
+FROM python:3.13-slim-bookworm
+
+# zvg2mariadb does not call locale.setlocale, so no de_DE locale is required.
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+WORKDIR /app
+
+COPY requirements-zvg2mariadb.txt ./
+RUN pip install -r requirements-zvg2mariadb.txt
+
+# Only the consumer script is needed; no other zvg_portal modules are imported.
+COPY zvg_portal/__init__.py ./zvg_portal/__init__.py
+COPY zvg_portal/zvg2mariadb.py ./zvg_portal/zvg2mariadb.py
+
+RUN useradd --create-home --uid 1000 consumer \
+    && chown -R consumer:consumer /app
+
+USER consumer
+
+ENTRYPOINT ["python", "-m", "zvg_portal.zvg2mariadb"]
