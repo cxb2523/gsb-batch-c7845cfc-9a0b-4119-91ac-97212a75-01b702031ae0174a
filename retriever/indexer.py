@@ -7,12 +7,41 @@ import re
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from enum import Enum
 
 import numpy as np
 
 from retriever.chunker import Chunk, Chunker
 
 TOKEN_RE = re.compile(r"[a-z0-9]+")
+
+
+class IngestStatus(str, Enum):
+    """Terminal state of one document's ingestion attempt."""
+
+    INDEXED = "indexed"
+    DUPLICATE = "duplicate"
+
+
+@dataclass
+class IngestResult:
+    """Outcome of ingesting a single document.
+
+    ``chunks`` counts chunks written to the stores (``0`` for duplicates) and
+    ``duplicate_of`` identifies where this content fingerprint was first seen
+    (a URL when available, otherwise the original document id).
+    """
+
+    doc_id: str
+    status: IngestStatus
+    chunks: int = 0
+    duplicate_of: str | None = None
+    fingerprint: str = ""
+
+    @property
+    def indexed(self) -> bool:
+        """True when the document was newly written to the index."""
+        return self.status is IngestStatus.INDEXED
 
 
 @dataclass
@@ -98,17 +127,37 @@ class IndexManager:
         self.vectors = VectorIndex(dim=self.vector_dim)
         self.chunk_store: dict[str, dict] = {}
         self.seen_hashes: set[str] = set()
+        # fingerprint -> first URL/id that contributed that content
+        self.fingerprint_sources: dict[str, str] = {}
         self.last_updated: datetime | None = None
 
     def add(self, documents: list[Document]) -> int:
         """Chunk, dedupe, and index each document; returns chunks added."""
+        return sum(result.chunks for result in self.add_with_report(documents))
+
+    def add_with_report(self, documents: list[Document]) -> list[IngestResult]:
+        """Ingest documents and return one :class:`IngestResult` each.
+
+        Deduplication is content-based: a document whose fingerprint was seen
+        before is skipped (``IngestStatus.DUPLICATE``) and reported with the URL
+        (or document id) it was first ingested under.  Ordering of the returned
+        list mirrors ``documents``.
+        """
         chunker = Chunker(size=self.chunk_size)
-        added = 0
+        results: list[IngestResult] = []
         for doc in documents:
             fp = doc.fingerprint()
+            source = doc.url or doc.id
             if fp in self.seen_hashes:
+                results.append(IngestResult(
+                    doc_id=doc.id, status=IngestStatus.DUPLICATE,
+                    duplicate_of=self.fingerprint_sources.get(fp, source),
+                    fingerprint=fp,
+                ))
                 continue
             self.seen_hashes.add(fp)
+            self.fingerprint_sources[fp] = source
+            added = 0
             for chunk in chunker.chunk(doc.id, doc.text):
                 key = f"{doc.id}#{chunk.chunk_id}"
                 self.lexical.add(key, chunk.text)
@@ -119,8 +168,12 @@ class IndexManager:
                     "metadata": {**doc.metadata, "doc_id": doc.id},
                 }
                 added += 1
+            results.append(IngestResult(
+                doc_id=doc.id, status=IngestStatus.INDEXED,
+                chunks=added, fingerprint=fp,
+            ))
         self.last_updated = datetime.now(timezone.utc)
-        return added
+        return results
 
     def retrieve(self, terms: list[str], limit: int = 40) -> list[dict]:
         """Hybrid retrieval merging lexical overlap with vector similarity."""

@@ -7,6 +7,10 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException, status
 
 from api.models import (
+    CrawlPageResult,
+    CrawlRequest,
+    CrawlResponse,
+    CrawlSummary,
     ErrorResponse,
     IndexStatus,
     SearchRequest,
@@ -15,6 +19,7 @@ from api.models import (
 )
 from core.engine import SearchEngine, SearchResponse
 from retriever.indexer import Document, IndexManager
+from retriever.web import WebCrawler
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -33,6 +38,11 @@ def get_engine() -> SearchEngine:
 def get_index(engine: SearchEngine = Depends(get_engine)) -> IndexManager:
     """Expose the engine's index manager to write endpoints."""
     return engine.index
+
+
+def get_crawler() -> WebCrawler:
+    """Build the default crawler; overridable in tests via dependency override."""
+    return WebCrawler()
 
 
 @router.post(
@@ -72,6 +82,29 @@ async def add_document(doc: dict, index: IndexManager = Depends(get_index)) -> d
                         metadata=doc.get("metadata", {}))
     index.add([document])
     return {"queued": True, "doc_id": document.id}
+
+
+@router.post("/crawl", response_model=CrawlResponse, tags=["admin"],
+             summary="Batch-crawl seeds and report per-page settlement")
+def crawl(payload: CrawlRequest,
+          index: IndexManager = Depends(get_index),
+          crawler: WebCrawler = Depends(get_crawler)) -> CrawlResponse:
+    """Crawl seeds, index each fetched page, and return a reconcilable report.
+
+    Every seed/link ends in exactly one outcome, so operators can verify what
+    landed in the index, what robots.txt blocked, what failed, what was skipped
+    as duplicate content, and what was left unvisited by the page budget.
+    """
+    if payload.max_depth is not None:
+        crawler.max_depth = payload.max_depth
+    if payload.max_pages is not None:
+        crawler.max_pages = payload.max_pages
+    report = crawler.crawl_and_index(payload.seeds, index)
+    summary = report.summary
+    return CrawlResponse(
+        pages=[CrawlPageResult(**page.to_dict()) for page in report.pages],
+        summary=CrawlSummary(chunks=report.total_chunks, **summary),
+    )
 
 
 @router.get("/status", response_model=IndexStatus, tags=["admin"])

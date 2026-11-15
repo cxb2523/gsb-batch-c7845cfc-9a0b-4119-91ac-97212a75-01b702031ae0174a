@@ -112,6 +112,7 @@ Open [http://localhost:5173](http://localhost:5173)
 |--------|----------|-------------|
 | POST | `/api/search` | Semantic search with AI answers |
 | POST | `/api/index/url` | Index a webpage |
+| POST | `/api/crawl` | Batch-crawl seeds and return per-page settlement |
 | POST | `/api/index/document` | Upload & index a document |
 | GET | `/api/graph/explore` | Explore knowledge graph |
 | GET | `/api/stats` | Index statistics |

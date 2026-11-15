@@ -78,3 +78,42 @@ class ErrorResponse(BaseModel):
 
     error: str
     detail: str | None = None
+
+
+class CrawlPageResult(BaseModel):
+    """Settlement entry for one URL in a batch crawl."""
+
+    url: str
+    outcome: str = Field(..., description="indexed|robots_denied|fetch_failed|duplicate|unprocessed")
+    status_code: int | None = None
+    chunks: int = 0
+    duplicate_of: str | None = None
+    error: str | None = None
+    depth: int = 0
+
+
+class CrawlSummary(BaseModel):
+    """Aggregate counts for one batch crawl."""
+
+    indexed: int = 0
+    robots_denied: int = 0
+    fetch_failed: int = 0
+    duplicate: int = 0
+    unprocessed: int = 0
+    total: int = 0
+    chunks: int = 0
+
+
+class CrawlRequest(BaseModel):
+    """Batch crawl request: seeds plus optional crawl limits."""
+
+    seeds: list[str] = Field(..., min_length=1)
+    max_depth: int | None = Field(None, ge=0, le=10)
+    max_pages: int | None = Field(None, ge=1, le=1000)
+
+
+class CrawlResponse(BaseModel):
+    """Per-page settlement plus aggregate counts."""
+
+    pages: list[CrawlPageResult]
+    summary: CrawlSummary
