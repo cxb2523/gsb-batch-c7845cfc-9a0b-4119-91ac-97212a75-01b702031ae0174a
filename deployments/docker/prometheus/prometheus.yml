@@ -1,0 +1,76 @@
+# Prometheus scrape configuration for the NYC Taxi ETL pipeline.
+#
+# Targets:
+#   nyc-taxi-producer - producer entrypoint /metrics (trips_processed_total)
+#   nyc-taxi-consumer - consumer entrypoint /metrics (batch_insert_duration_seconds,
+#                       batch_size_rows, kafka_consumer_lag, trips_persisted_total)
+#   clickhouse        - ClickHouse server metrics
+#   kafka             - Kafka metrics via kafka-exporter (optional)
+#
+# Producer and consumer are scraped as separate jobs -- each metric family
+# only ever originates from one of the two processes, so keeping them as
+# distinct jobs (rather than one shared job) avoids ambiguous aggregation
+# and makes the `job` label meaningful when querying.
+#
+# Prometheus UI: http://localhost:9090
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  scrape_timeout: 10s
+
+  external_labels:
+    environment: "local"
+    pipeline: "nyc-taxi-etl"
+
+scrape_configs:
+
+  # Prometheus self-monitoring
+  - job_name: "prometheus"
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  # Producer /metrics endpoint 9100 (from .env)
+  # Started in-process by etl.entrypoints.producer via lifecycle.startup().
+  - job_name: "nyc-taxi-producer"
+    static_configs:
+      - targets: ["host.docker.internal:9100"]
+        labels:
+          component: "etl"
+          role: "producer"
+
+    # If the producer is containerized:
+    # targets: ["producer:9100"]
+
+  # Consumer /metrics endpoint 9101 (from .env).
+  # Started in-process by etl.entrypoints.consumer via lifecycle.startup().
+  - job_name: "nyc-taxi-consumer"
+    static_configs:
+      - targets: ["host.docker.internal:9101"]
+        labels:
+          component: "etl"
+          role: "consumer"
+
+    # If the consumer is containerized:
+    # targets: ["consumer:9101"]
+
+  # ClickHouse native Prometheus endpoint.
+  # Enabled in config.xml:
+  # <prometheus><port>9363</port></prometheus>
+  #
+  # Visit http://clickhouse:9363/metrics to inspect available metrics.
+  - job_name: "clickhouse"
+    static_configs:
+      - targets: ["clickhouse:9363"]
+        labels:
+          component: "clickhouse"
+    metrics_path: /metrics
+
+  # Kafka metrics via kafka-exporter.
+  # Uncomment when kafka-exporter is added to docker-compose.yml.
+  #
+  # - job_name: "kafka"
+  #   static_configs:
+  #     - targets: ["kafka-exporter:9308"]
+  #       labels:
+  #         component: "kafka"
