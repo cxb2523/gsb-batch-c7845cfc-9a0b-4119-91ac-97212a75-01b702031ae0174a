@@ -1,0 +1,342 @@
+"""
+Publicación de reportes en IPFS con rotación automática de pins antiguos.
+
+Estrategia:
+  1. Pinata (pinning service) — ruta principal. Marca cada pin con metadata
+     que identifica el proyecto para poder rotar después.
+  2. Rotación: tras un pin exitoso, lista los pins del proyecto en Pinata,
+     conserva los N más recientes y despinnea el resto.
+  3. Fallback local: solo se intenta si el binario `ipfs` existe. Si no,
+     degrada limpiamente sin lanzar excepción.
+
+Variables de entorno:
+  PINATA_API_KEY          — obligatoria para usar Pinata
+  PINATA_API_SECRET       — obligatoria para usar Pinata
+  PINATA_KEEP_LAST        — opcional, cuántos pins conservar (default 10)
+"""
+import base64
+import json
+import os
+import shutil
+import subprocess
+from datetime import datetime
+
+import requests as http
+
+from config.settings import DATA_DIR, IPFS_GATEWAY, IPFS_HASH_FILE
+
+# Gateways públicos donde el CID será accesible una vez pinneado en Pinata
+PUBLIC_GATEWAYS = [
+    "https://ipfs.io/ipfs/{cid}",
+    "https://dweb.link/ipfs/{cid}",
+]
+
+_B58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+
+
+def cid_v0_to_v1(cid):
+    """QmXXX (v0, base58) -> bafyXXX (v1, base32, dag-pb). Mismo contenido, otra forma."""
+    if not cid.startswith("Qm"):
+        return cid  # ya es v1
+    n = 0
+    for ch in cid:
+        n = n * 58 + _B58.index(ch)
+    raw = n.to_bytes(34, "big")  # multihash sha2-256: 0x12 0x20 + 32 bytes
+    return "b" + base64.b32encode(b"\x01\x70" + raw).decode().lower().rstrip("=")
+
+
+def browser_url(cid):
+    """Gateway de subdominio: resuelve vía navegador, no depende de la caché de Pinata."""
+    return f"https://{cid_v0_to_v1(cid)}.ipfs.inbrowser.link/"
+
+
+# Identificador del proyecto en la metadata de Pinata.
+# Se usa para no tocar pins de otros proyectos que compartan la cuenta.
+PROJECT_TAG = "annas-archive-hub"
+
+PINATA_API = "https://api.pinata.cloud"
+
+# Segundo proveedor (copia de respaldo). Estándar "IPFS Pinning Service API":
+# basta un POST con el CID y Filebase lo descarga desde la red (Pinata lo anuncia en IPNI).
+FILEBASE_API = "https://api.filebase.io/v1/ipfs"
+MIRROR_NAME = f"{PROJECT_TAG}-report"
+
+
+class IPFSPublisher:
+    def __init__(self):
+        self.report_file = f"{DATA_DIR}/current_report.json"
+        self.pinata_key = os.getenv("PINATA_API_KEY", "")
+        self.pinata_secret = os.getenv("PINATA_API_SECRET", "")
+        self.filebase_token = os.getenv("FILEBASE_TOKEN", "")
+        try:
+            self.keep_last = int(os.getenv("PINATA_KEEP_LAST", "10"))
+        except ValueError:
+            self.keep_last = 10
+
+    # ── Público ────────────────────────────────────────────────────────────
+    def publish_report(self, active_domains, manual_domains, by_service=None):
+        """
+        Genera el reporte JSON y lo publica en IPFS.
+        Devuelve el CID (hash) o None si falla todo.
+        Nunca lanza excepción hacia fuera: los errores se registran y se
+        devuelve None para que el pipeline pueda decidir qué hacer.
+        """
+        try:
+            self._write_report(active_domains, manual_domains, by_service)
+        except Exception as e:
+            print(f"  [!] No se pudo escribir el reporte local: {e}")
+            return None
+
+        cid = None
+        if self.pinata_key and self.pinata_secret:
+            cid = self._pin_to_pinata(self.report_file)
+            if cid:
+                self._save_hash(cid)
+                print(f"  [+] Pinneado en Pinata: {cid}")
+                print(f"  [+] Acceso público: {PUBLIC_GATEWAYS[0].format(cid=cid)}")
+                # Rotación: liberar cuota borrando pins antiguos del proyecto
+                self._rotate_old_pins()
+                # Copia en un segundo proveedor (best-effort, nunca rompe el pipeline)
+                self._mirror_to_filebase(cid)
+                return cid
+            print("  [!] Pinata falló, intentando daemon local...")
+        else:
+            print("  [!] PINATA_API_KEY/SECRET no configurados. Saltando Pinata.")
+
+        return self._publish_local()
+
+    def get_current_hash(self):
+        """Devuelve el último CID publicado."""
+        try:
+            with open(IPFS_HASH_FILE) as f:
+                return f.read().strip()
+        except FileNotFoundError:
+            return None
+
+    def get_ipfs_url(self, cid):
+        """URL del gateway local (para uso con daemon corriendo)."""
+        return f"{IPFS_GATEWAY}{cid}"
+
+    def get_public_urls(self, cid=None):
+        """Lista de URLs públicas donde el reporte debería estar disponible."""
+        cid = cid or self.get_current_hash()
+        if not cid:
+            return []
+        return [browser_url(cid)] + [gw.format(cid=cid) for gw in PUBLIC_GATEWAYS]
+
+    # ── Privado ────────────────────────────────────────────────────────────
+    @staticmethod
+    def _related(by_service, manual_domains):
+        """Servicios que no son Anna's. Los manual_verify (Cloudflare) son Z-Library."""
+        related = {k: list(v) for k, v in (by_service or {}).items() if k != "annas_archive"}
+        zl = related.setdefault("zlibrary", [])
+        for d in manual_domains:
+            url = f"https://{d}/"
+            if url not in zl:
+                zl.append(url)
+        return related
+
+    def _write_report(self, active_domains, manual_domains, by_service=None):
+        report = {
+            "timestamp": datetime.now().isoformat(),
+            # active_auto = SOLO Anna's Archive verificado (host o contenido).
+            # Otros servicios van aparte para no confundir al lector.
+            "active_auto": (by_service or {}).get("annas_archive", active_domains if by_service is None else []),
+            "related_services": self._related(by_service, manual_domains),
+            "manual_verify": manual_domains,
+            "gateways": [gw.split("/ipfs/")[0] for gw in PUBLIC_GATEWAYS],
+            "reachability_note": "Dominios verificados desde servidores de GitHub (EE.UU.). "
+                                 "Pueden estar bloqueados por tu ISP/país (p. ej. España): prueba otro.",
+            "note": "manual_verify requiere abrir en navegador (protección Cloudflare)",
+        }
+        os.makedirs(DATA_DIR, exist_ok=True)
+        with open(self.report_file, "w") as f:
+            json.dump(report, f, indent=2, ensure_ascii=False)
+
+    def _pinata_headers(self):
+        return {
+            "pinata_api_key": self.pinata_key,
+            "pinata_secret_api_key": self.pinata_secret,
+        }
+
+    def _pin_to_pinata(self, filepath):
+        """Sube el archivo a Pinata con metadata del proyecto y devuelve el CID."""
+        url = f"{PINATA_API}/pinning/pinFileToIPFS"
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        pinata_metadata = {
+            "name": f"{PROJECT_TAG}-report-{timestamp}",
+            "keyvalues": {
+                "project": PROJECT_TAG,
+                "type": "domain-report",
+            },
+        }
+        try:
+            with open(filepath, "rb") as f:
+                response = http.post(
+                    url,
+                    files={"file": f},
+                    data={"pinataMetadata": json.dumps(pinata_metadata)},
+                    headers=self._pinata_headers(),
+                    timeout=30,
+                )
+            if response.status_code == 200:
+                return response.json().get("IpfsHash")
+            print(f"  [!] Pinata error {response.status_code}: {response.text[:200]}")
+        except Exception as e:
+            print(f"  [!] Pinata excepción: {e}")
+        return None
+
+    def _rotate_old_pins(self):
+        """
+        Lista los pins del proyecto, conserva los self.keep_last más recientes
+        y despinnea el resto. Errores aquí NO deben romper el pipeline: la
+        publicación ya fue exitosa, la rotación es best-effort.
+        """
+        try:
+            pins = self._list_project_pins()
+        except Exception as e:
+            print(f"  [!] No se pudo listar pins para rotación: {e}")
+            return
+
+        if len(pins) <= self.keep_last:
+            print(f"  [*] Rotación: {len(pins)} pins ≤ keep_last={self.keep_last}, nada que borrar.")
+            return
+
+        # Orden descendente por fecha (más reciente primero)
+        pins.sort(key=lambda p: p.get("date_pinned", ""), reverse=True)
+        to_delete = pins[self.keep_last:]
+
+        print(f"  [*] Rotación: conservando {self.keep_last}, despinneando {len(to_delete)}...")
+        ok, fail = 0, 0
+        for p in to_delete:
+            cid = p.get("ipfs_pin_hash")
+            if not cid:
+                continue
+            if self._unpin(cid):
+                ok += 1
+            else:
+                fail += 1
+        print(f"  [+] Rotación completada. OK: {ok}, fallos: {fail}")
+
+    def _list_project_pins(self):
+        """Lista todos los pins activos etiquetados con este proyecto."""
+        headers = self._pinata_headers()
+        all_pins = []
+        offset = 0
+        page_size = 1000
+        # Filtro por metadata: solo pins con keyvalues.project == PROJECT_TAG
+        metadata_filter = json.dumps({
+            "keyvalues": {"project": {"value": PROJECT_TAG, "op": "eq"}}
+        })
+        while True:
+            params = {
+                "status": "pinned",
+                "pageLimit": page_size,
+                "pageOffset": offset,
+                "metadata": metadata_filter,
+            }
+            r = http.get(
+                f"{PINATA_API}/data/pinList",
+                headers=headers,
+                params=params,
+                timeout=30,
+            )
+            if r.status_code != 200:
+                raise RuntimeError(f"pinList {r.status_code}: {r.text[:150]}")
+            data = r.json()
+            rows = data.get("rows", [])
+            all_pins.extend(rows)
+            if len(rows) < page_size:
+                break
+            offset += page_size
+        return all_pins
+
+    def _unpin(self, cid):
+        try:
+            r = http.delete(
+                f"{PINATA_API}/pinning/unpin/{cid}",
+                headers=self._pinata_headers(),
+                timeout=30,
+            )
+            if r.status_code == 200:
+                return True
+            print(f"    [!] Unpin {cid} falló: {r.status_code} {r.text[:100]}")
+        except Exception as e:
+            print(f"    [!] Unpin {cid} excepción: {e}")
+        return False
+
+    # ── Segundo proveedor: Filebase (Pinning Service API) ──────────────────
+    def _filebase(self, method, path, **kw):
+        return getattr(http, method)(
+            f"{FILEBASE_API}{path}",
+            headers={"Authorization": f"Bearer {self.filebase_token}"},
+            timeout=30, **kw,
+        )
+
+    def _mirror_to_filebase(self, cid):
+        """Pinea el CID en Filebase y rota los antiguos. Devuelve True si quedó pineado/encolado."""
+        if not self.filebase_token:
+            print("  [*] FILEBASE_TOKEN no configurado: sin copia de respaldo.")
+            return False
+        try:
+            # Evitar duplicados si el reporte no cambió y el CID es el mismo
+            r = self._filebase("get", "/pins", params={"cid": cid, "limit": 1})
+            if r.status_code == 200 and r.json().get("count", 0) > 0:
+                print(f"  [*] Filebase ya tiene {cid}")
+            else:
+                r = self._filebase("post", "/pins", json={"cid": cid, "name": f"{MIRROR_NAME}-{cid[:8]}"})
+                if r.status_code not in (200, 201, 202):
+                    print(f"  [!] Filebase error {r.status_code}: {r.text[:150]}")
+                    return False
+                print(f"  [+] Copia solicitada en Filebase: {cid}")
+            self._rotate_filebase()
+            return True
+        except Exception as e:
+            print(f"  [!] Filebase excepción: {e}")
+            return False
+
+    def _rotate_filebase(self):
+        """Conserva los keep_last pins más recientes del proyecto (la spec ordena por fecha desc)."""
+        r = self._filebase("get", "/pins", params={"name": MIRROR_NAME, "match": "partial", "limit": 1000})
+        if r.status_code != 200:
+            print(f"  [!] Filebase no pudo listar pins: {r.status_code}")
+            return
+        results = sorted(r.json().get("results", []), key=lambda x: x.get("created", ""), reverse=True)
+        for old in results[self.keep_last:]:
+            d = self._filebase("delete", f"/pins/{old['requestid']}")
+            print(f"    [*] Filebase borra {old.get('pin', {}).get('cid')}: {d.status_code}")
+
+    def _publish_local(self):
+        """
+        Fallback: publica vía daemon IPFS local.
+        Si el binario `ipfs` no está en PATH (típico en GitHub Actions),
+        se salta sin lanzar excepción.
+        """
+        ipfs_bin = shutil.which("ipfs")
+        if ipfs_bin is None:
+            print("  [!] Binario 'ipfs' no encontrado en PATH.")
+            print("  [!] Saltando fallback local (entorno CI o daemon no instalado).")
+            return None
+        try:
+            result = subprocess.run(
+                [ipfs_bin, "add", "-Q", self.report_file],
+                capture_output=True, text=True, timeout=60,
+            )
+            if result.returncode == 0:
+                cid = result.stdout.strip()
+                subprocess.run([ipfs_bin, "pin", "add", cid], capture_output=True, timeout=60)
+                self._save_hash(cid)
+                print(f"  [+] Publicado localmente: {cid}")
+                print("  [!] Solo accesible mientras el daemon esté corriendo.")
+                return cid
+            print(f"  [!] IPFS local falló: {result.stderr[:200]}")
+        except subprocess.TimeoutExpired:
+            print("  [!] IPFS local timeout.")
+        except Exception as e:
+            print(f"  [!] IPFS local excepción: {e}")
+        return None
+
+    def _save_hash(self, cid):
+        os.makedirs(DATA_DIR, exist_ok=True)
+        with open(IPFS_HASH_FILE, "w") as f:
+            f.write(cid)

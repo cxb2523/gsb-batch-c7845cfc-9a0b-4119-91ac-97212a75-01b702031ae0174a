@@ -1,0 +1,197 @@
+#!/usr/bin/env python3
+"""
+Script principal de ejecución automática.
+Actualiza dominios desde todas las fuentes y publica en IPFS.
+Optimizado para GitHub Actions y sincronización con la DB.
+"""
+
+import os
+import sys
+import re
+from datetime import datetime
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from config.settings import AUTO_VERIFIABLE, MANUAL_VERIFY, BLOCKED_DOMAINS
+from core.domain_tester import DomainTester
+from core.open_slum_crawler import crawl_open_slum
+from core.social_crawler import SocialCrawler
+from core.ipfs_publisher import IPFSPublisher, browser_url
+from core.voter import Voter
+
+
+def update_readme(cid):
+    """Actualiza el CID en los archivos README (inglés y español)."""
+    files = ["README.md", "README.es.md"]
+
+    for filename in files:
+        if not os.path.exists(filename):
+            continue
+
+        with open(filename, "r", encoding="utf-8") as f:
+            content = f.read()
+
+        # Regex para encontrar el CID (asumiendo formato Qm...)
+        # Busca patrones tipo `**Current CID:** `Qm...` o `CID actual: `Qm...`
+        new_content = re.sub(
+            r"((?:Current CID:|CID actual:)\*\*? `)(Qm[a-zA-Z0-9]+)(`)",
+            r"\1" + cid + r"\3",
+            content
+        )
+
+        # También actualizar los links de IPFS en las tablas
+        new_content = re.sub(
+            r"/ipfs/Qm[a-zA-Z0-9]+",
+            f"/ipfs/{cid}",
+            new_content
+        )
+
+        # Fila "inbrowser.link": subdominio con CID v1, distinto formato que /ipfs/Qm...
+        new_content = re.sub(
+            r"https://baf[a-z2-7]+\.ipfs\.inbrowser\.link/", browser_url(cid), new_content
+        )
+
+        if content != new_content:
+            with open(filename, "w", encoding="utf-8") as f:
+                f.write(new_content)
+            print(f"[+] {filename} actualizado con el nuevo CID")
+        else:
+            print(f"[*] {filename} ya estaba actualizado o no se encontró el patrón")
+
+
+_T = {
+    "en": dict(d="Domain", s="Status", ok="✅ Active", libgen="Libgen (related service)",
+               zl="Z-Library (related service)",
+               man="> ⚠️ Z-Library mirrors {m} require opening in a browser due to Cloudflare protection (listed as `manual_verify` in the report).",
+               geo="> 🌍 Domains are verified from GitHub servers (USA). Your ISP/country may block some (e.g. `.gd`/`.li` in Spain): try another."),
+    "es": dict(d="Dominio", s="Estado", ok="✅ Activo", libgen="Libgen (servicio relacionado)",
+               zl="Z-Library (servicio relacionado)",
+               man="> ⚠️ Los espejos de Z-Library {m} requieren abrirse en el navegador por protección Cloudflare (van como `manual_verify` en el reporte).",
+               geo="> 🌍 Los dominios se verifican desde servidores de GitHub (EE.UU.). Tu ISP/país puede bloquear alguno (p. ej. `.gd`/`.li` en España): prueba otro."),
+}
+
+
+def render_domains(by_service, manual, lang):
+    """Markdown de las tablas por servicio. Los z-lib de manual_verify se suman a Z-Library."""
+    t = _T[lang]
+    host = lambda u: u.replace("https://", "").rstrip("/")
+
+    def table(title, urls):
+        if not urls:
+            return ""  # sin filas no hay tabla (la nota de manual_verify sigue abajo)
+        rows = "".join(f"| {host(u)} | {t['ok']} |\n" for u in sorted(set(urls)))
+        return f"### {title}\n\n| {t['d']} | {t['s']} |\n|--------|--------|\n{rows}\n"
+
+    zl = list(by_service.get("zlibrary", []))
+    out = table("Anna's Archive", by_service.get("annas_archive", []))
+    out += table(t["libgen"], by_service.get("libgen", []))
+    out += table(t["zl"], zl)
+    return out + t["man"].format(m=", ".join(manual)) + "\n" + t["geo"] + "\n"
+
+
+def update_readme_domains(by_service, manual):
+    """Reescribe la zona entre <!-- DOMAINS:START/END -->. Sin Anna's encontrado no toca nada."""
+    if not by_service.get("annas_archive"):
+        print("[!] Sin Anna's Archive activos: tablas del README sin cambios")
+        return
+    for filename, lang in (("README.md", "en"), ("README.es.md", "es")):
+        if not os.path.exists(filename):
+            continue
+        with open(filename, encoding="utf-8") as f:
+            content = f.read()
+        new = re.sub(
+            r"(<!-- DOMAINS:START -->\n).*?(<!-- DOMAINS:END -->)",
+            lambda m: m.group(1) + render_domains(by_service, manual, lang) + m.group(2),
+            content, flags=re.S,
+        )
+        if new != content:
+            with open(filename, "w", encoding="utf-8") as f:
+                f.write(new)
+            print(f"[+] {filename}: tablas de dominios regeneradas")
+
+
+def main():
+    print("=" * 50)
+    print("   ANNA'S ARCHIVE HUB - EJECUCIÓN AUTOMÁTICA")
+    print("=" * 50)
+    print(f"Timestamp: {datetime.now()}\n")
+
+    voter = Voter()
+    tester = DomainTester()
+    publisher = IPFSPublisher()
+
+    # 1. Rastrear candidatos
+    print("[1/5] Rastreando candidatos...")
+    slum_domains = crawl_open_slum()
+    sc = SocialCrawler()
+    social_domains = sc.crawl_all()
+
+    # 2. Obtener dominios conocidos de la base de datos
+    verified_domains = voter.get_verified()
+    print(f"  [+] Dominios verificados en DB: {len(verified_domains)}")
+
+    # 3. Consolidar y Probar
+    # Combinamos: estáticos + verificados en DB + nuevos candidatos de crawlers
+    all_candidates = list(dict.fromkeys(
+        slum_domains + social_domains + list(AUTO_VERIFIABLE) + verified_domains
+    ))
+
+    # Filtrar bloqueados ANTES de testear: ni siquiera queremos gastar una
+    # petición de red contra un dominio ya confirmado como malicioso o ruido.
+    blocked_found = [d for d in all_candidates if d in BLOCKED_DOMAINS]
+    if blocked_found:
+        print(f"  [!] Ignorando {len(blocked_found)} dominio(s) bloqueado(s): {blocked_found}")
+    all_candidates = [d for d in all_candidates if d not in BLOCKED_DOMAINS]
+
+    print(f"\n[2/5] Probando {len(all_candidates)} dominios...")
+    active = tester.test_multiple(all_candidates)
+    print(f"  [+] Activos encontrados: {len(active)}")
+
+    # 4. Auto-proponer nuevos al sistema de votos
+    # Si un crawler encontró algo que no teníamos, lo metemos en la DB
+    for url in active:
+        domain = url.replace("https://", "").split('/')[0]
+        if domain not in AUTO_VERIFIABLE and domain not in verified_domains:
+            voter.propose(domain, proposed_by="auto-crawler")
+
+    # 5. Publicar en IPFS
+    print("\n[3/5] Publicando en IPFS...")
+    try:
+        hash_id = publisher.publish_report(active, MANUAL_VERIFY, tester.by_service)
+    except Exception as e:
+        print(f"[!] Excepción inesperada en publish_report: {e}")
+        hash_id = None
+
+    if hash_id is None:
+        print("[!] No se obtuvo CID nuevo (Pinata falló y no hay daemon IPFS local).")
+        print("[!] Manteniendo el CID anterior si existe. El pipeline continúa.")
+        previous = publisher.get_current_hash()
+        if previous:
+            print(f"[*] CID anterior conservado: {previous}")
+            hash_id = previous
+        else:
+            print("[!] No hay CID previo. Los steps siguientes que dependan de él pueden fallar.")
+
+    if hash_id:
+        print(f"  [+] CID: {hash_id}")
+        # 6. Actualizar README
+        print("\n[4/5] Actualizando documentación...")
+        update_readme(hash_id)
+        update_readme_domains(tester.by_service, MANUAL_VERIFY)
+    else:
+        print("  [!] Error al publicar en IPFS")
+
+    # 7. Guardar log
+    print("\n[5/5] Guardando log...")
+    os.makedirs("logs", exist_ok=True)
+    with open("logs/update.log", "a") as f:
+        f.write(
+            f"{datetime.now()} | cid={hash_id} | activos={len(active)}"
+            f" | slum={len(slum_domains)} | social={len(social_domains)}\n"
+        )
+
+    print("\n✅ Ejecución completada")
+
+
+if __name__ == "__main__":
+    main()

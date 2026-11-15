@@ -1,0 +1,38 @@
+{
+  "timestamp": "2026-11-15T18:32:37.444067",
+  "active_auto": [
+    "https://annas-archive.gl/",
+    "https://annas-archive.pk/",
+    "https://annas-archive.li/",
+    "https://annas-archive.gd/"
+  ],
+  "related_services": {
+    "libgen": [
+      "https://libgen.vg/",
+      "https://libgen.bz/",
+      "https://libgen.gl/",
+      "https://libgen.la/"
+    ],
+    "zlibrary": [
+      "https://welib.gl/",
+      "https://z-lib.gl/",
+      "https://go-to-library.sk/",
+      "https://z-lib.gd/",
+      "https://z-library.sk/",
+      "https://1lib.sk/"
+    ]
+  },
+  "manual_verify": [
+    "z-lib.gl",
+    "go-to-library.sk",
+    "z-lib.gd",
+    "z-library.sk",
+    "1lib.sk"
+  ],
+  "gateways": [
+    "https://ipfs.io",
+    "https://dweb.link"
+  ],
+  "reachability_note": "Dominios verificados desde servidores de GitHub (EE.UU.). Pueden estar bloqueados por tu ISP/país (p. ej. España): prueba otro.",
+  "note": "manual_verify requiere abrir en navegador (protección Cloudflare)"
+}
