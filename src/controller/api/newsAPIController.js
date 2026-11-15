@@ -11,17 +11,36 @@ const defaultImage =
   'https://raw.githubusercontent.com/MizouziE/energy-prices-api/master/public/img/energy-prices-api-socials.png';
 
 let articles = {};
+let collectionStatus = { lastRun: null, sources: {} };
 
 async function fetchArticles() {
-  articles = await getArticles();
+  try {
+    const result = await getArticles();
+
+    // always record how each source ended up this round
+    collectionStatus = {
+      lastRun: new Date().toISOString(),
+      sources: result.sources,
+    };
+
+    // never wipe a previously good catalogue with an empty/failed round
+    if (Object.keys(result.articles).length > 0) {
+      articles = result.articles;
+    } else {
+      console.log('refresh produced no articles, keeping previous catalogue');
+    }
+  } catch (error) {
+    // a failed refresh must not clear the last usable results
+    console.log({ error });
+  }
 }
 fetchArticles();
 
-// fetch every 30 minutes
+// fetch every 30 minutes, reusing the same fetchArticles logic
 setInterval(() => {
   console.log("updating catalogue...");
   fetchArticles();
-}, 1000 * 60 * 30);
+}, 1000 * 60 * 30).unref();
 
 const sourceObject = async(source,baseUrl)=>{
   const response = await axios.get(source.site);
@@ -49,6 +68,11 @@ const controller = {
     }
 
     return res.json(articles);
+  },
+  getCollectionStatus: (req, res) => {
+    // read-only view of how the latest collection round ended per source:
+    // { lastRun, sources: { <name>: {status: 'ok', count} | {status: 'empty', count: 0} | {status: 'error', reason} } }
+    return res.json(collectionStatus);
   },
   getNewsBySource: async (req, res) => {
     const sourceId = (req.params.sourceId).toLowerCase();
@@ -175,3 +199,5 @@ const controller = {
 };
 
 module.exports = controller;
+// exposed for tests and for the periodic refresh; not mounted as a route
+module.exports.fetchArticles = fetchArticles;

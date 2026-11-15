@@ -85,6 +85,23 @@ This endpoint will list sources that are attributed to a single region, Europe i
 
 This endpoint will give a list of regions that we currently have sources from. Each region retrieved will have it's name and a url to a direct link to that region's list of sources.
 
+### Collection status
+
+[/api/news/status](http://localhost:8000/api/news/status)
+
+A read-only view of how the most recent collection round (startup or the 30-minute refresh) ended for each source. It does not change the `/api/news` response structure. Structured as follows:
+```json
+{
+  "lastRun": "2026-11-16T10:30:00.000Z",
+  "sources": {
+    "The Guardian": { "status": "ok", "count": 12 },
+    "Some Empty Source": { "status": "empty", "count": 0 },
+    "Some Broken Source": { "status": "error", "reason": "connect ECONNREFUSED ..." }
+  }
+}
+```
+`ok` includes the number of articles collected from that source, `empty` means the source responded but yielded no articles, and `error` means the source was skipped this round, with the failure reason attached.
+
 ## Features
 
 ### Pagination

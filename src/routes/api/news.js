@@ -5,6 +5,7 @@ const router = express.Router();
 const existingSourceMiddleware = require('../../middlewares/existingSourceMiddleware');
 const existingRegionMiddleware = require('../../middlewares/existingRegionMiddleware');
 router.get('/', controller.getNews);
+router.get('/status', controller.getCollectionStatus);
 router.get('/sources', controller.getSources);
 router.get('/sources/:sourceId', existingSourceMiddleware, controller.getNewsBySource);
 router.get('/regions',controller.getRegions);
