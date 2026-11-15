@@ -1,0 +1,191 @@
+# Tags constants
+DATE_CLASSES_KEYWORDS = [
+    x.lower()
+    for x in [
+        "news_date",
+        "news-date-time",
+        "date",
+        "news-date",
+        "newslistdate",
+        "createdate",
+        "date_block",
+        "b_date",
+        "entry-date",
+        "pub_date",
+        "g-date",
+        "post-date",
+        "textdate",
+        "datestamp",
+        "date-time",
+        "dateBlock",
+        "date-posted",
+        "NewsDate",
+        "newsDate",
+        "artDate",
+        "gDate",
+        "postDate",
+        "pubDate",
+        "newsPubDate",
+        "NewsDateTime",
+        "timestamp",
+        "publish_time",
+        "news_time",
+        "news-time",
+        "newsTime",
+        "newsdate",
+        "meta-date",
+        "n_date",
+        "time_news",
+        "newsdatetime",
+        "date_time",
+        "g-time",
+    ]
+]
+
+DATE_CLASSES_KEYS = ["date", "time"]
+
+NEWS_CLASSES_KEYWORDS = [
+    x.lower()
+    for x in [
+        "news-item",
+        "news",
+        "latestnews",
+        "news_title",
+        "news-title",
+        "news_item",
+        "news-text",
+        "news-list",
+        "news_text",
+        "newstitle",
+        "mainnews",
+        "newslist",
+        "news-main",
+        "firstnews",
+        "news-link",
+        "newslink",
+        "newsblock",
+        "news-block",
+        "news-content",
+        "news_block",
+        "news-name",
+        "newsItem",
+        "newstext",
+        "news-ann",
+        "news_img",
+        "News",
+        "news_caption",
+        "newsTitle",
+        "item_news",
+        "news-picture",
+        "news_anons",
+        "novost",
+    ]
+]
+
+NEWS_CLASSES_KEYS = ["news", "novost", "novosti"]
+
+#: URL path or link text fragments of news sections; ``scan --crawl`` visits
+#: such links before others at the same depth.
+CRAWL_SECTION_HINTS = (
+    "news",
+    "press",
+    "blog",
+    "article",
+    "media",
+    "update",
+    "announcement",
+    "novost",
+    "новост",
+    "новини",
+    "пресс",
+    "nachrichten",
+    "aktuell",
+    "meldungen",
+    "presse",
+    "actualit",
+    "communique",
+    "noticias",
+    "prensa",
+    "imprensa",
+    "notizie",
+    "comunicat",
+    "nieuws",
+    "aktualn",
+    "wiadomosci",
+    "aktuality",
+    "zpravy",
+    "haber",
+)
+
+#: Path suffixes of resources that ``scan --crawl`` never visits as pages.
+NON_HTML_EXTENSIONS = (
+    ".pdf",
+    ".jpg",
+    ".jpeg",
+    ".png",
+    ".gif",
+    ".webp",
+    ".svg",
+    ".ico",
+    ".mp3",
+    ".mp4",
+    ".avi",
+    ".mov",
+    ".webm",
+    ".zip",
+    ".gz",
+    ".rar",
+    ".7z",
+    ".doc",
+    ".docx",
+    ".xls",
+    ".xlsx",
+    ".ppt",
+    ".pptx",
+    ".odt",
+    ".ods",
+    ".rtf",
+    ".csv",
+    ".css",
+    ".js",
+    ".xml",
+    ".json",
+    ".txt",
+)
+
+FEED_CONTENT_TYPES = [
+    "application/rss+xml",
+    "application/rdf+xml",
+    "application/atom+xml",
+    "application/xml",
+    "text/xml",
+]
+
+TAG_TYPE_TEXT = "tag:type:text"
+TAG_TYPE_TAIL = "tag:type:tail"
+TAG_TYPE_WRAPPER = "tag:type:wrapper"
+TAG_TYPE_LAST = "tag:type:last"
+TAG_TYPE_EMPTY = "tag:type:empty"
+TAG_TYPE_HREF = "tag:type:url"
+TAG_TYPE_BOLD = "tag:type:bold"  # Shows title type of texts
+TAG_TYPE_IMG = "tag:type:img"
+
+TAG_TYPE_DATE = "tag:type:date"
+
+#: Session and analytics query parameters removed from item links (compared
+#: case-insensitively).
+CLEANABLE_QUERY_KEYS = [
+    "phpsessid",
+    "utm_source",
+    "utm_campaign",
+    "utm_medium",
+    "utm_content",
+    "utm_term",
+    "utm_id",
+    "utm_hp_ref",
+    "fbclid",
+    "gclid",
+    "yclid",
+    "mc_cid",
+    "mc_eid",
+]

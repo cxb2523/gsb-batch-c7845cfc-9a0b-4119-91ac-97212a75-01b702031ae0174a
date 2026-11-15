@@ -1,0 +1,130 @@
+#!/usr/bin/env python
+"""Per-site bridge specs: YAML files with a host/path matcher plus a FeedSpec body.
+
+Bridges live in ``newsworker/bridges/`` (bundled) and optionally in
+``~/.newsworker/bridges/`` (user overrides). When a URL matches, the bridge spec is
+applied via :class:`newsworker.spec.SpecExtractor` instead of running dynamic heuristics.
+"""
+
+import fnmatch
+import glob
+import logging
+import os
+from dataclasses import dataclass
+from typing import Any
+from urllib.parse import urlparse
+
+import yaml
+
+from .spec import FeedSpec
+
+log = logging.getLogger(__name__)
+
+_PACKAGE_BRIDGES = os.path.join(os.path.dirname(__file__), "bridges")
+
+
+@dataclass
+class SiteBridge:
+    """A host/path matcher paired with a parsing spec."""
+
+    host: str
+    path_pattern: str = "*"
+    spec: FeedSpec = None  # type: ignore[assignment]
+    name: str = ""
+
+    def matches(self, url: str) -> bool:
+        parsed = urlparse(url or "")
+        host = (parsed.hostname or "").lower()
+        if not host:
+            return False
+        if self.host.startswith("*."):
+            suffix = self.host[1:]
+            if not (host == self.host[2:] or host.endswith(suffix)):
+                return False
+        elif host != self.host.lower():
+            return False
+        path = parsed.path or "/"
+        return fnmatch.fnmatch(path, self.path_pattern)
+
+
+def _bridges_from_dict(data, source_name=""):
+    match = data.get("match") or {}
+    hosts = match.get("hosts") or match.get("host")
+    if isinstance(hosts, str):
+        hosts = [hosts]
+    hosts = [str(host) for host in (hosts or []) if host]
+    if not hosts:
+        raise ValueError("bridge missing match.host")
+    spec_data = data.get("spec") or data.get("bridge") or data
+    if "match" in spec_data:
+        spec_data = {k: v for k, v in spec_data.items() if k != "match"}
+    spec = FeedSpec.from_dict(spec_data)
+    return [
+        SiteBridge(
+            host=host,
+            path_pattern=str(match.get("path") or "*"),
+            spec=spec,
+            name=source_name or host,
+        )
+        for host in hosts
+    ]
+
+
+def _bridge_from_dict(data, source_name=""):
+    """Compatibility helper returning the bridge for the first listed host."""
+    return _bridges_from_dict(data, source_name)[0]
+
+
+def load_bridge_files(path) -> list[SiteBridge]:
+    """Load one bridge file; a ``match.hosts`` list yields one bridge per host."""
+    with open(path, encoding="utf-8") as handle:
+        data = yaml.safe_load(handle) or {}
+    return _bridges_from_dict(data, source_name=os.path.basename(path))
+
+
+def load_bridge_file(path):
+    return load_bridge_files(path)[0]
+
+
+def load_bridges(*directories) -> list[SiteBridge]:
+    """Loads all ``*.yaml`` / ``*.yml`` bridge files from ``directories``.
+
+    Directories are listed lowest precedence first; bridges from later
+    directories are returned first, so a user bridge overrides a bundled one
+    that matches the same URL.
+    """
+    bridges: list[SiteBridge] = []
+    for directory in reversed(directories):
+        if not directory or not os.path.isdir(directory):
+            continue
+        pattern = os.path.join(directory, "*.y*ml")
+        for path in sorted(glob.glob(pattern)):
+            try:
+                bridges.extend(load_bridge_files(path))
+            except Exception as e:  # noqa: BLE001
+                log.warning("Skipping bridge %s: %s", path, e)
+    return bridges
+
+
+def default_bridge_dirs(settings: Any = None):
+    """Returns bridge directories, lowest precedence (bundled) first."""
+    from .settings import DEFAULT_HOME
+
+    dirs = [_PACKAGE_BRIDGES]
+    user_dir = os.path.join(DEFAULT_HOME, "bridges")
+    configured = getattr(settings, "bridges_dir", None) if settings is not None else None
+    if configured:
+        user_dir = os.path.expanduser(configured)
+    dirs.append(user_dir)
+    return dirs
+
+
+def select_bridge(url: str, bridges: list[SiteBridge]) -> FeedSpec | None:
+    """Returns the spec from the first matching bridge, or ``None``."""
+    for bridge in bridges:
+        try:
+            if bridge.matches(url):
+                return bridge.spec
+        except Exception as e:  # noqa: BLE001
+            log.debug("Bridge %r match failed for %s: %s", bridge.name, url, e)
+    return None

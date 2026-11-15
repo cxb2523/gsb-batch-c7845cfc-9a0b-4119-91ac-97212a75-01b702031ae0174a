@@ -1,0 +1,287 @@
+#!/usr/bin/env python
+"""
+Tag mapping routines. Initially it was created for other purposes. It's intended to create web page map of tags, annotating
+"""
+
+import hashlib
+
+from lxml import etree
+
+from .consts import (
+    TAG_TYPE_BOLD,
+    TAG_TYPE_EMPTY,
+    TAG_TYPE_HREF,
+    TAG_TYPE_IMG,
+    TAG_TYPE_LAST,
+    TAG_TYPE_TAIL,
+    TAG_TYPE_TEXT,
+    TAG_TYPE_WRAPPER,
+)
+
+
+class TagPath:
+    """Tag path class. Allows unique tag identification"""
+
+    def __init__(self, node, limit=None):
+        self.__shifts = []
+        self.__tag_names = []
+        self.limit = limit
+
+        self.__parseNode(node, limit)
+
+    @staticmethod
+    def getSharedNode(left, right, upToRelated=True):
+        """Looks for shared parent for left and right nodes. upToRelated as True means using upper tag if shared tag is tbody"""
+        l_path = TagPath(left)
+        r_path = TagPath(right)
+        change = l_path.level - r_path.level
+        p_1 = left.getparent()
+        p_2 = right.getparent()
+        if change > 0:
+            for _i in range(0, change):
+                p_1 = p_1.getparent()
+        elif change < 0:
+            for _i in range(0, -change):
+                p_2 = p_2.getparent()
+        while p_1 is not None and p_2 is not None:
+            if p_1 == p_2:
+                if upToRelated and p_1.tag == "tbody":
+                    p_1 = p_1.getparent()
+                return p_1
+            p_1 = p_1.getparent()
+            p_2 = p_2.getparent()
+        return None
+
+    @staticmethod
+    def getSharedPath(left, right):
+        """Returns node root for two other nodes"""
+        node = TagPath.getSharedNode(left, right)
+        if node is not None:
+            return TagPath(node)
+        return None
+
+    def __parseNode(self, node, limit):
+        """Parses node to the tag path"""
+        shifts = self.__shifts
+        tag_names = self.__tag_names
+        # Walk up to the root (or ``limit``), then reverse: the path is built
+        # once per node, not once per ancestor.
+        while True:
+            # Handle case where node might not have a tag attribute
+            node_tag = getattr(node, "tag", None)
+            if node_tag is None:
+                # If tag is missing, use a default value
+                node_tag = "unknown"
+
+            parent = node.getparent()
+            if parent is not None and parent.tag != "<DOCUMENT_ROOT>" and node != limit:
+                try:
+                    shifts.append(parent.index(node))
+                except (AttributeError, ValueError):
+                    # Fallback if index() fails
+                    shifts.append(0)
+                tag_names.append(node_tag)
+                node = parent
+            else:
+                shifts.append(0)
+                tag_names.append(node_tag)
+                break
+        self.level = len(shifts)
+        shifts.reverse()
+        tag_names.reverse()
+        self.key = "_".join(map(str, shifts))
+
+    @property
+    def hash(self):
+        """MD5 hex digest of :attr:`key`, computed on first use."""
+        digest = self.__dict__.get("_hash")
+        if digest is None:
+            md = hashlib.md5(usedforsecurity=False)
+            md.update(self.key.encode("utf8"))
+            digest = self.__dict__["_hash"] = md.hexdigest()
+        return digest
+
+    def __cmp__(self, tagpath):
+        return bool(list(self.values()) == list(tagpath.values()) and self.limit == tagpath.limit)
+
+    def __eq__(self, tagpath):
+        if not isinstance(tagpath, TagPath):
+            return NotImplemented
+        return list(self.values()) == list(tagpath.values()) and self.limit == tagpath.limit
+
+    def __hash__(self):
+        return hash((tuple(self.values()), id(self.limit)))
+
+    def values(self):
+        """Returns num of tag shifts, tag deepness"""
+        return self.__shifts
+
+    def key_values(self):
+        """Returns list of values as unique key"""
+        return "_".join(map(str, self.__shifts))
+
+    def tag_names(self):
+        """Returns list of tag names"""
+        return self.__tag_names
+
+    def as_xpath(self):
+        """Return path as xpath from root node"""
+        tnames = self.__tag_names
+        #        tnames.reverse()
+        vals = self.__shifts
+        #        vals.reverse()
+
+        results = []
+        i = 0
+        results.append("//html")  # lxml hack to support DOCUMENT_ROOT
+        for i in range(0, len(tnames)):
+            results.append("/%s[%d]" % ("*", vals[i] + 1))
+            i += 1
+        return "".join(results)
+
+
+class TagEntry:
+    """Tag record used to map tags to entities"""
+
+    def __init__(self, aid, node, tag, position, path, parent_id, attrs=None, htmlattrs=None):
+        if not attrs:
+            attrs = []
+        self.__id = aid
+        self.node = node
+        self.path = path
+        self.tag = tag
+        self.position = position
+        self.parent_id = parent_id
+        self.attrs = attrs
+        self.htmlattrs = htmlattrs
+
+    def as_list(self):
+        return [
+            self.__id,
+            self.path.key_values(),
+            self.tag,
+            self.position,
+            self.parent_id,
+            self.attrs,
+            self.htmlattrs,
+        ]
+
+
+class TagBlock:
+    """Block of tags"""
+
+    def __init__(self, root_node, path, position, shift):
+        self.path = path
+        self.__root_node = root_node
+        self.position = position
+        self.shift = shift
+        self.entities = {}
+        self.global_id = -1
+
+    def add_entity(self, key, path, attr=None, value=None, b_value=None):
+        self.entities[key] = [path, attr, value, b_value]
+
+    def get_entities(self):
+        return self.entities
+
+    def as_dict(self):
+        return {
+            "position": self.position,
+            "shift": self.shift,
+            "path": self.path,
+            "entities": self.entities,
+        }
+
+    def as_html(self):
+        if self.shift is None:
+            return etree.tostring(list(self.__root_node)[self.position], encoding="utf8")
+        else:
+            s = None
+            ch = list(self.__root_node)
+            wlen = len(ch)
+            for i in range(0, self.shift):
+                if self.position + i < wlen:
+                    if not s:
+                        s = etree.tostring(ch[self.position + i], encoding="utf8")
+                    else:
+                        s += etree.tostring(ch[self.position + i], encoding="utf8")
+            return s
+
+    def identify_entities(self, node=None, parent_id=None):  # noqa: C901
+        """Identifies tag entries as different data types"""
+        annotations = []
+        if node is None and self.shift is None:
+            node = self.__root_node[self.position]
+        elif node is None:
+            for node in list(self.__root_node)[self.position : self.position + self.shift]:
+                if node is not None:
+                    annotations.extend(self.identify_entities(node))
+            return annotations
+        ch = node
+        ch_childs = list(ch)
+        attrs = []
+        if (
+            ch.text
+            and ch.tag
+            not in [
+                "script",
+            ]
+            and len(ch.text.strip()) != 0
+        ):
+            attrs.append(TAG_TYPE_TEXT)
+        if ch.tail and len(ch.tail.strip()) != 0:
+            attrs.append(TAG_TYPE_TAIL)
+        if len(attrs) == 0:
+            attrs.append(TAG_TYPE_EMPTY)
+        if len(ch_childs) == 0:
+            attrs.append(TAG_TYPE_LAST)
+        elif len(ch_childs) == 1 and TAG_TYPE_EMPTY in attrs:
+            attrs.append(TAG_TYPE_WRAPPER)
+        if ch.tag == "a" and "href" in ch.attrib:
+            attrs.append(TAG_TYPE_HREF)
+        if ch.tag in ["h1", "h2", "h3", "h4", "b", "strong"]:
+            attrs.append(TAG_TYPE_BOLD)
+        if ch.tag == "img" and "src" in ch.attrib:
+            attrs.append(TAG_TYPE_IMG)
+        apath = TagPath(ch, self.__root_node)
+        htmlattrs = dict(ch.attrib)
+        self.global_id += 1
+        aid = self.global_id
+        # Handle case where getparent() might return None
+        parent = ch.getparent()
+        position = 0
+        if parent is not None:
+            try:
+                position = parent.index(ch)
+            except (AttributeError, ValueError):
+                # Fallback if index() fails for any reason
+                position = 0
+
+        # Handle case where tag might not exist
+        ch_tag = getattr(ch, "tag", None)
+
+        annotations.append(
+            TagEntry(
+                aid,
+                ch,
+                ch_tag,
+                position,
+                apath,
+                parent_id,
+                attrs,
+                htmlattrs,
+            )
+        )
+        for child in ch_childs:
+            if child is not None:
+                annotations.extend(self.identify_entities(child, aid))
+        return annotations
+
+    def print_block(self):
+        """Prints this tag block"""
+        if self.shift is None:
+            print(etree.tostring(list(self.__root_node)[self.position], encoding="utf8"))
+        else:
+            ch = list(self.__root_node)
+            for i in range(0, self.shift):
+                print(etree.tostring(ch[self.position + i], encoding="utf8"))

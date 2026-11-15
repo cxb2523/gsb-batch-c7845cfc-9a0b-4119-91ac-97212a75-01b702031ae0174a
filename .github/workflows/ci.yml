@@ -1,0 +1,159 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+  schedule:
+    - cron: "17 4 * * 1"
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - run: python -m pip install --upgrade pip
+      - run: pip install -e '.[test]'
+      - name: Tests and coverage gate
+        run: pytest -q --cov=newsworker --cov-branch --cov-report=term-missing --cov-fail-under=85
+
+  locked:
+    # The pinned dependency set from requirements-lock.txt, oldest and newest Python.
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - run: python -m pip install --upgrade pip
+      - run: pip install -r requirements-lock.txt
+      - run: pip install --no-deps -e .
+      - name: Lock file matches pyproject.toml
+        if: matrix.python-version == '3.14'
+        run: |
+          pip install uv==0.10.8
+          uv pip compile pyproject.toml --extra test --python-version 3.10 --universal \
+            --no-header --quiet -o /tmp/lock.txt -c requirements-lock.txt
+          diff <(grep -v '^#' requirements-lock.txt | grep -v '^ *#') <(grep -v '^ *#' /tmp/lock.txt)
+      - run: pytest -q
+
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - run: pip install -e '.[dev]'
+      - run: ruff format --check newsworker tests benchmarks
+      - run: ruff check newsworker tests benchmarks
+      - run: mypy
+
+  optional-extras:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        extra: [async, fulltext, metrics, browser, mcp]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - run: pip install -e ".[test,${{ matrix.extra }}]"
+      - name: Install browser runtime
+        if: matrix.extra == 'browser'
+        run: python -m playwright install --with-deps chromium
+      - name: Optional-extra tests
+        env:
+          NEWSWORKER_BROWSER_TESTS: ${{ matrix.extra == 'browser' && '1' || '0' }}
+        run: pytest -q tests/test_optional_transports.py tests/test_enrich.py tests/test_http_caching.py tests/test_politeness.py tests/test_mcp_server.py
+
+  corpus:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - run: pip install -e '.[test]'
+      - name: Extraction quality report
+        run: python benchmarks/corpus_report.py --output corpus.md && cat corpus.md >> "$GITHUB_STEP_SUMMARY"
+      - name: Quality gate
+        run: pytest -q tests/test_corpus.py
+
+  network-smoke:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - run: pip install -e '.[test]'
+      - name: Live news pages still extract
+        run: python benchmarks/live_check.py
+
+  artifact:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install build twine
+      - run: python -m build
+      - run: twine check dist/*
+      - name: Clean wheel install and package-data smoke
+        run: |
+          python -m venv /tmp/newsworker-wheel
+          /tmp/newsworker-wheel/bin/pip install dist/*.whl
+          /tmp/newsworker-wheel/bin/newsworker --version
+          /tmp/newsworker-wheel/bin/python -c "import importlib.resources as r; assert r.files('newsworker').joinpath('py.typed').is_file(); assert r.files('newsworker').joinpath('bridges').is_dir()"
+
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: docs/package-lock.json
+      - name: Install and build documentation
+        working-directory: ./docs
+        run: |
+          npm ci
+          npm run build
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t newsworker:ci .
+      - name: Run and probe image
+        run: |
+          docker run -d --name newsworker-ci -p 127.0.0.1:8787:8787 newsworker:ci
+          for i in $(seq 1 20); do
+            curl --fail --silent http://127.0.0.1:8787/health/live && exit 0
+            sleep 1
+          done
+          docker logs newsworker-ci
+          exit 1

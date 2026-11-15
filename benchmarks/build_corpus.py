@@ -1,0 +1,575 @@
+"""Generate the offline extraction corpus under ``tests/corpus``.
+
+Each case is a news listing page built from a common CMS layout and a language,
+with the items a person would label as the news list (title, link, date).
+Real site snapshots are not committed because their content is third-party
+copyright; the layouts reproduce structures seen on real sites instead.
+
+Run from the repository root:  python benchmarks/build_corpus.py
+"""
+
+from __future__ import annotations
+
+import datetime as dt
+import html
+import json
+import random
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1] / "tests" / "corpus"
+BASE = "https://news.example.org"
+
+MONTHS = {
+    "en": "January February March April May June July August September October November December",
+    "ru": "января февраля марта апреля мая июня июля августа сентября октября ноября декабря",
+    "de": "Januar Februar März April Mai Juni Juli August September Oktober November Dezember",
+    "fr": "janvier février mars avril mai juin juillet août septembre octobre novembre décembre",
+    "es": "enero febrero marzo abril mayo junio julio agosto septiembre octubre noviembre diciembre",
+    "it": "gennaio febbraio marzo aprile maggio giugno luglio agosto settembre ottobre novembre dicembre",
+    "pt": "janeiro fevereiro março abril maio junho julho agosto setembro outubro novembro dezembro",
+    "uk": "січня лютого березня квітня травня червня липня серпня вересня жовтня листопада грудня",
+}
+
+WORDS = {
+    "en": (
+        "Council approves new budget for regional transport projects|Researchers publish annual report on coastal water quality|"
+        "City opens public consultation on the future of the harbour|Ministry announces grants for small business innovation|"
+        "University launches open data portal for climate records|Agency updates guidance on digital service standards|"
+        "Board appoints new director for the national statistics office|Library extends opening hours during the exam season"
+    ),
+    "ru": (
+        "Совет утвердил новый бюджет региональных транспортных проектов|Исследователи опубликовали годовой отчёт о качестве воды|"
+        "Город открыл общественное обсуждение будущего порта|Министерство объявило гранты для малого бизнеса|"
+        "Университет запустил портал открытых климатических данных|Агентство обновило рекомендации по цифровым услугам|"
+        "Правление назначило нового директора статистической службы|Библиотека продлила часы работы на время сессии"
+    ),
+    "de": (
+        "Rat genehmigt neuen Haushalt für regionale Verkehrsprojekte|Forscher veröffentlichen Jahresbericht zur Wasserqualität|"
+        "Stadt startet öffentliche Beteiligung zur Zukunft des Hafens|Ministerium kündigt Förderung für kleine Unternehmen an|"
+        "Universität startet offenes Datenportal für Klimadaten|Behörde aktualisiert Leitfaden für digitale Dienste|"
+        "Vorstand ernennt neue Leitung des Statistikamts|Bibliothek verlängert Öffnungszeiten während der Prüfungszeit"
+    ),
+    "fr": (
+        "Le conseil approuve un nouveau budget pour les transports régionaux|Des chercheurs publient le rapport annuel sur la qualité de l’eau|"
+        "La ville ouvre une consultation publique sur l’avenir du port|Le ministère annonce des subventions pour les petites entreprises|"
+        "L’université lance un portail de données ouvertes sur le climat|L’agence met à jour ses recommandations numériques|"
+        "Le conseil nomme une nouvelle direction pour l’institut statistique|La bibliothèque prolonge ses horaires pendant les examens"
+    ),
+    "es": (
+        "El consejo aprueba un nuevo presupuesto para el transporte regional|Investigadores publican el informe anual sobre la calidad del agua|"
+        "La ciudad abre una consulta pública sobre el futuro del puerto|El ministerio anuncia ayudas para pequeñas empresas|"
+        "La universidad lanza un portal de datos abiertos sobre el clima|La agencia actualiza su guía de servicios digitales|"
+        "La junta nombra una nueva dirección para la oficina de estadística|La biblioteca amplía su horario durante los exámenes"
+    ),
+    "it": (
+        "Il consiglio approva il nuovo bilancio per i trasporti regionali|I ricercatori pubblicano il rapporto annuale sulla qualità dell’acqua|"
+        "La città apre una consultazione pubblica sul futuro del porto|Il ministero annuncia contributi per le piccole imprese|"
+        "L’università lancia un portale di dati aperti sul clima|L’agenzia aggiorna le linee guida sui servizi digitali|"
+        "Il consiglio nomina una nuova direzione per l’istituto di statistica|La biblioteca estende gli orari durante gli esami"
+    ),
+    "pt": (
+        "Conselho aprova novo orçamento para projetos de transporte regional|Pesquisadores publicam relatório anual sobre a qualidade da água|"
+        "Cidade abre consulta pública sobre o futuro do porto|Ministério anuncia apoio para pequenas empresas|"
+        "Universidade lança portal de dados abertos sobre o clima|Agência atualiza orientações sobre serviços digitais|"
+        "Conselho nomeia nova direção para o instituto de estatística|Biblioteca amplia horário durante a época de exames"
+    ),
+    "uk": (
+        "Рада затвердила новий бюджет регіональних транспортних проєктів|Дослідники оприлюднили річний звіт про якість води|"
+        "Місто відкрило громадське обговорення майбутнього порту|Міністерство оголосило гранти для малого бізнесу|"
+        "Університет запустив портал відкритих кліматичних даних|Агенція оновила рекомендації щодо цифрових послуг|"
+        "Правління призначило нового директора статистичної служби|Бібліотека подовжила години роботи під час сесії"
+    ),
+}
+
+
+WEEKDAYS_EN = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+# Press-release datelines: a place before the date (issue #8).
+DATELINES = ["GENEVA", "Vienna", "New York", "Bangkok", "St. Petersburg"]
+
+
+def date_text(lang: str, value: dt.date, style: str) -> str:
+    month = MONTHS[lang].split()[value.month - 1]
+    if style == "dateline":
+        place = DATELINES[value.toordinal() % len(DATELINES)]
+        if place.isupper():
+            month = month.upper()
+        if value.day % 3 == 0 and value.day < 28:
+            # An event span; the first day is the date.
+            return f"{place}, {value.day}-{value.day + 1} {month} {value.year}"
+        return f"{place}, {value.day} {month} {value.year}"
+    if style == "weekday":
+        # "Monday, January 31, 2022" (issue #18).
+        return f"{WEEKDAYS_EN[value.weekday()]}, {month} {value.day}, {value.year}"
+    if style == "iso":
+        return value.isoformat()
+    if style == "dotted":
+        return value.strftime("%d.%m.%Y")
+    if style == "slashed":
+        return value.strftime("%d/%m/%Y")
+    if lang == "en":
+        return (
+            f"{month} {value.day}, {value.year}" if style == "long" else value.strftime("%d %b %Y")
+        )
+    if lang == "de":
+        return f"{value.day}. {month} {value.year}"
+    if lang in ("es", "pt"):
+        return f"{value.day} de {month} de {value.year}"
+    return f"{value.day} {month} {value.year}"
+
+
+def items_for(lang: str, seed: int, count: int = 6):
+    rng = random.Random(seed)
+    titles = WORDS[lang].split("|")
+    rng.shuffle(titles)
+    start = dt.date(2025, 10, 16) - dt.timedelta(days=rng.randint(0, 120))
+    items = []
+    for index in range(count):
+        day = start - dt.timedelta(days=index * rng.randint(1, 4))
+        slug = f"/{lang}/news/{seed}-{index + 1}"
+        items.append(
+            {"title": titles[index % len(titles)], "link": BASE + slug, "path": slug, "date": day}
+        )
+    return items
+
+
+def esc(text: str) -> str:
+    return html.escape(text, quote=True)
+
+
+NAV = """<header><nav class="menu"><ul><li><a href="/">Home</a></li><li><a href="/about">About</a></li>
+<li><a href="/contact">Contact</a></li></ul></nav></header>"""
+FOOTER = """<footer><p>© 2025 Example Agency. Last updated 01.09.2025.</p></footer>"""
+
+
+def layout_wordpress(lang, items, style):
+    body = "".join(
+        f"""<article class="post type-post"><header class="entry-header"><h2 class="entry-title">
+<a href="{it["path"]}" rel="bookmark">{esc(it["title"])}</a></h2>
+<div class="entry-meta"><time class="entry-date published" datetime="{it["date"].isoformat()}T09:00:00+00:00">
+{date_text(lang, it["date"], style)}</time></div></header>
+<div class="entry-summary"><p>{esc(it["title"])}. Read the full announcement for details.</p></div></article>"""
+        for it in items
+    )
+    return f'<main id="main" class="site-main">{body}</main>'
+
+
+def layout_drupal(lang, items, style):
+    rows = "".join(
+        f"""<div class="views-row"><div class="views-field views-field-created">
+<span class="field-content">{date_text(lang, it["date"], style)}</span></div>
+<div class="views-field views-field-title"><span class="field-content"><a href="{it["path"]}">{esc(it["title"])}</a></span></div></div>"""
+        for it in items
+    )
+    return f'<div class="view view-news"><div class="view-content">{rows}</div></div>'
+
+
+def layout_cards(lang, items, style):
+    cards = "".join(
+        f"""<div class="col-md-4"><div class="card"><img class="card-img-top" src="/img/{i}.jpg" alt="">
+<div class="card-body"><h5 class="card-title"><a href="{it["path"]}">{esc(it["title"])}</a></h5>
+<p class="card-text text-muted"><small>{date_text(lang, it["date"], style)}</small></p></div></div></div>"""
+        for i, it in enumerate(items)
+    )
+    return f'<div class="container"><div class="row">{cards}</div></div>'
+
+
+def layout_table(lang, items, style):
+    rows = "".join(
+        f"""<tr><td class="date">{date_text(lang, it["date"], style)}</td>
+<td><a href="{it["path"]}">{esc(it["title"])}</a></td></tr>"""
+        for it in items
+    )
+    return f'<table class="news"><thead><tr><th>Date</th><th>Title</th></tr></thead><tbody>{rows}</tbody></table>'
+
+
+def layout_list(lang, items, style):
+    rows = "".join(
+        f"""<li><span class="date">{date_text(lang, it["date"], style)}</span>
+<a href="{it["path"]}">{esc(it["title"])}</a></li>"""
+        for it in items
+    )
+    return f'<ul class="news-list">{rows}</ul>'
+
+
+def layout_date_after(lang, items, style):
+    rows = "".join(
+        f"""<div class="news-item"><h3><a class="title" href="{it["path"]}">{esc(it["title"])}</a></h3>
+<div class="meta">{date_text(lang, it["date"], style)}</div><p>{esc(it["title"])}: summary of the announcement.</p></div>"""
+        for it in items
+    )
+    return f'<section class="news">{rows}</section>'
+
+
+def layout_with_sidebar(lang, items, style):
+    main = layout_list(lang, items, style)
+    side = "".join(
+        f"""<li><a href="/{lang}/events/{i}">Event {i + 1}</a> <span>{date_text(lang, dt.date(2025, 11, 2 + i), style)}</span></li>"""
+        for i in range(2)
+    )
+    return (
+        f'<div class="layout"><main>{main}</main>'
+        f'<aside class="sidebar"><h4>Events</h4><ul class="events">{side}</ul></aside></div>'
+    )
+
+
+def layout_category_first(lang, items, style):
+    """A category link precedes the headline link (issue #19)."""
+    rows = "".join(
+        f"""<div class="item"><a class="category" href="/{lang}/topics/{i % 3}">Topic {i % 3}</a>
+<h3><a href="{it["path"]}">{esc(it["title"])}</a></h3><span class="date">{date_text(lang, it["date"], style)}</span></div>"""
+        for i, it in enumerate(items)
+    )
+    return f'<div class="items">{rows}</div>'
+
+
+def layout_read_more(lang, items, style):
+    """Teaser, then a "read more" link to the same article after the title."""
+    rows = "".join(
+        f"""<div class="teaser"><span class="date">{date_text(lang, it["date"], style)}</span>
+<h4><a href="{it["path"]}">{esc(it["title"])}</a></h4><p>Short teaser text for the story.</p>
+<a class="more" href="{it["path"]}">Read more</a></div>"""
+        for it in items
+    )
+    return f'<div class="teasers">{rows}</div>'
+
+
+def layout_with_time(lang, items, style):
+    """Date and clock time, plus a comment counter with numbers."""
+    rows = "".join(
+        f"""<li class="entry"><div class="stamp">{date_text(lang, it["date"], style)} 14:{10 + i:02d}</div>
+<a href="{it["path"]}">{esc(it["title"])}</a> <span class="comments">{3 + i} comments</span></li>"""
+        for i, it in enumerate(items)
+    )
+    return f'<ol class="stream">{rows}</ol>'
+
+
+def layout_busy_sidebar(lang, items, style):
+    """The sidebar has as many dated entries as the main listing."""
+    main = layout_date_after(lang, items, style)
+    side = "".join(
+        f"""<li><span>{date_text(lang, dt.date(2025, 11, 2 + i), style)}</span> <a href="/{lang}/events/{i}">Event {i + 1}</a></li>"""
+        for i in range(len(items))
+    )
+    return (
+        f'<div class="layout"><main>{main}</main>'
+        f'<aside class="sidebar"><h4>Upcoming events</h4><ul class="events">{side}</ul></aside></div>'
+    )
+
+
+def layout_pager(lang, items, style):
+    """A numbered pager and an archive menu of month/year links below the list."""
+    listing = layout_list(lang, items, style)
+    pager = "".join(f'<a href="?page={n}">{n}</a> ' for n in range(1, 6))
+    archive = "".join(
+        f'<li><a href="/{lang}/archive/2025/{m:02d}">{date_text(lang, dt.date(2025, m, 1), "dotted")[3:]}</a></li>'
+        for m in range(1, 10)
+    )
+    return f'{listing}<div class="pager">{pager}</div><ul class="archive">{archive}</ul>'
+
+
+def layout_flat(lang, items, style):
+    """No wrapper per item: heading, date line, teaser text and a link are siblings."""
+    rows = "".join(
+        f"""<h2 class="news"><a href="{it["path"]}">{esc(it["title"])}</a></h2>
+<div class="newsdate">Posted on <strong>{date_text(lang, it["date"], style)}</strong> by the press office</div>
+{esc(it["title"])}: a short summary of the announcement for readers.
+<p><a href="{it["path"]}">Read more...</a></p>"""
+        for it in items
+    )
+    return f'<div id="content"><p class="tags"><a href="/tags/a">Tag A</a> <a href="/tags/b">Tag B</a></p>{rows}</div>'
+
+
+CORPUS_NOW = dt.datetime(2025, 10, 16, 12, 0, tzinfo=dt.timezone.utc)
+
+RELATIVE = {
+    "en": ("{n} hours ago", "yesterday", "{n} days ago"),
+    "ru": ("{n} часа назад", "вчера", "{n} дня назад"),
+    "uk": ("{n} години тому", "вчора", "{n} дні тому"),
+    "de": ("vor {n} Stunden", "gestern", "vor {n} Tagen"),
+    "fr": ("il y a {n} heures", "hier", "il y a {n} jours"),
+    "es": ("hace {n} horas", "ayer", "hace {n} días"),
+    "it": ("{n} ore fa", "ieri", "{n} giorni fa"),
+    "pt": ("há {n} horas", "ontem", "há {n} dias"),
+}
+
+
+def relative_items(lang, seed):
+    """Items dated relative to CORPUS_NOW: hours ago, yesterday, then 2-4 days ago."""
+    items = items_for(lang, seed)
+    hours, yesterday, days = RELATIVE[lang]
+    offsets = [dt.timedelta(hours=3), dt.timedelta(days=1)] + [
+        dt.timedelta(days=n) for n in (2, 3, 4, 4)
+    ]
+    labels = [hours.format(n=3), yesterday] + [days.format(n=n) for n in (2, 3, 4, 4)]
+    for item, offset, label in zip(items, offsets, labels, strict=True):
+        item["date"] = (CORPUS_NOW - offset).date()
+        item["label"] = label
+    return items
+
+
+def layout_relative(lang, items, style):
+    rows = "".join(
+        f"""<li class="post"><a href="{it["path"]}">{esc(it["title"])}</a>
+<span class="ago">{esc(it["label"])}</span></li>"""
+        for it in items
+    )
+    return f'<ul class="latest">{rows}</ul>'
+
+
+def layout_json_ld(lang, items, style):
+    """Cards show no dates; the dates are only in a JSON-LD ItemList."""
+    cards = "".join(
+        f"""<div class="card"><h3><a href="{it["path"]}">{esc(it["title"])}</a></h3>
+<p>{esc(it["title"])}: summary.</p></div>"""
+        for it in items
+    )
+    graph = {
+        "@context": "https://schema.org",
+        "@graph": [
+            {"@type": "CollectionPage", "url": f"{BASE}/{lang}/news/", "name": "News"},
+            {
+                "@type": "ItemList",
+                "itemListElement": [
+                    {
+                        "@type": "ListItem",
+                        "position": i + 1,
+                        "item": {
+                            "@type": "NewsArticle",
+                            "headline": it["title"],
+                            "url": it["link"],
+                            "datePublished": f"{it['date'].isoformat()}T09:00:00+03:00",
+                            "author": {"@type": "Person", "name": "Press Office"},
+                        },
+                    }
+                    for i, it in enumerate(items)
+                ],
+            },
+        ],
+    }
+    script = json.dumps(graph, ensure_ascii=False)
+    return f'<div class="cards">{cards}</div><script type="application/ld+json">{script}</script>'
+
+
+def layout_microdata(lang, items, style):
+    """Dates only as itemprop=datePublished meta content."""
+    rows = "".join(
+        f"""<article itemscope itemtype="https://schema.org/NewsArticle">
+<h3 itemprop="headline"><a itemprop="url" href="{it["path"]}">{esc(it["title"])}</a></h3>
+<meta itemprop="datePublished" content="{it["date"].isoformat()}T10:30:00+02:00">
+<p itemprop="description">{esc(it["title"])}: summary.</p></article>"""
+        for it in items
+    )
+    return f'<section class="articles">{rows}</section>'
+
+
+LAYOUTS = {
+    "wordpress": layout_wordpress,
+    "drupal": layout_drupal,
+    "cards": layout_cards,
+    "table": layout_table,
+    "list": layout_list,
+    "date-after": layout_date_after,
+    "sidebar": layout_with_sidebar,
+    "category-first": layout_category_first,
+    "read-more": layout_read_more,
+    "with-time": layout_with_time,
+    "busy-sidebar": layout_busy_sidebar,
+    "pager": layout_pager,
+    "flat": layout_flat,
+}
+
+STYLES = {
+    "en": ["long", "short", "iso"],
+    "ru": ["long", "dotted"],
+    "de": ["long", "dotted"],
+    "fr": ["long", "slashed"],
+    "es": ["long"],
+    "it": ["long"],
+    "pt": ["long"],
+    "uk": ["long", "dotted"],
+}
+
+
+# Styles added after the corpus was first built; generated last so the
+# earlier cases keep their seeds (and pages) unchanged.
+EXTRA_STYLES = {
+    "en": ["dateline", "weekday"],
+}
+
+
+EXTRA_LAYOUTS = {
+    "relative": layout_relative,
+    "json-ld": layout_json_ld,
+    "microdata": layout_microdata,
+}
+
+
+def grouped_items(lang, seed):
+    """Items with a clock time: the timeline shows the time, ``datetime`` the day."""
+    items = items_for(lang, seed, count=8)
+    for i, item in enumerate(items):
+        item["label"] = f"{17 - i:02d}:{13 * i % 60:02d}"
+        item["stamp"] = f"{item['date'].isoformat()}T{item['label']}"
+    return items
+
+
+#: Wrappers of the grouped timeline: three, two and one item, and items between them.
+TIMELINE_PLAN = ([0, 1, 2], 3, "ad", [4, 5], 6, [7])
+TOPICS = {"en": "Markets", "ru": "Рынки"}
+QUOTES = {
+    "en": ["Gold", "Silver", "Copper", "Nickel", "Zinc", "Brent", "Aluminium", "Platinum"],
+    "ru": ["Золото", "Серебро", "Медь", "Никель", "Цинк", "Нефть", "Алюминий", "Платина"],
+}
+
+
+def _timeline_entry(lang, it, css):
+    """``time`` and the headline link; a ``smalltext`` entry leads with a topic link."""
+    topic = (
+        f'<a href="/{lang}/topics/markets" class="timeline_link">{TOPICS[lang]}</a>'
+        if css == "timeline__smalltext"
+        else ""
+    )
+    return (
+        f'<div class="{css}"><time datetime="{it["stamp"]}">{it["label"]}</time>{topic}'
+        f'<a href="{it["path"]}" title="{esc(it["title"])}"><h3>{esc(it["title"])}</h3></a></div>'
+    )
+
+
+def layout_grouped(lang, items, style):
+    """A timeline that puts most items into ``timeline__group`` wrappers (interfax.ru)."""
+    parts = []
+    for step in TIMELINE_PLAN:
+        if step == "ad":
+            parts.append('<div class="no__dot"><div class="banner">Advertisement</div></div>')
+        elif isinstance(step, list):
+            entries = "".join(_timeline_entry(lang, items[i], "") for i in step)
+            parts.append(f'<div class="timeline__group">{entries}</div>')
+        else:
+            css = "timeline__smalltext" if step == 3 else "timeline__text"
+            parts.append(_timeline_entry(lang, items[step], css))
+    return f'<div class="timeline">{"".join(parts)}</div>'
+
+
+def layout_grouped_quotes(lang, items, style):
+    """The grouped timeline after a quotes table with eight dated rows."""
+    day = (CORPUS_NOW - dt.timedelta(days=2)).strftime("%d.%m")
+    rows = "".join(
+        f'<tr><td><a href="/{lang}/quotes/{i}">{name}</a></td><td>{1200 + 37 * i},00</td>'
+        f'<td class="plus">+{i % 3},{10 + i}%</td><td class="font__small">{day} 00:00</td></tr>'
+        for i, name in enumerate(QUOTES[lang])
+    )
+    quotes = f'<div class="info"><table class="info__table">{rows}</table></div>'
+    return quotes + layout_grouped(lang, items, style)
+
+
+# Layouts added after the corpus was first built; generated last so the
+# earlier cases keep their seeds (and pages) unchanged.
+GROUPED_LAYOUTS = {
+    "grouped": layout_grouped,
+    "grouped-quotes": layout_grouped_quotes,
+}
+
+
+#: A word in place of the date: the date is only in the ``datetime`` attribute.
+TIME_LABELS = {"en": "Recently", "ru": "Недавно"}
+
+
+def layout_time_empty(lang, items, style):
+    """An empty ``<time datetime>`` per item; CSS or JavaScript draws the date."""
+    rows = "".join(
+        f"""<div class="timeline__item"><time datetime="{it["date"].isoformat()}T{8 + i:02d}:{5 * i:02d}"></time>
+<a href="{it["path"]}"><h3>{esc(it["title"])}</h3></a></div>"""
+        for i, it in enumerate(items)
+    )
+    return f'<div class="timeline">{rows}</div>'
+
+
+def layout_time_label(lang, items, style):
+    """``<time datetime>`` shows a word, not the date, below the teaser."""
+    rows = "".join(
+        f"""<article class="teaser"><h3><a href="{it["path"]}">{esc(it["title"])}</a></h3>
+<p>{esc(it["title"])}: summary.</p>
+<footer><time class="ago" datetime="{it["date"].isoformat()}T10:{10 + i:02d}:00+03:00">{TIME_LABELS[lang]}</time></footer></article>"""
+        for i, it in enumerate(items)
+    )
+    return f'<section class="teasers">{rows}</section>'
+
+
+# Generated after the grouped layouts, so their cases keep their seeds.
+ATTRIBUTE_LAYOUTS = {
+    "time-empty": layout_time_empty,
+    "time-label": layout_time_label,
+}
+
+
+def _variants():
+    for lang, styles in STYLES.items():
+        for style in styles:
+            for layout_name, layout in LAYOUTS.items():
+                yield lang, style, layout_name, layout
+        for layout_name, layout in EXTRA_LAYOUTS.items():
+            yield lang, "none", layout_name, layout
+    for lang, styles in EXTRA_STYLES.items():
+        for style in styles:
+            for layout_name, layout in LAYOUTS.items():
+                yield lang, style, layout_name, layout
+    for lang in TOPICS:
+        for layout_name, layout in GROUPED_LAYOUTS.items():
+            yield lang, "none", layout_name, layout
+    for lang in TIME_LABELS:
+        for layout_name, layout in ATTRIBUTE_LAYOUTS.items():
+            yield lang, "none", layout_name, layout
+
+
+def build():
+    pages = ROOT / "pages"
+    pages.mkdir(parents=True, exist_ok=True)
+    cases = []
+    for seed, (lang, style, layout_name, layout) in enumerate(_variants(), start=1):
+        if layout_name == "relative":
+            items = relative_items(lang, seed)
+        elif layout_name in GROUPED_LAYOUTS:
+            items = grouped_items(lang, seed)
+        else:
+            items = items_for(lang, seed)
+        name = f"{lang}-{layout_name}" + ("" if style == "none" else f"-{style}")
+        document = (
+            f'<!DOCTYPE html><html lang="{lang}"><head><meta charset="utf-8">'
+            f"<title>News — Example Agency</title></head><body>{NAV}"
+            f"<h1>News</h1>{layout(lang, items, style)}{FOOTER}</body></html>"
+        )
+        (pages / f"{name}.html").write_text(document, encoding="utf-8")
+        cases.append(
+            {
+                "name": name,
+                "url": f"{BASE}/{lang}/news/",
+                "language": lang,
+                "layout": layout_name,
+                "date_style": style,
+                "page": f"pages/{name}.html",
+                "expected": [
+                    {
+                        "title": it["title"],
+                        "link": it["link"],
+                        "date": it["date"].isoformat(),
+                        "date_text": it.get("label")
+                        or (None if style == "none" else date_text(lang, it["date"], style)),
+                    }
+                    for it in items
+                ],
+            }
+        )
+    (ROOT / "cases.json").write_text(
+        json.dumps(
+            {"version": 1, "now": CORPUS_NOW.isoformat(), "cases": cases},
+            ensure_ascii=False,
+            indent=1,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    print(f"Wrote {len(cases)} cases to {ROOT}")
+
+
+if __name__ == "__main__":
+    build()
