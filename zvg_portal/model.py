@@ -35,6 +35,23 @@ class RawEntry(Sha256Mixin):
 
 
 @dataclass
+class DetailFetchFailure:
+    """Final outcome for a list row whose detail page could not be fetched.
+
+    ``ZvgPortal.list`` yields this instead of the ``RawEntry``, ``RawAnhang``
+    and ``ObjektEntry`` payloads of the affected row. It is deliberately not an
+    ``ObjektEntry``: consumers can split successes from failures with a plain
+    ``isinstance`` check, and get ``zvg_id``, ``land_short`` and ``reason`` so
+    every row has an interpretable outcome.
+    """
+
+    zvg_id: int
+    land_short: str
+    reason: str
+    url: str = ""
+
+
+@dataclass
 class ScraperRun:
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
     list_sha256s: List[str] = field(default_factory=list)
@@ -44,6 +61,9 @@ class ScraperRun:
     scraper_finished: Optional[datetime.datetime] = None
     scraped_entries: int = 0
     new_file_count: int = 0
+    # Rows whose detail page failed to load; they are reported to callers as
+    # DetailFetchFailure and never counted as scraped_entries.
+    failed_entries: int = 0
 
 
 @dataclass

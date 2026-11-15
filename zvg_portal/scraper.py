@@ -11,7 +11,14 @@ from typing import Dict, Iterator, Union
 import requests
 from bs4 import BeautifulSoup, UnicodeDammit
 
-from zvg_portal.model import Land, ObjektEntry, RawAnhang, RawEntry, RawList
+from zvg_portal.model import (
+    DetailFetchFailure,
+    Land,
+    ObjektEntry,
+    RawAnhang,
+    RawEntry,
+    RawList,
+)
 from zvg_portal.parser import AddressParser, VerkehrswertParser, VersteigerungsTerminParser
 from zvg_portal.utils import CustomHTTPAdapter
 
@@ -22,6 +29,13 @@ class Endpoints:
         self.index = f"{base_url}/index.php"
         self.form = f"{base_url}/index.php?button=Termine%20suchen"
         self.show_details = f"{base_url}/index.php?button=showZvg"
+
+
+def _summarize_error(ex: BaseException) -> str:
+    """One-line, bounded reason for a failed detail fetch (stored in DetailFetchFailure)."""
+    message = " ".join(str(ex).split())
+    summary = f"{type(ex).__name__}: {message}" if message else type(ex).__name__
+    return summary[:200]
 
 
 class ZvgPortal:
@@ -223,7 +237,9 @@ class ZvgPortal:
                 pass
         return self._remove_duplicate_spaces(s).strip()
 
-    def list(self, land: Land, plz: str = "") -> Iterator[Union[RawList, RawEntry, ObjektEntry, RawAnhang]]:
+    def list(
+        self, land: Land, plz: str = ""
+    ) -> Iterator[Union[RawList, RawEntry, ObjektEntry, RawAnhang, DetailFetchFailure]]:
         params = {"button": "Suchen", "all": "1"}
 
         data = {
@@ -318,28 +334,43 @@ class ZvgPortal:
             yield e
 
         # Fetch details concurrently for remaining entries
+        def _detail_url(zvg_id: int) -> str:
+            return f"{self._base_url}/index.php?button=showZvg&zvg_id={zvg_id}&land_abk={land.short}"
+
+        def _failure(e: ObjektEntry, reason: str) -> DetailFetchFailure:
+            return DetailFetchFailure(zvg_id=e.zvg_id, land_short=land.short, reason=reason, url=_detail_url(e.zvg_id))
+
         def _fetch_details(e: ObjektEntry):
-            url = f"{self._base_url}/index.php?button=showZvg&zvg_id={e.zvg_id}&land_abk={land.short}"
-            resp = self._session.get(
-                url,
-                headers={"Referer": f"{self._base_url}/index.php?button=Suchen"},
-                timeout=self._timeout,
-            )
-            resp.raise_for_status()
-            raw_entry = RawEntry(content=resp.content)
-            e.raw_entry_sha256 = raw_entry.sha256
-            anhaenge = []
-            if resp.content[0:10] == b"\n<!DOCTYPE":
-                for new_entry in self._parse_details(e, resp.content):
-                    if isinstance(new_entry, ObjektEntry):
-                        e = new_entry
-                    elif isinstance(new_entry, RawAnhang):
-                        anhaenge.append(new_entry)
-                    else:
-                        raise NotImplementedError
-            else:
-                self._logger.error(f"Response not valid {e}, could not : {resp.content[:200]}")
-            return e, raw_entry, anhaenge
+            url = _detail_url(e.zvg_id)
+            try:
+                resp = self._session.get(
+                    url,
+                    headers={"Referer": f"{self._base_url}/index.php?button=Suchen"},
+                    timeout=self._timeout,
+                )
+                resp.raise_for_status()
+                raw_entry = RawEntry(content=resp.content)
+                e.raw_entry_sha256 = raw_entry.sha256
+                anhaenge = []
+                if resp.content[0:10] == b"\n<!DOCTYPE":
+                    for new_entry in self._parse_details(e, resp.content):
+                        if isinstance(new_entry, ObjektEntry):
+                            e = new_entry
+                        elif isinstance(new_entry, RawAnhang):
+                            anhaenge.append(new_entry)
+                        else:
+                            raise NotImplementedError
+                else:
+                    self._logger.error(f"Response not valid {e}, could not : {resp.content[:200]}")
+                    return _failure(
+                        e, f"response is not a detail page (expected '<!DOCTYPE' prefix): {resp.content[:60]!r}"
+                    )
+                return e, raw_entry, anhaenge
+            except Exception as ex:
+                # Keep the entry's failure visible to the caller instead of
+                # dropping it silently: one failure must not abort the rest.
+                self._logger.warning(f"Skip entry due to detail fetch error: {ex}")
+                return _failure(e, _summarize_error(ex))
 
         # Keep at most `window` results in memory: hand a batch to the caller,
         # drop the Futures holding it, and only then top up. Submitting the
@@ -348,22 +379,37 @@ class ZvgPortal:
         window = max(1, self._max_workers * 2)
         queued = iter(entries_to_fetch)
         with ThreadPoolExecutor(max_workers=self._max_workers) as executor:
-            pending = {executor.submit(_fetch_details, entry) for entry in islice(queued, window)}
+            # Future -> entry, so even an unexpected executor-level error can
+            # be reported as a failure record for the right zvg_id. Bounded by
+            # `window`, like `pending`.
+            submitted = {executor.submit(_fetch_details, entry): entry for entry in islice(queued, window)}
+            pending = set(submitted)
             while pending:
                 done, pending = wait(pending, return_when=FIRST_COMPLETED)
                 completed = len(done)
                 while done:
                     fut = done.pop()
+                    entry_for_future = submitted.pop(fut)
                     try:
-                        detail_entry, raw_entry, anhaenge = fut.result()
+                        result = fut.result()
                     except Exception as ex:
+                        # Defensive net: `_fetch_details` already converts its
+                        # own failures, but a Future can still fail at the
+                        # executor boundary (e.g. during shutdown).
                         self._logger.warning(f"Skip entry due to detail fetch error: {ex}")
-                        continue
+                        result = _failure(entry_for_future, _summarize_error(ex))
                     finally:
                         fut = None  # the Future also holds the payload
+                    if isinstance(result, DetailFetchFailure):
+                        yield result
+                        del result, entry_for_future
+                        continue
+                    detail_entry, raw_entry, anhaenge = result
                     yield raw_entry
                     for a in anhaenge:
                         yield a
                     yield detail_entry
-                    del detail_entry, raw_entry, anhaenge
-                pending |= {executor.submit(_fetch_details, entry) for entry in islice(queued, completed)}
+                    del detail_entry, raw_entry, anhaenge, result
+                new_futures = {executor.submit(_fetch_details, entry): entry for entry in islice(queued, completed)}
+                submitted.update(new_futures)
+                pending |= set(new_futures)

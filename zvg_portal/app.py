@@ -16,7 +16,7 @@ import requests.adapters
 __service__ = "ZvgPortalScraper"
 __version__ = "1.0.0"
 
-from zvg_portal.model import ObjektEntry, RawAnhang, RawEntry, RawList, ScraperRun
+from zvg_portal.model import DetailFetchFailure, ObjektEntry, RawAnhang, RawEntry, RawList, ScraperRun
 from zvg_portal.nsq_util import ClientSideCertificate, Nsq
 from zvg_portal.repository import RawRepository
 from zvg_portal.runner import parse_interval, run_loop
@@ -130,6 +130,13 @@ def main():
                     if raw_repository.store(entry.content):
                         run.new_file_count += 1
                     run.anhang_sha256s.append(entry.sha256)
+                elif isinstance(entry, DetailFetchFailure):
+                    # A row whose detail page could not be fetched. It is not an
+                    # ObjektEntry, so it never reaches NSQ/DB as a scraped entry.
+                    run.failed_entries += 1
+                    logger.warning(
+                        f"Detail fetch failed for zvg_id={entry.zvg_id} ({entry.land_short}): {entry.reason}"
+                    )
                 else:
                     raise NotImplementedError(f"Unknown type: {type(entry)}")
         run.scraper_finished = datetime.datetime.now(datetime.timezone.utc)
