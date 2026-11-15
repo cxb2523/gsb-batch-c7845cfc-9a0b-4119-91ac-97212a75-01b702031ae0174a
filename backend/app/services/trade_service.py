@@ -1,0 +1,482 @@
+"""
+Trade service layer.
+
+Business logic for trade operations.
+"""
+
+import logging
+from typing import Optional, List
+from datetime import date, timedelta
+from decimal import Decimal
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select, func, and_, desc
+from sqlalchemy.orm import selectinload
+
+from app.models import Trade, Company, Insider
+from app.schemas.trade import (
+    TradeCreate,
+    TradeUpdate,
+    TradeFilter,
+    TradeStats,
+    TradeWithDetails,
+)
+from app.services.alert_service import AlertService
+from app.services.trade_event_manager import trade_event_manager
+from app.config import settings
+
+logger = logging.getLogger(__name__)
+
+
+class TradeService:
+    """Service for trade-related operations."""
+
+    @staticmethod
+    async def get_by_id(db: AsyncSession, trade_id: int) -> Optional[Trade]:
+        """
+        Get trade by ID with related data.
+
+        Args:
+            db: Database session
+            trade_id: Trade ID
+
+        Returns:
+            Trade instance or None
+        """
+        result = await db.execute(
+            select(Trade)
+            .options(selectinload(Trade.company))
+            .options(selectinload(Trade.insider))
+            .where(Trade.id == trade_id)
+        )
+        return result.scalar_one_or_none()
+
+    @staticmethod
+    async def get_all(
+        db: AsyncSession,
+        skip: int = 0,
+        limit: int = 20,
+        filters: Optional[TradeFilter] = None,
+        sort_by: str = "filing_date",
+        order: str = "desc",
+    ) -> tuple[List[Trade], int]:
+        """
+        Get all trades with filtering and pagination.
+
+        Args:
+            db: Database session
+            skip: Number of records to skip
+            limit: Maximum number of records to return
+            filters: Optional filter parameters
+            sort_by: Field to sort by
+            order: Sort order (asc or desc)
+
+        Returns:
+            Tuple of (trades list, total count)
+        """
+        # Build base query
+        query = select(Trade).options(
+            selectinload(Trade.company), selectinload(Trade.insider)
+        )
+
+        # Apply filters
+        if filters:
+            query = TradeService._apply_filters(query, filters)
+
+        # Get total count
+        count_query = select(func.count()).select_from(query.subquery())
+        total_result = await db.execute(count_query)
+        total = total_result.scalar_one()
+
+        # Apply sorting
+        # Default to filing_date if sort_by field doesn't exist
+        sort_column = getattr(Trade, sort_by, Trade.filing_date)
+        if order == "desc":
+            # Add secondary sort by id (desc) to ensure consistent ordering when dates are equal
+            query = query.order_by(desc(sort_column), desc(Trade.id))
+        else:
+            # Add secondary sort by id (asc) to ensure consistent ordering when dates are equal
+            query = query.order_by(sort_column, Trade.id)
+
+        # Apply pagination
+        query = query.offset(skip).limit(limit)
+
+        # Execute query
+        result = await db.execute(query)
+        trades = result.scalars().all()
+
+        return list(trades), total
+
+    @staticmethod
+    def _apply_filters(query, filters: TradeFilter):
+        """
+        Apply filters to trade query.
+
+        Args:
+            query: SQLAlchemy query
+            filters: Filter parameters
+
+        Returns:
+            Filtered query
+        """
+        # Base filters: Always exclude $0 and NULL value trades
+        query = query.where(Trade.total_value.is_not(None))
+        query = query.where(Trade.total_value > 0)
+        query = query.where(Trade.price_per_share.is_not(None))
+        query = query.where(Trade.price_per_share > 0)
+
+        if filters.company_id:
+            query = query.where(Trade.company_id == filters.company_id)
+
+        if filters.insider_id:
+            query = query.where(Trade.insider_id == filters.insider_id)
+
+        if filters.ticker:
+            query = query.join(Company).where(
+                func.upper(Company.ticker) == filters.ticker.upper()
+            )
+
+        if filters.transaction_type:
+            query = query.where(
+                Trade.transaction_type == filters.transaction_type.upper()
+            )
+
+        if filters.transaction_date_from:
+            query = query.where(Trade.transaction_date >= filters.transaction_date_from)
+
+        if filters.transaction_date_to:
+            query = query.where(Trade.transaction_date <= filters.transaction_date_to)
+
+        if filters.min_value is not None:
+            query = query.where(Trade.total_value >= filters.min_value)
+
+        if filters.max_value is not None:
+            query = query.where(Trade.total_value <= filters.max_value)
+
+        if filters.min_shares is not None:
+            query = query.where(Trade.shares >= filters.min_shares)
+
+        if filters.derivative_only:
+            query = query.where(Trade.derivative_transaction.is_(True))
+
+        if filters.significant_only:
+            query = query.where(
+                Trade.total_value > settings.significant_trade_threshold
+            )
+
+        return query
+
+    @staticmethod
+    async def get_recent(
+        db: AsyncSession, days: int = 7, limit: int = 100
+    ) -> List[Trade]:
+        """
+        Get recent trades, excluding $0 and undisclosed values.
+
+        Args:
+            db: Database session
+            days: Number of days to look back
+            limit: Maximum number of trades
+
+        Returns:
+            List of recent trades
+        """
+        cutoff_date = date.today() - timedelta(days=days)
+
+        result = await db.execute(
+            select(Trade)
+            .options(selectinload(Trade.company), selectinload(Trade.insider))
+            .where(
+                Trade.filing_date >= cutoff_date,
+                Trade.total_value.is_not(None),
+                Trade.total_value > 0,
+                Trade.price_per_share.is_not(None),
+                Trade.price_per_share > 0,
+            )
+            .order_by(desc(Trade.filing_date), desc(Trade.id))  # Secondary sort by id for consistency
+            .limit(limit)
+        )
+        return list(result.scalars().all())
+
+    @staticmethod
+    async def create(db: AsyncSession, trade_data: TradeCreate) -> Trade:
+        """
+        Create a new trade.
+
+        Args:
+            db: Database session
+            trade_data: Trade creation data
+
+        Returns:
+            Created Trade instance
+        """
+        # Calculate total_value if not provided
+        trade_dict = trade_data.model_dump()
+        if (
+            not trade_dict.get("total_value")
+            and trade_dict.get("shares")
+            and trade_dict.get("price_per_share")
+        ):
+            trade_dict["total_value"] = Decimal(trade_dict["shares"]) * Decimal(
+                trade_dict["price_per_share"]
+            )
+
+        trade = Trade(**trade_dict)
+        db.add(trade)
+        await db.commit()
+        await db.refresh(trade)
+        # Ensure relationships are loaded for broadcasting
+        await db.refresh(trade, attribute_names=["company", "insider"])
+
+        logger.info(
+            f"Created trade: ID {trade.id}, {trade.transaction_type} {trade.shares} shares"
+        )
+
+        # Real-time alert checking
+        if settings.alerts_enabled:
+            try:
+                alert_service = AlertService(db)
+                await alert_service.check_trade_against_alerts(trade)
+                logger.info(f"Checked trade {trade.id} against active alerts")
+            except Exception as exc:
+                logger.error(f"Failed to check alerts for trade {trade.id}: {exc}")
+
+        # WebSocket broadcast for frontend
+        try:
+            trade_payload = TradeWithDetails.model_validate(trade).model_dump(
+                mode="json"
+            )
+            await trade_event_manager.broadcast(
+                {
+                    "type": "trade_created",
+                    "trade": trade_payload,
+                }
+            )
+        except Exception as exc:  # pragma: no cover - defensive logging
+            logger.warning("Failed to broadcast trade creation: %s", exc)
+
+        return trade
+
+    @staticmethod
+    async def update(db: AsyncSession, trade: Trade, trade_data: TradeUpdate) -> Trade:
+        """
+        Update an existing trade.
+
+        Args:
+            db: Database session
+            trade: Existing Trade instance
+            trade_data: Update data
+
+        Returns:
+            Updated Trade instance
+        """
+        update_dict = trade_data.model_dump(exclude_unset=True)
+
+        # Recalculate total_value if shares or price changed
+        if "shares" in update_dict or "price_per_share" in update_dict:
+            shares = update_dict.get("shares", trade.shares)
+            price = update_dict.get("price_per_share", trade.price_per_share)
+            if shares and price:
+                update_dict["total_value"] = Decimal(shares) * Decimal(price)
+
+        for field, value in update_dict.items():
+            setattr(trade, field, value)
+
+        await db.commit()
+        await db.refresh(trade)
+        await db.refresh(trade, attribute_names=["company", "insider"])
+
+        logger.info(f"Updated trade: ID {trade.id}")
+
+        # Real-time alert checking (in case update changes trade value/type)
+        if settings.alerts_enabled:
+            try:
+                alert_service = AlertService(db)
+                await alert_service.check_trade_against_alerts(trade)
+                logger.info(f"Checked updated trade {trade.id} against active alerts")
+            except Exception as exc:
+                logger.error(
+                    f"Failed to check alerts for updated trade {trade.id}: {exc}"
+                )
+
+        # WebSocket broadcast for frontend
+        try:
+            trade_payload = TradeWithDetails.model_validate(trade).model_dump(
+                mode="json"
+            )
+            await trade_event_manager.broadcast(
+                {
+                    "type": "trade_updated",
+                    "trade": trade_payload,
+                }
+            )
+        except Exception as exc:  # pragma: no cover - defensive logging
+            logger.warning("Failed to broadcast trade update: %s", exc)
+
+        return trade
+
+    @staticmethod
+    async def delete(db: AsyncSession, trade: Trade) -> None:
+        """
+        Delete a trade.
+
+        Args:
+            db: Database session
+            trade: Trade instance to delete
+        """
+        await db.delete(trade)
+        await db.commit()
+        logger.info(f"Deleted trade: ID {trade.id}")
+
+    @staticmethod
+    async def get_statistics(
+        db: AsyncSession, filters: Optional[TradeFilter] = None
+    ) -> TradeStats:
+        """
+        Calculate trade statistics.
+
+        Args:
+            db: Database session
+            filters: Optional filters
+
+        Returns:
+            TradeStats instance
+        """
+        # Build base query
+        query = select(Trade)
+        if filters:
+            query = TradeService._apply_filters(query, filters)
+
+        # Total buys
+        buy_query = query.where(Trade.transaction_type == "BUY")
+        total_buys_result = await db.execute(
+            select(func.count()).select_from(buy_query.subquery())
+        )
+        total_buys = total_buys_result.scalar_one()
+
+        # Total sells
+        sell_query = query.where(Trade.transaction_type == "SELL")
+        total_sells_result = await db.execute(
+            select(func.count()).select_from(sell_query.subquery())
+        )
+        total_sells = total_sells_result.scalar_one()
+
+        # Total trades = buys + sells (only count BUY and SELL transactions)
+        # This ensures the math is always correct: total_trades = total_buys + total_sells
+        total_trades = total_buys + total_sells
+
+        # Sum of shares and value
+        # Use subquery columns to avoid cartesian product
+        subq = query.subquery()
+        sums_result = await db.execute(
+            select(
+                func.sum(subq.c.shares),
+                func.sum(subq.c.total_value),
+                func.avg(subq.c.total_value),
+                func.max(subq.c.total_value),
+            )
+        )
+        sums = sums_result.one()
+
+        total_shares_traded = float(sums[0]) if sums[0] else 0.0
+        average_trade_size = float(sums[2]) if sums[2] else 0.0
+        largest_trade = float(sums[3]) if sums[3] else None
+
+        # Total buy value
+        buy_subq = buy_query.subquery()
+        buy_value_result = await db.execute(select(func.sum(buy_subq.c.total_value)))
+        total_buy_value = float(buy_value_result.scalar_one() or 0.0)
+
+        # Total sell value
+        sell_subq = sell_query.subquery()
+        sell_value_result = await db.execute(select(func.sum(sell_subq.c.total_value)))
+        total_sell_value = float(sell_value_result.scalar_one() or 0.0)
+
+        # Net volume = BUY value - SELL value (positive = net buying, negative = net selling)
+        total_value = total_buy_value - total_sell_value
+
+        # Most active company
+        company_query = select(Trade)
+        if filters:
+            company_query = TradeService._apply_filters(company_query, filters)
+
+        most_active_company_result = await db.execute(
+            select(Company.ticker, func.count(Trade.id).label("trade_count"))
+            .select_from(Trade)
+            .join(Company, Company.id == Trade.company_id)
+            .where(Trade.id.in_(select(company_query.subquery().c.id)))
+            .group_by(Company.ticker)
+            .order_by(desc("trade_count"))
+            .limit(1)
+        )
+        most_active_company_row = most_active_company_result.first()
+        most_active_company = (
+            most_active_company_row[0] if most_active_company_row else None
+        )
+
+        # Most active insider
+        insider_query = select(Trade)
+        if filters:
+            insider_query = TradeService._apply_filters(insider_query, filters)
+
+        most_active_insider_result = await db.execute(
+            select(Insider.name, func.count(Trade.id).label("trade_count"))
+            .select_from(Trade)
+            .join(Insider, Insider.id == Trade.insider_id)
+            .where(Trade.id.in_(select(insider_query.subquery().c.id)))
+            .group_by(Insider.name)
+            .order_by(desc("trade_count"))
+            .limit(1)
+        )
+        most_active_insider_row = most_active_insider_result.first()
+        most_active_insider = (
+            most_active_insider_row[0] if most_active_insider_row else None
+        )
+
+        return TradeStats(
+            total_trades=total_trades,
+            total_buys=total_buys,
+            total_sells=total_sells,
+            total_shares_traded=total_shares_traded,
+            total_value=total_value,
+            total_buy_value=total_buy_value,
+            total_sell_value=total_sell_value,
+            average_trade_size=average_trade_size,
+            largest_trade=largest_trade,
+            most_active_company=most_active_company,
+            most_active_insider=most_active_insider,
+        )
+
+    @staticmethod
+    async def check_duplicate(
+        db: AsyncSession,
+        insider_id: int,
+        transaction_date: date,
+        shares: Decimal,
+        price_per_share: Optional[Decimal],
+    ) -> bool:
+        """
+        Check if a trade already exists (to avoid duplicates).
+
+        Args:
+            db: Database session
+            insider_id: Insider ID
+            transaction_date: Transaction date
+            shares: Number of shares
+            price_per_share: Price per share
+
+        Returns:
+            True if duplicate exists, False otherwise
+        """
+        query = select(Trade).where(
+            and_(
+                Trade.insider_id == insider_id,
+                Trade.transaction_date == transaction_date,
+                Trade.shares == shares,
+            )
+        )
+
+        if price_per_share is not None:
+            query = query.where(Trade.price_per_share == price_per_share)
+
+        result = await db.execute(query)
+        return result.scalar_one_or_none() is not None

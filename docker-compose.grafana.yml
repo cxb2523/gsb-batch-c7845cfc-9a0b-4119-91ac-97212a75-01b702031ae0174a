@@ -1,0 +1,45 @@
+version: '3.8'
+
+services:
+  grafana:
+    # Pin to specific version for stability and security
+    # Update regularly: https://grafana.com/grafana/download
+    image: grafana/grafana:10.4.0
+    container_name: tradesignal-grafana
+    ports:
+      - "3500:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-changeme}
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_SERVER_ROOT_URL=http://localhost:3500
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning
+    restart: unless-stopped
+    networks:
+      - tradesignal_default
+
+  prometheus:
+    # Pin to specific version for stability and security
+    # Update regularly: https://prometheus.io/download/
+    image: prom/prometheus:v2.51.0
+    container_name: tradesignal-prometheus-grafana
+    ports:
+      - "9091:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+    restart: unless-stopped
+    networks:
+      - tradesignal_default
+
+volumes:
+  grafana_data:
+  prometheus_data:
+
+networks:
+  tradesignal_default:
+    external: true

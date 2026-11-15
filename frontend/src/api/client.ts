@@ -1,0 +1,113 @@
+import axios from 'axios';
+import { getAccessToken } from '../contexts/AuthContext';
+
+const API_TIMEOUT = Number(import.meta.env.VITE_API_TIMEOUT ?? '60000'); // Reduced from 120s to 60s
+
+// Determine API URL: use env var if set, otherwise default to localhost in dev, production in prod
+const getApiUrl = (): string => {
+  if (import.meta.env.VITE_API_URL) {
+    return import.meta.env.VITE_API_URL;
+  }
+  // In development mode, default to local backend
+  if (import.meta.env.DEV || import.meta.env.MODE === 'development') {
+    return 'http://localhost:8000';
+  }
+  // In production, use production API
+  return 'https://api.tradesignal.capital';
+};
+
+// Create axios instance with base configuration
+const apiClient = axios.create({
+  baseURL: getApiUrl(),
+  timeout: Number.isFinite(API_TIMEOUT) && API_TIMEOUT >= 0 ? API_TIMEOUT : 120000,
+  headers: {
+    'Content-Type': 'application/json',
+  },
+});
+
+// Helper function to validate JWT token format
+const isValidJWT = (token: string | null | undefined): boolean => {
+  if (!token || typeof token !== 'string') {
+    return false;
+  }
+  
+  // JWT tokens have 3 parts separated by dots: header.payload.signature
+  const parts = token.split('.');
+  if (parts.length !== 3) {
+    return false;
+  }
+  
+  // Check that all parts are non-empty
+  return parts.every(part => part.trim().length > 0);
+};
+
+// Request interceptor
+apiClient.interceptors.request.use(
+  (config) => {
+    // Add auth token to all requests only if token is valid
+    const token = getAccessToken();
+    if (token && isValidJWT(token)) {
+      config.headers.Authorization = `Bearer ${token}`;
+    }
+    // If token exists but is invalid, don't add it (let backend handle missing token)
+    return config;
+  },
+  (error) => {
+    return Promise.reject(error);
+  }
+);
+
+// Response interceptor with retry logic for transient server errors
+apiClient.interceptors.response.use(
+  (response) => response,
+  async (error) => {
+    const config = error.config;
+
+    if (error.response?.status === 429 && config) {
+      config._rateLimitRetry = config._rateLimitRetry || 0;
+      if (config._rateLimitRetry < 1) {
+        config._rateLimitRetry++;
+        const retryAfter = parseInt(error.response.headers['retry-after'] || '5', 10);
+        await new Promise((r) => setTimeout(r, retryAfter * 1000));
+        return apiClient(config);
+      }
+      error.isRateLimited = true;
+      error.userMessage = 'Too many requests. Please wait a moment and try again.';
+    }
+
+    if (error.response?.status >= 500 && config) {
+      // Initialize retry count
+      config._retryCount = config._retryCount || 0;
+
+      // Retry up to 2 times with exponential backoff
+      if (config._retryCount < 2) {
+        config._retryCount++;
+        const delay = 1000 * config._retryCount; // 1s, then 2s
+        console.warn(
+          `Server error ${error.response.status}, retry ${config._retryCount}/2 in ${delay}ms...`
+        );
+        await new Promise((r) => setTimeout(r, delay));
+        return apiClient(config);
+      }
+    }
+
+    // Log errors after exhausting retries
+    if (error.response) {
+      // Server responded with error
+      console.error('API Error:', error.response.data);
+    } else if (error.request) {
+      // Request made but no response
+      console.error('Network Error:', error.message, {
+        baseURL: error.config?.baseURL,
+        url: error.config?.url,
+        timeout: error.config?.timeout,
+      });
+    } else {
+      // Something else happened
+      console.error('Error:', error.message);
+    }
+    return Promise.reject(error);
+  }
+);
+
+export default apiClient;

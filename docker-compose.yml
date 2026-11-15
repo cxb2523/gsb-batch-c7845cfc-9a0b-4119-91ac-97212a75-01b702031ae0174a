@@ -1,0 +1,93 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: tradesignal-db
+    environment:
+      POSTGRES_USER: "${POSTGRES_USER:-tradesignal}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD}"
+      POSTGRES_DB: "${POSTGRES_DB:-tradesignal}"
+      POSTGRES_HOST_AUTH_METHOD: "scram-sha-256"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tradesignal"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: tradesignal-redis
+    ports:
+      - "6379:6379"  # Expose Redis to host for Celery worker
+    volumes:
+      - redis_data:/data
+    command: ["redis-server", "--appendonly", "yes"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build: ./backend
+    container_name: tradesignal-backend
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    volumes:
+      - ./backend:/app
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-tradesignal}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-tradesignal}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - GEMINI_MODEL=gemini-2.0-flash
+      - OPENAI_MODEL=${OPENAI_MODEL:-gpt-4o-mini}
+      - AI_PROVIDER=${AI_PROVIDER:-gemini}
+      - AI_MAX_TOKENS=${AI_MAX_TOKENS:-1000}
+      - AI_TEMPERATURE=${AI_TEMPERATURE:-0.7}
+      - AI_CACHE_TTL_HOURS=${AI_CACHE_TTL_HOURS:-24}
+      - JWT_SECRET=${JWT_SECRET}
+      - SEC_USER_AGENT=${SEC_USER_AGENT}
+      - ENVIRONMENT=development
+      - DEBUG=true
+      - ENABLE_AI_INSIGHTS=true
+      - SCHEDULER_ENABLED=true
+      - SCRAPER_SCHEDULE_HOURS=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23
+      - SCRAPER_COOLDOWN_HOURS=23
+      - SCRAPER_DAYS_BACK=7
+      - SCRAPER_MAX_FILINGS=10
+      - CORS_ORIGINS=http://localhost:3000,http://localhost:5173,http://localhost:5174,http://localhost:5175
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - PROMETHEUS_ENABLED=true
+    dns:
+      - ${DNS_PRIMARY:-8.8.8.8}
+      - ${DNS_SECONDARY:-8.8.4.4}
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  frontend:
+    build: ./frontend
+    container_name: tradesignal-frontend
+    command: npm run dev -- --host
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    ports:
+      - "3000:5173"
+    environment:
+      - VITE_API_URL=http://localhost:8000
+    depends_on:
+      - backend
+
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+
