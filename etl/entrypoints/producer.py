@@ -96,6 +96,27 @@ def main() -> None:
 
         logger.info("Producer finished", extra=summary.as_dict())
 
+        if summary.rejected_files:
+            for rejection in summary.rejected_files:
+                logger.error(
+                    "Source file could not be ingested: %s",
+                    rejection.reason,
+                    extra={
+                        "source_file": rejection.source_file,
+                        "missing_columns": rejection.missing_columns,
+                    },
+                )
+
+        if summary.failed_batches:
+            logger.error(
+                "Some batches failed and were skipped",
+                extra={
+                    "failed_batches": summary.failed_batches,
+                    "successful_batches": summary.successful_batches,
+                    "failures": [f.as_dict() for f in summary.batch_failures],
+                },
+            )
+
         if summary.reject_rate > 0.1:
             logger.warning(
                 "Reject rate above 10%%",

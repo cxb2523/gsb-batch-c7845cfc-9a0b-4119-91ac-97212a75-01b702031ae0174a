@@ -37,13 +37,27 @@ Log level is controlled by `LOG_LEVEL` in `.env` (default `INFO`). Set `DEBUG` f
 | Logger | Message | Key extra fields |
 |---|---|---|
 | `etl.infrastructure.storage.parquet_reader` | `Parquet read complete` | `total_rows`, `total_batches` |
+| `etl.infrastructure.storage.parquet_reader` | `Parquet file is missing required columns; file cannot be ingested` | `file`, `missing_columns` |
 | `etl.domain.trip.services` | `Batch processed` | `valid`, `invalid`, `duplicates` |
 | `etl.infrastructure.kafka.producer` | `Published messages to Kafka` | `topic`, `count` |
 | `etl.infrastructure.kafka.consumer` | `Batch persisted` | `size`, `batch_id` |
 | `etl.infrastructure.kafka.consumer` | `Kafka offsets committed` | |
 | `etl.infrastructure.clickhouse.inserter` | `Columnar insert complete` | `table`, `rows` |
 | `etl.infrastructure.kafka.dead_letter_publisher` | `DLQ record delivered` | `topic`, `partition`, `offset` |
-| `etl.application.services.ingestion_service` | `Ingestion complete` | `total_rows`, `reject_rate` |
+| `etl.application.services.ingestion_service` | `Source file rejected: cannot ingest without required columns` | `source_file`, `missing_columns`, `reason` |
+| `etl.application.services.ingestion_service` | `Batch processing failed; continuing with next batch` | `batch_id`, `error_type`, `error_message` |
+| `etl.application.services.ingestion_service` | `Ingestion complete` | `total_rows`, `successful_batches`, `failed_batches`, `rejected_files`, `reject_rate` |
+
+The `Ingestion complete` summary distinguishes batches that succeeded
+(`successful_batches`), batches that raised and were skipped
+(`failed_batches`, with `batch_failures[].batch_id` / `error_type` /
+`error_message`), and source files refused before processing because
+required columns were absent (`rejected_file_count`, `rejected_files[].source_file` /
+`missing_columns`). `total_batches` counts every attempted batch and
+equals `successful_batches + failed_batches`; `failed_rows` counts rows
+that were read in batches which then failed. `reject_rate` keeps its
+original meaning: the fraction of read rows rejected for schema or domain
+reasons. A rejected file contributes no rows and is reported separately.
 
 
 ## Prometheus Metrics

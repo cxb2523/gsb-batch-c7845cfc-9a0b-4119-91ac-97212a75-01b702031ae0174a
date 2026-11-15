@@ -3,6 +3,14 @@
 ## Producer Path
 
 ```
+ParquetReader.open() / .missing_columns
+        │  (schema inspected once when the file is opened)
+        ├── missing required columns  ──►  RejectedFile
+        │       (file name + missing column names recorded on
+        │        IngestionSummary; no row enters the pipeline)
+        │
+        │  complete schema
+        ▼
 ParquetReader.iter_batches()
         │
         │  list[dict]  (raw TLC column names, e.g. VendorID, PULocationID)
@@ -51,6 +59,14 @@ KafkaEventPublisher.publish_batch()
         ▼
 Kafka topic: nyc-taxi-trips
 ```
+
+Each batch runs inside `IngestionService._process_batch_safely()`. If any
+step of a batch raises (domain processing, publishing, dead-lettering),
+the failure is recorded on the run summary with its `batch_id`,
+exception type and message, and the next batch is processed. The
+publisher is flushed on every exit path: normal completion, early
+shutdown after the current batch, a file rejected for missing columns,
+and batch failures.
 
 
 ## Consumer Path

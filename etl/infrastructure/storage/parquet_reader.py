@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Generator, Iterator
+from collections.abc import Generator, Iterator, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -44,6 +44,23 @@ COLUMN_RENAME_MAP: dict[str, str] = {
 }
 
 
+class MissingRequiredColumnsError(ValueError):
+    """
+    Raised when a Parquet file does not contain every required column.
+
+    Carries the offending file name and the exact list of missing column
+    names so callers can log a precise, actionable failure reason instead
+    of discovering the problem much later during normalisation or
+    validation of individual rows.
+    """
+
+    def __init__(self, source_file: str, missing_columns: Sequence[str]) -> None:
+        self.source_file = source_file
+        self.missing_columns = list(missing_columns)
+        columns = ", ".join(self.missing_columns)
+        super().__init__(f"Parquet file '{source_file}' is missing required columns: {columns}")
+
+
 class ParquetReader:
     """
     Reads NYC Yellow Taxi Parquet files in memory-efficient chunks.
@@ -57,8 +74,17 @@ class ParquetReader:
     are normalised to snake_case before yielding so the domain layer
     never sees raw TLC field names like "VendorID" or "PULocationID".
 
+    Schema completeness is checked once, when the file is opened. The
+    result is exposed through `missing_columns` (and returned by `open()`)
+    so the application layer can reject an unusable file before any row
+    enters the domain pipeline. `iter_batches()` also enforces this and
+    raises `MissingRequiredColumnsError` rather than silently yielding
+    rows with absent fields.
+
     Usage:
         reader = ParquetReader(path=Path("data/raw/yellow_tripdata_2024-01.parquet"))
+        if reader.missing_columns:
+            raise MissingRequiredColumnsError(reader.source_file, reader.missing_columns)
         for batch in reader.iter_batches():
             process(batch)
     """
@@ -73,6 +99,9 @@ class ParquetReader:
         self._path = path or settings.etl.parquet_file_path
         self._batch_size = batch_size or settings.etl.parquet_batch_size
         self._source_file = source_file or self._path.name
+        self._parquet_file: Any | None = None
+        self._missing_columns: list[str] | None = None
+        self._available_columns: list[str] | None = None
         self._validate_path()
 
     def _validate_path(self) -> None:
@@ -81,23 +110,78 @@ class ParquetReader:
         if not self._path.suffix == ".parquet":
             raise ValueError(f"Expected .parquet file, got: {self._path.suffix}")
 
-    def _available_columns(self, schema: pa.Schema) -> list[str]:
-        """
-        Return the intersection of REQUIRED_COLUMNS and columns that
-        actually exist in this file. Logs a warning for any missing ones
-        so schema drift is visible without crashing the pipeline.
-        """
+    def _detect_missing_columns(self, schema: pa.Schema) -> list[str]:
+        """Return required columns absent from the file schema, in required order."""
         file_columns = set(schema.names)
-        available = []
-        for col in REQUIRED_COLUMNS:
-            if col in file_columns:
-                available.append(col)
-            else:
-                logger.warning(
-                    "Required column missing from Parquet file",
-                    extra={"column": col, "file": str(self._path)},
-                )
-        return available
+        return [col for col in REQUIRED_COLUMNS if col not in file_columns]
+
+    def open(self) -> list[str]:
+        """
+        Open the Parquet file and inspect its schema.
+
+        Idempotent -- the file is opened and inspected only once. Returns
+        the list of required columns that are missing from the file; an
+        empty list means the schema is complete. The same list is exposed
+        as the `missing_columns` property.
+
+        Raises:
+            FileNotFoundError: if the Parquet file does not exist.
+            pa.lib.ArrowInvalid: if the file is corrupt or not valid Parquet.
+        """
+        if self._parquet_file is not None:
+            return list(self._missing_columns or [])
+
+        parquet_file: Any = pq.ParquetFile(self._path)  # type: ignore[no-untyped-call]
+        self._parquet_file = parquet_file
+
+        missing = self._detect_missing_columns(parquet_file.schema_arrow)
+        self._missing_columns = missing
+
+        file_columns = set(parquet_file.schema_arrow.names)
+        self._available_columns = [col for col in REQUIRED_COLUMNS if col in file_columns]
+
+        if missing:
+            logger.error(
+                "Parquet file is missing required columns; file cannot be ingested",
+                extra={
+                    "file": self._source_file,
+                    "path": str(self._path),
+                    "missing_columns": missing,
+                    "missing_column_count": len(missing),
+                },
+            )
+        else:
+            logger.debug(
+                "Parquet schema complete",
+                extra={
+                    "file": self._source_file,
+                    "columns": len(self._available_columns),
+                },
+            )
+
+        return list(missing)
+
+    @property
+    def missing_columns(self) -> list[str]:
+        """
+        Required column names absent from this file (empty when complete).
+
+        Accessing this property opens the file on first use, so callers can
+        decide whether the file is ingestable before iterating batches.
+        """
+        if self._missing_columns is None:
+            self.open()
+        return list(self._missing_columns or [])
+
+    @property
+    def is_schema_complete(self) -> bool:
+        """True when every required column is present in the file."""
+        return not self.missing_columns
+
+    def _available_required_columns(self) -> list[str]:
+        """Required columns present in the file, preserving REQUIRED_COLUMNS order."""
+        self.open()
+        return list(self._available_columns or [])
 
     def _rename_columns(self, row: dict[str, object]) -> dict[str, object]:
         return {COLUMN_RENAME_MAP.get(k, k): v for k, v in row.items()}
@@ -127,10 +211,17 @@ class ParquetReader:
 
         Raises:
             FileNotFoundError: if the Parquet file does not exist.
+            MissingRequiredColumnsError: if one or more required columns
+                are absent. The error exposes `source_file` and
+                `missing_columns`; no rows are yielded in this case.
             pa.lib.ArrowInvalid: if the file is corrupt or not valid Parquet.
         """
-        parquet_file: Any = pq.ParquetFile(self._path)  # type: ignore[no-untyped-call]
-        columns = self._available_columns(parquet_file.schema_arrow)
+        missing = self.open()
+        if missing:
+            raise MissingRequiredColumnsError(self._source_file, missing)
+
+        parquet_file: Any = self._parquet_file
+        columns = self._available_required_columns()
 
         logger.info(
             "Starting Parquet read",
