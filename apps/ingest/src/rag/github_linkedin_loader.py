@@ -1,0 +1,254 @@
+"""GitHub, LinkedIn & Personal Portfolio link parser & loader.
+
+Automatically extracts GitHub handles, LinkedIn profile links, and portfolio
+website URLs from resume text to build a candidate Knowledge Graph in RAG
+memory. All HTTP requests are async via httpx to avoid blocking the event loop.
+"""  # noqa: E501
+
+from __future__ import annotations
+
+import os
+import re
+from typing import Any
+
+from bs4 import BeautifulSoup
+
+from src.http_client import get_client
+from src.logging import get_logger
+
+logger = get_logger("github_linkedin_loader")
+
+
+def extract_links_from_text(text: str) -> dict[str, Any]:
+    """Parse GitHub username, LinkedIn URL, and portfolio links from text using regex."""
+    extracted: dict[str, Any] = {
+        "github_username": None,
+        "linkedin_url": None,
+        "portfolio_urls": [],
+    }
+
+    gh_match = re.search(r"github\.com/([A-Za-z0-9_\-]+)", text, re.IGNORECASE)
+    if gh_match:
+        extracted["github_username"] = gh_match.group(1)
+
+    li_match = re.search(
+        r"(https?://(?:www\.)?linkedin\.com/in/[A-Za-z0-9_\-]+)",
+        text,
+        re.IGNORECASE,
+    )
+    if li_match:
+        extracted["linkedin_url"] = li_match.group(1)
+
+    all_urls = re.findall(r"https?://[^\s<>\"']+", text)
+    ignored_domains = [
+        "github.com",
+        "linkedin.com",
+        "twitter.com",
+        "x.com",
+        "youtube.com",
+        "google.com",
+        "medium.com",
+    ]
+    for url in all_urls:
+        url_clean = url.rstrip(".,);]")
+        if not any(domain in url_clean.lower() for domain in ignored_domains):
+            extracted["portfolio_urls"].append(url_clean)
+
+    return extracted
+
+
+async def fetch_github_profile(username: str | None = None) -> str:
+    """Fetch public repositories and tech stack from GitHub API (async)."""
+    user = username or os.environ.get("GITHUB_USERNAME") or ""
+    if not user:
+        return ""
+    url = f"https://api.github.com/users/{user}/repos?sort=updated&per_page=15"
+
+    headers: dict[str, str] = {
+        "User-Agent": "AntigravityJobSearch/1.0",
+        "Accept": "application/vnd.github.v3+json",
+    }
+    token = os.environ.get("GITHUB_TOKEN")
+    if token:
+        headers["Authorization"] = f"token {token}"
+
+    try:
+        client = await get_client("github_linkedin_loader", timeout=10.0)
+        resp = await client.get(url, headers=headers)
+        if resp.status_code == 200:
+            data: list[dict[str, Any]] = resp.json()
+            repo_lines = [f"GitHub Profile: {user}"]
+            languages: set[str] = set()
+
+            for r in data:
+                name = r.get("name", "")
+                desc = r.get("description") or ""
+                lang = r.get("language")
+                stars = r.get("stargazers_count", 0)
+                topics = r.get("topics", [])
+
+                if lang:
+                    languages.add(lang)
+
+                topic_str = f" [Topics: {', '.join(topics)}]" if topics else ""
+                repo_lines.append(
+                    f"- Repo {name} ({lang or 'Tech'} | {stars} stars): {desc}{topic_str}"
+                )
+
+            if languages:
+                repo_lines.insert(1, f"Primary Tech Stack: {', '.join(languages)}")
+
+            return "\n".join(repo_lines)
+    except Exception as e:
+        logger.warning(
+            "GitHub profile fetch failed",
+            entity=user,
+            exception=str(e),
+        )
+
+    return f"GitHub Username: {user}"
+
+
+async def scrape_portfolio(url: str) -> str:
+    """Scrape personal portfolio site to extract bio and projects (async).
+
+    Some portfolios are SPAs whose raw HTML is mostly nav/shell (e.g.
+    przknv.cc renders "raw/blogs/Toggle theme" first) and whose projects are
+    lazy-rendered from an embedded JS data blob, so a plain text extraction
+    misses below-the-fold projects entirely. We render JS shells via the shared
+    renderer, then extract project titles+descriptions from the embedded data
+    blob when the visible text is thin. Best-effort: returns '' on failure.
+    """
+    try:
+        # render_html fetches statically and falls back to a Playwright render
+        # for JS-only pages — a plain GET on przknv.cc returns a shell, which
+        # is why old chunks were useless.
+        from src.render import render_html
+
+        html = await render_html(url, timeout=25.0)
+        if not html or len(html) < 200:
+            return ""
+        soup = BeautifulSoup(html, "html.parser")
+        for el in soup(["script", "style", "meta", "noscript", "svg"]):
+            el.decompose()
+        clean_text = soup.get_text("\n", strip=True)
+        # Drop obvious shell-only noise so a JS-render artifact doesn't pollute.
+        if len(clean_text) < 100:
+            return ""
+        # Strip recurring nav/chrome lines that every page render repeats and
+        # that carry no profile signal. Generic only — never a specific
+        # username/site, so it works for any candidate's portfolio.
+        noise = {
+            "toggle theme",
+            "raw",
+            "blogs",
+            "menu",
+            "home",
+            "about",
+            "contact",
+            "more",
+            "open menu",
+            "close menu",
+            "light",
+            "dark",
+            "system",
+            "theme",
+            "navigation",
+            "nav",
+            "footer",
+            "back to top",
+        }
+        lines = [
+            ln.strip()
+            for ln in clean_text.split("\n")
+            if ln.strip().lower() not in noise and ln.strip()
+        ]
+        clean_text = "\n".join(lines)
+        if len(clean_text) < 100:
+            return ""
+        # Projects rendered lazily from an embedded JS blob are NOT in the DOM
+        # text. Recover them from the raw HTML blob so nothing is truncated.
+        embedded = _extract_embedded_projects(html)
+        if embedded and len(embedded) > len(clean_text):
+            clean_text = embedded
+        # Keep substantially more than before: the portfolio page is long and
+        # scrolling-rendered (projects deep in the page like Maya, Doty, Snix)
+        # would be truncated at 6000 chars. 12000 keeps all projects while
+        # still bounding the embedding payload.
+        return clean_text[:12000]
+    except Exception as e:
+        logger.warning(
+            "Portfolio scrape failed",
+            source=url,
+            exception=str(e),
+        )
+        return ""
+
+
+def _extract_embedded_projects(html: str) -> str:
+    """Recover project title + description from the SPA's embedded JS data blob.
+
+    Many portfolio sites (przknv.cc included) ship all projects as a JSON-ish
+    array in a `<script>` — ``$R[36]={title:"Maya. ...",desc:"Fully local face
+    recognition ...",section:"personal"}`` — and only mount them on scroll.
+    ``BeautifulSoup.get_text`` discards script tags, so those projects never
+    surface in the extracted text. This scans the raw HTML for those objects
+    and returns a "title: desc" block per project.
+    """
+    out: list[str] = []
+    seen: set[str] = set()
+    # Match title:"...",desc:"..." pairs (also unquoted/escaped variants).
+    for m in re.finditer(
+        r'title:"((?:[^"\\]|\\.)*)"[^}]{0,400}?desc:"((?:[^"\\]|\\.)*)"',
+        html,
+        re.DOTALL,
+    ):
+        title = m.group(1).strip()
+        desc = m.group(2).strip()
+        if not title or not desc:
+            continue
+        # Skip non-project blobs (nav, footer, generic labels).
+        low = title.lower()
+        if low in {"portfolio", "resume", "blogs", "raw"} or len(title) < 4:
+            continue
+        key = title[:40].lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(f"{title}\n{desc[:600]}")
+    return "\n\n".join(out)
+
+
+async def enrich_candidate_chunks(chunks: dict[str, str], resume_text: str = "") -> dict[str, str]:
+    """Auto-parse resume links and enrich RAG chunks with GitHub, LinkedIn,
+    and Portfolio nodes (all async)."""
+    parsed_links = extract_links_from_text(resume_text)
+
+    gh_user = parsed_links.get("github_username") or os.environ.get("GITHUB_USERNAME")
+    github_text = await fetch_github_profile(gh_user)
+    if github_text:
+        user_display = gh_user or "candidate"
+        logger.info(
+            "GitHub profile extracted",
+            entity=user_display,
+            extra={"chars": len(github_text)},
+        )
+
+    li_url = parsed_links.get("linkedin_url") or os.environ.get("LINKEDIN_PROFILE_URL")
+    if li_url:
+        chunks["linkedin_profile"] = f"LinkedIn Profile: {li_url}"
+        logger.info("LinkedIn link extracted", entity=li_url)
+
+    portfolio_urls = parsed_links.get("portfolio_urls", [])
+    for p_url in portfolio_urls[:2]:
+        p_text = await scrape_portfolio(p_url)
+        if p_text:
+            key = f"portfolio_{p_url.split('//')[-1][:15]}"
+            chunks[key] = p_text
+            logger.info(
+                "Portfolio scraped",
+                source=p_url,
+                extra={"chars": len(p_text)},
+            )
+
+    return chunks

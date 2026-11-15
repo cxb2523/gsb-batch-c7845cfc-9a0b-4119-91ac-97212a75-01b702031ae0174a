@@ -1,0 +1,40 @@
+# Shared gates, called by `ci` (PRs into main). Single job on purpose: one
+# install, one status check, everything scoped to what the PR actually
+# changed via `lerna run --since` (unchanged packages restore from the Nx
+# cache instead of re-running). Root-level tools (ruff/ty/pytest-scripts)
+# always run — they are fast and span all packages.
+name: checks
+
+on:
+  workflow_call:
+
+jobs:
+  checks:
+    name: checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+      - run: git fetch origin main --quiet || true
+      - uses: astral-sh/setup-uv@v10.3.0
+      - run: uvx ruff check .
+      - run: uvx ruff format --check .
+      - uses: oven-sh/setup-bun@v2.2.0
+      - uses: actions/cache@v6.1.0
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+          restore-keys: bun-${{ runner.os }}-
+      - run: bun install --frozen-lockfile --ignore-scripts
+      - run: bunx oxfmt --check
+      - run: uv sync --frozen
+      # Use the locked dev dependencies: the dev-runner tests import Typer.
+      - run: uv run python -m pytest scripts/ -q
+      - run: uv run ty check apps/ingest/src apps/ingest/scripts
+      # Workspace tasks, cached per package and scoped to PR changes.
+      # Root manifests (ruff/ty/pytest above) are intentionally unscoped.
+      - run: bunx lerna run lint --since origin/main
+      - run: bunx lerna run format:check --since origin/main
+      - run: bunx lerna run typecheck --since origin/main
+      - run: bunx lerna run test --since origin/main

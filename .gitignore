@@ -1,0 +1,54 @@
+/refs/
+
+# Python
+__pycache__/
+.pytest_cache
+*.py[cod]
+*.egg-info/
+.venv/
+jobs.md
+jobs.md.bak
+storage/
+
+.env
+
+# IDE
+.vscode/
+.idea/
+.mypy_cache
+.ruff_cache
+repomix-output.xml
+
+# OS
+.DS_Store
+Thumbs.db
+docs/
+
+# Devenv
+.devenv*
+devenv.local.nix
+devenv.local.yaml
+
+# direnv
+.direnv
+resume.tex
+
+# pre-commit
+.pre-commit-config.yaml
+# Plans
+.plans/
+scripts/.watchdog.env
+azure_dump/
+checkpoints/
+crawler_out/
+intel/
+.tor-geoip/
+.tanstack/
+.ocx/
+.opencode/
+/data/
+artifacts/
+node_modules/
+lerna-debug.log
+.nx/
+dist/
