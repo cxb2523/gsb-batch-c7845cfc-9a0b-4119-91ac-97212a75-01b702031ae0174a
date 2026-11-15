@@ -2,6 +2,11 @@ import win32com.client
 import pywintypes
 
 
+# per-row scraping statuses returned by scrape_rows_grid_view_per_row
+ROW_SCRAPE_SUCCESS = "success"
+ROW_SCRAPE_FAILED = "failed"
+
+
 class SapGuiRpa:
     
     """Wrapper around GuiApplication object to simplify script development.
@@ -397,9 +402,17 @@ class SapGuiRpa:
 
 
     def scrape_rows_grid_view(self, gridview_id, column_names):
-        """simply gets values from all rows and provided columns (cells) and
-        returns values back as list of lists where each list contains cell
-        values of a row in the order they were provided
+        """gets values from all rows and provided columns (cells) and returns
+        values back as list of lists where each list contains cell values of a
+        row in the order they were provided
+
+        The signature and return structure are kept for backwards
+        compatibility. The actual scraping is delegated to
+        :meth:`scrape_rows_grid_view_per_row`, which settles every row on its
+        own. Unlike the previous implementation, a failure on a single row no
+        longer aborts the whole batch: the failing row is skipped while every
+        successfully scraped row is still returned. Rows are returned in their
+        original row order.
 
         Parameters
         ----------
@@ -407,41 +420,157 @@ class SapGuiRpa:
             e.g. "wnd[0]/usr/.../cntlGRIDCONTROL/shellcont/shell"
 
         column_names : list
-            list of column names 
+            list of column names
 
         Returns
         -------
         {list of lists}
-            Each list contains cell values of a row within GuiGridView object
+            Each list contains cell values of a successfully scraped row
+            within GuiGridView object, ordered as column_names.
+        """
+        row_results = self.scrape_rows_grid_view_per_row(
+                gridview_id=gridview_id, column_names=column_names)
+
+        scrapped_rows = [
+            row_result["values"]
+            for row_result in row_results
+            if row_result["status"] == ROW_SCRAPE_SUCCESS
+        ]
+        return scrapped_rows
+
+
+    def scrape_rows_grid_view_per_row(self, gridview_id, column_names):
+        """scrapes all rows of a GuiGridView object row by row and settles
+        every row independently, so a failure on one row does not interrupt
+        the rest of the batch
+
+        Cell values are read through the gridview's ``GetCellValue`` method,
+        exactly the same way as in :meth:`get_cell_value_grid_view`.
+
+        Scrolling is driven by the actual relationship between ``RowCount``
+        and ``VisibleRowCount``:
+
+        * ``RowCount`` of 0 returns an empty list immediately - no scrolling
+          branch is entered and no error is raised,
+        * ``VisibleRowCount`` of 0 while ``RowCount`` is greater than 0 does
+          not enter the scrolling branch either and does not raise; rows are
+          read one by one up to ``RowCount`` and each row is settled on its
+          own,
+        * when ``VisibleRowCount`` is smaller than ``RowCount`` the grid is
+          scrolled page by page so that no row is missed or read twice.
+
+        Parameters
+        ----------
+        gridview_id : str
+            e.g. "wnd[0]/usr/.../cntlGRIDCONTROL/shellcont/shell"
+
+        column_names : list
+            list of column names. When empty, every row is returned with an
+            empty list of values instead of raising an exception
+
+        Returns
+        -------
+        {list of dicts}
+            one dict per row (including failed rows), in original row order,
+            each containing:
+
+            * ``row_index`` (int) - original row index within the gridview,
+            * ``status`` (str) - ``"success"`` or ``"failed"``,
+            * ``values`` (list) - cell values in the order of column_names;
+              columns that could not be read are represented by None,
+            * ``error`` (str or None) - failure reason for failed rows, None
+              for successful rows
         """
         grid_view_shellcont = self.get_element_by_id(gridview_id)
         total_row_count = grid_view_shellcont.RowCount
-        rows_to_scroll = grid_view_shellcont.VisibleRowCount
-        scrapped_rows = list()
+        visible_row_count = grid_view_shellcont.VisibleRowCount
 
+        # empty table: nothing to scroll through and nothing to return
+        if total_row_count == 0:
+            return list()
+
+        # scrolling only makes sense when the visible area is smaller than the
+        # whole table. A VisibleRowCount of 0 must not enter the scroll branch
+        # (it would trigger a division by zero in page calculations).
+        scrolling_enabled = (
+                visible_row_count > 0
+                and visible_row_count < total_row_count)
+
+        row_results = list()
         for row_index in range(total_row_count):
-            # decide if we should scroll the table to see next set of rows
-            shall_we_scroll_table = (
-                    row_index % rows_to_scroll == 0 
-                    and row_index + rows_to_scroll <= total_row_count
-                    and rows_to_scroll != total_row_count)
-            if shall_we_scroll_table:
-                grid_view_shellcont.currentCellRow = row_index + rows_to_scroll - 1
-            # last scrolling in the end of the table control
-            elif total_row_count - row_index < rows_to_scroll:
-                grid_view_shellcont.currentCellRow = total_row_count - 1 
-            
-            row_content = list()
-            for cell in column_names:
-                cell_value = self.get_cell_value_grid_view(
-                        gridview_id=gridview_id, 
-                        column_name=cell,
-                        row_index=row_index)
+            if scrolling_enabled:
+                # scroll once per page, right before the first row of the page
+                # becomes due; the target row is clamped to the last row so the
+                # final, possibly shorter page is handled as well
+                if row_index % visible_row_count == 0:
+                    scroll_target = min(
+                            row_index + visible_row_count - 1,
+                            total_row_count - 1)
+                    grid_view_shellcont.currentCellRow = scroll_target
+
+            row_result = self._scrape_single_grid_view_row(
+                    gridview=grid_view_shellcont,
+                    row_index=row_index,
+                    column_names=column_names)
+            row_results.append(row_result)
+
+        return row_results
+
+
+    def _scrape_single_grid_view_row(
+            self, gridview, row_index, column_names):
+        """internal method scraping a single GuiGridView row and settling it on
+        its own
+
+        Every column is attempted even after an earlier column failed, so the
+        caller receives whatever values were obtainable. A row is marked as
+        failed if at least one column could not be read; the failure reason
+        records every column that failed.
+
+        Parameters
+        ----------
+        gridview : object
+            GuiGridView object exposing ``GetCellValue``
+
+        row_index : int
+            index of the row within the GuiGridView object
+
+        column_names : list
+            list of column names; an empty list yields an empty values list
+
+        Returns
+        -------
+        {dict}
+            ``{"row_index": int, "status": str, "values": list, "error": str}``
+        """
+        row_content = list()
+        failures = list()
+
+        for column_name in column_names:
+            try:
+                cell_value = gridview.GetCellValue(row_index, column_name)
+            except Exception as error:
+                row_content.append(None)
+                failures.append(
+                        f"column '{column_name}': "
+                        f"{type(error).__name__}: {error}")
+            else:
                 row_content.append(cell_value)
 
-            scrapped_rows.append(row_content)
+        if failures:
+            return {
+                "row_index": row_index,
+                "status": ROW_SCRAPE_FAILED,
+                "values": row_content,
+                "error": "; ".join(failures)
+            }
 
-        return scrapped_rows
+        return {
+            "row_index": row_index,
+            "status": ROW_SCRAPE_SUCCESS,
+            "values": row_content,
+            "error": None
+        }
 
 
     def select_absolute_row_table_control(self, table_control_id, index):
