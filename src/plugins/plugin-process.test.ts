@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
 import { ChildProcess } from 'node:child_process';
 
@@ -106,5 +106,75 @@ describe('Plugin IPC Bridge tests', async () => {
     ]);
 
     expect(process.listeners('message').length).to.eq(1);
+  });
+
+  it('stores the plugin name', () => {
+    const process = mockChildProcess();
+    const ipcBridge = new PluginProcess(process, 'brew');
+
+    expect(ipcBridge.name).to.eq('brew');
+  });
+
+  it('sendMessageForResult rejects with plugin and command names when the process exits', async () => {
+    const process = mockChildProcess();
+    const ipcBridge = new PluginProcess(process, 'brew');
+    const killSpy = vi.spyOn(ipcBridge, 'kill');
+
+    const [error] = await Promise.all([
+      ipcBridge.sendMessageForResult('plan', { id: 'resource-1' }).then(
+        () => {
+          throw new Error('Expected the request to be rejected');
+        },
+        (err: Error) => err,
+      ),
+      setTimeout(() => process.emit('exit', 1, null), 50),
+    ]);
+
+    expect(error.message).toContain('exited with code 1');
+    expect(error.message).to.contain('brew');
+    expect(error.message).to.contain('plan');
+    expect(killSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('sendMessageForResult rejects with a timeout error and kills the plugin process', async () => {
+    const process = mockChildProcess();
+    const ipcBridge = new PluginProcess(process, 'brew');
+    const killSpy = vi.spyOn(ipcBridge, 'kill');
+
+    const message = PluginMessage.create('apply', 'data');
+    const [error] = await Promise.all([
+      sendIpcMessageForResult(message, ipcBridge.process, 100, {
+        pluginName: ipcBridge.name,
+        onCleanup: () => ipcBridge.kill(),
+      }).then(
+        () => {
+          throw new Error('Expected the request to be rejected');
+        },
+        (err: Error) => err,
+      ),
+    ]);
+
+    expect(error.message).to.contain('timed out');
+    expect(error.message).to.contain('brew');
+    expect(error.message).to.contain('apply');
+    expect(killSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not kill the plugin process when the response succeeds', async () => {
+    const process = mockChildProcess();
+    const ipcBridge = new PluginProcess(process, 'brew');
+    const killSpy = vi.spyOn(ipcBridge, 'kill');
+    let sentRequestId: string | undefined;
+    process.send = (msg) => {
+      sentRequestId = (msg as PluginMessage).requestId;
+      return true;
+    };
+
+    await Promise.all([
+      ipcBridge.sendMessageForResult('message', 'data'),
+      setTimeout(() => process.emit('message', { cmd: 'message_Response', data: 'data', requestId: sentRequestId }), 50),
+    ]);
+
+    expect(killSpy).not.toHaveBeenCalled();
   });
 });

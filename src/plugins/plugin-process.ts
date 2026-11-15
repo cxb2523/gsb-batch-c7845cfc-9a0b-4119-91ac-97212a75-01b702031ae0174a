@@ -65,18 +65,24 @@ export class PluginProcess {
     // Note: stdin is not hooked up on purpose for security purposes. Interactive commands + sudo will have to run through the parent process.
     _process.stdout!.on('data', (message) => ctx.pluginStdout(name, message.toString('utf8')));
     _process.stderr!.on('data', (message) => ctx.pluginStderr(name, message.toString('utf8')));
-    _process.on('exit', (code) => {
+    _process.on('exit', (code, signal) => {
+      // Do not throw here: an exception inside an EventEmitter listener becomes an uncaught
+      // exception and would crash the CLI before in-flight requests can be rejected. Requests
+      // waiting on this process fail fast via the 'exit' listener in sendIpcMessageForResult().
       if (code && code !== 0) {
-        throw new Error(`Plugin ${this.name} exited with code ${code}`);
+        ctx.log(`Plugin ${name} exited with non-zero code ${code}${signal ? ` (signal ${signal})` : ''}`);
       }
     })
     PluginProcess.handleRequests(_process, name);
 
-    return new PluginProcess(_process);
+    return new PluginProcess(_process, name);
   }
 
-  constructor(process: ChildProcess) {
+  name: string;
+
+  constructor(process: ChildProcess, name = 'unknown') {
     this.process = process;
+    this.name = name;
   }
 
   private static handleRequests(process: ChildProcess, pluginName: string) {
@@ -181,15 +187,21 @@ export class PluginProcess {
 
   sendMessageForResult(cmd: string, data: unknown): Promise<PluginMessage> {
     const message = PluginMessage.create(cmd, data);
-    return sendIpcMessageForResult(message, this.process);
+    return sendIpcMessageForResult(message, this.process, undefined, {
+      pluginName: this.name,
+      // Kill the plugin process on failure (crash/timeout) so it does not linger as an orphan
+      onCleanup: () => this.kill(),
+    });
   }
-  
+
   private static isIpcMessage(message: unknown): message is IpcMessageV2 {
     return ipcMessageValidator(message);
   }
 
   kill() {
-    this.process.kill(9)
+    if (!this.process.killed && this.process.exitCode === null && this.process.signalCode === null) {
+      this.process.kill('SIGKILL')
+    }
   }
 }
 

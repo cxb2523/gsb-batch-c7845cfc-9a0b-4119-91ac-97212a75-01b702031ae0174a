@@ -1,11 +1,12 @@
 import { ChildProcess } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import { Readable } from 'stream';
-import { describe, expect, it } from 'vitest';
-import { returnMessageCmd } from './plugin-process.js';
 import { clearInterval, clearTimeout } from 'node:timers';
-import { sendIpcMessageForResult } from './message-sender';
+import { describe, expect, it, vi } from 'vitest';
+
 import { PluginMessage } from './plugin-message.js';
+import { sendIpcMessageForResult } from './message-sender.js';
+import { returnMessageCmd } from './plugin-process.js';
 
 describe('Message sender tests', async () => {
   const mockChildProcess = () => {
@@ -45,6 +46,9 @@ describe('Message sender tests', async () => {
     ])
 
     expect(cProcess.listenerCount('messsage')).to.eq(0);
+    expect(cProcess.listenerCount('message')).to.eq(0);
+    expect(cProcess.listenerCount('exit')).to.eq(0);
+    expect(cProcess.listenerCount('error')).to.eq(0);
     expect(cProcess.stdout!.listenerCount('data')).to.eq(0);
     expect(cProcess.stderr!.listenerCount('data')).to.eq(0);
   })
@@ -52,9 +56,10 @@ describe('Message sender tests', async () => {
   it('Is able to send a message and timeout if not received', async () => {
     const cProcess = mockChildProcess();
     const message = PluginMessage.create('message1', null)
+    const onCleanup = vi.fn();
 
     await expect(() => Promise.all([
-      sendIpcMessageForResult(message, cProcess, 100),
+      sendIpcMessageForResult(message, cProcess, 100, { pluginName: 'test-plugin', onCleanup }),
       setTimeout(() => {
         cProcess.emit('message', { cmd: returnMessageCmd('message1'), data: null, requestId: message.requestId });
       }, 200),
@@ -136,4 +141,147 @@ describe('Message sender tests', async () => {
     })
   })
 
+  it('rejects immediately with an exit error when the plugin process exits non-zero while waiting', async () => {
+    const cProcess = mockChildProcess();
+    const message = PluginMessage.create('plan', null)
+    const onCleanup = vi.fn();
+    const start = Date.now();
+
+    const [error] = await Promise.all([
+      sendIpcMessageForResult(message, cProcess, 60_000, { pluginName: 'brew', onCleanup }).then(
+        () => {
+          throw new Error('Expected the request to be rejected');
+        },
+        (err: Error) => err,
+      ),
+      setTimeout(() => cProcess.emit('exit', 1, null), 50),
+    ])
+
+    // Fails fast instead of waiting for the 60s timeout
+    expect(Date.now() - start).toBeLessThan(5_000);
+    expect(error.message).toContain('exited with code 1');
+    expect(error.message).toContain('brew');
+    expect(error.message).toContain('plan');
+    expect(onCleanup).toHaveBeenCalledTimes(1);
+    expect(cProcess.listenerCount('exit')).to.eq(0);
+  })
+
+  it('rejects when the plugin process is killed by a signal while waiting', async () => {
+    const cProcess = mockChildProcess();
+    const message = PluginMessage.create('apply', null)
+    const onCleanup = vi.fn();
+
+    const [error] = await Promise.all([
+      sendIpcMessageForResult(message, cProcess, 60_000, { pluginName: 'brew', onCleanup }).then(
+        () => {
+          throw new Error('Expected the request to be rejected');
+        },
+        (err: Error) => err,
+      ),
+      setTimeout(() => cProcess.emit('exit', null, 'SIGKILL'), 50),
+    ])
+
+    expect(error.message).toContain('killed by signal SIGKILL');
+    expect(error.message).toContain('brew');
+    expect(error.message).toContain('apply');
+    expect(onCleanup).toHaveBeenCalledTimes(1);
+  })
+
+  it('rejects when the plugin process exits cleanly without sending a response', async () => {
+    const cProcess = mockChildProcess();
+    const message = PluginMessage.create('validate', null)
+    const onCleanup = vi.fn();
+
+    const [error] = await Promise.all([
+      sendIpcMessageForResult(message, cProcess, 60_000, { pluginName: 'brew', onCleanup }).then(
+        () => {
+          throw new Error('Expected the request to be rejected');
+        },
+        (err: Error) => err,
+      ),
+      setTimeout(() => cProcess.emit('exit', 0, null), 50),
+    ])
+
+    expect(error.message).toContain('exited with code 0 without sending a response');
+    expect(error.message).toContain('validate');
+    expect(onCleanup).toHaveBeenCalledTimes(1);
+  })
+
+  it('rejects with a distinct timeout error containing the plugin and command names', async () => {
+    const cProcess = mockChildProcess();
+    const message = PluginMessage.create('findInstances', null)
+    const onCleanup = vi.fn();
+
+    const [error] = await Promise.all([
+      sendIpcMessageForResult(message, cProcess, 100, { pluginName: 'brew', onCleanup }).then(
+        () => {
+          throw new Error('Expected the request to be rejected');
+        },
+        (err: Error) => err,
+      ),
+    ])
+
+    expect(error.message).toContain('timed out');
+    expect(error.message).toContain('brew');
+    expect(error.message).toContain('findInstances');
+    expect(error.message).not.toContain('exited');
+    expect(onCleanup).toHaveBeenCalledTimes(1);
+  })
+
+  it('does not invoke cleanup on the successful path', async () => {
+    const cProcess = mockChildProcess();
+    const message = PluginMessage.create('message1', null)
+    const onCleanup = vi.fn();
+
+    await Promise.all([
+      sendIpcMessageForResult(message, cProcess, 100, { pluginName: 'brew', onCleanup }),
+      setTimeout(() => {
+        cProcess.emit('message', { cmd: returnMessageCmd('message1'), data: null, requestId: message.requestId });
+      }, 50),
+    ])
+
+    expect(onCleanup).not.toHaveBeenCalled();
+  })
+
+  it('settles concurrent requests on the same process independently when it exits', async () => {
+    const cProcess = mockChildProcess();
+    const first = PluginMessage.create('plan', null)
+    const second = PluginMessage.create('apply', null)
+    const firstCleanup = vi.fn();
+    const secondCleanup = vi.fn();
+
+    const results = await Promise.allSettled([
+      sendIpcMessageForResult(first, cProcess, 60_000, { pluginName: 'brew', onCleanup: firstCleanup }),
+      sendIpcMessageForResult(second, cProcess, 60_000, { pluginName: 'brew', onCleanup: secondCleanup }),
+      setTimeout(() => cProcess.emit('exit', 1, null), 50),
+    ])
+
+    expect(results[0].status).to.eq('rejected');
+    expect(results[1].status).to.eq('rejected');
+    expect((results[0] as PromiseRejectedResult).reason.message).toContain('plan');
+    expect((results[1] as PromiseRejectedResult).reason.message).toContain('apply');
+    expect(firstCleanup).toHaveBeenCalledTimes(1);
+    expect(secondCleanup).toHaveBeenCalledTimes(1);
+    expect(cProcess.listenerCount('message')).to.eq(0);
+    expect(cProcess.listenerCount('exit')).to.eq(0);
+  })
+
+  it('does not let one process failing affect a request waiting on a different process', async () => {
+    const failingProcess = mockChildProcess();
+    const healthyProcess = mockChildProcess();
+    const healthyMessage = PluginMessage.create('plan', null)
+
+    const [, healthyResult] = await Promise.all([
+      sendIpcMessageForResult(PluginMessage.create('apply', null), failingProcess, 60_000, { pluginName: 'crashed-plugin' })
+        .catch(() => 'failed' as const),
+      sendIpcMessageForResult(healthyMessage, healthyProcess, 60_000, { pluginName: 'healthy-plugin' }),
+      setTimeout(() => failingProcess.emit('exit', 1, null), 25),
+      setTimeout(() => {
+        healthyProcess.emit('message', { cmd: returnMessageCmd('plan'), data: null, requestId: healthyMessage.requestId });
+      }, 75),
+    ])
+
+    expect(healthyResult).toMatchObject({ cmd: returnMessageCmd('plan') });
+    expect(healthyProcess.listenerCount('exit')).to.eq(0);
+  })
 });
