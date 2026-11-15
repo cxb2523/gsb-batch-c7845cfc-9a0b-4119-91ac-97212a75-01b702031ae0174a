@@ -7,8 +7,11 @@ from PySide6.QtWidgets import QFileDialog
 from PySide6.QtWidgets import QSpacerItem
 from PySide6.QtWidgets import QWidget
 from PySide6.QtWidgets import QLabel
+from PySide6.QtWidgets import QMessageBox
+from PySide6.QtWidgets import QToolTip
 
 from PySide6.QtCore import QThreadPool
+from PySide6.QtCore import QPoint
 
 from automonkey import PositionTracker
 
@@ -20,6 +23,25 @@ from automonkey import KEYBOARD_ACTIONS
 from automonkey import WAIT_ACTIONS
 from automonkey import APPS_ACTIONS
 from automonkey import IMG_ACTIONS
+
+class _CancellablePositionTracker(PositionTracker):
+    """PositionTracker that records how the overlay was dismissed.
+
+    The base class only ever leaves the mainloop via ``destroy_`` (CTRL+click
+    in get_coords mode); if the user closes the Tk window instead, mainloop
+    exits too but ``coords`` just holds the last *hovered* cursor position -
+    indistinguishable from a real pick at the same point (including (0, 0)).
+    The flag set here lets callers tell "picked" apart from "cancelled".
+    """
+
+    def __init__(self, follow_mouse: bool = False):
+        super().__init__(follow_mouse=follow_mouse)
+        self.picked = False
+
+    def destroy_(self):
+        self.picked = True
+        super().destroy_()
+
 
 class MonkeyHead(QWidget):
     def __init__(self, parent=None):
@@ -140,11 +162,65 @@ class MonkeyHead(QWidget):
         tracker.start(get_coords=False)
 
     def get_coords(self):
-        tracker = PositionTracker()
-        coords = tracker.start(get_coords=True)
+        tracker = _CancellablePositionTracker()
+        coords = None
+        try:
+            coords = tracker.start(get_coords=True)
+        except Exception as exc:
+            self._warn_picker_failure(
+                "Coordinate pick failed",
+                f"An error occurred while picking coordinates:\n{exc}"
+            )
+            return
+        finally:
+            # Never leave the Tk overlay (or its mainloop) hanging around.
+            self._safe_close_tracker(tracker)
 
-        self.parent.target.setText(f"{coords.x}, {coords.y}")
-        self.parent.target.setCursorPosition(len(f"{coords.x}, {coords.y}"))
+        # Only write back when the user genuinely confirmed a point. Closing
+        # the overlay or any failure keeps the previous Target untouched -
+        # including a previously chosen image path.
+        if not getattr(tracker, "picked", False) or coords is None:
+            self._warn_picker_failure(
+                "Coordinate pick cancelled",
+                "No point was selected, so the Target was left unchanged."
+            )
+            return
+
+        try:
+            x_coord, y_coord = int(coords.x), int(coords.y)
+        except (AttributeError, TypeError, ValueError) as exc:
+            self._warn_picker_failure(
+                "Coordinate pick failed",
+                f"The picked coordinates were invalid:\n{exc}"
+            )
+            return
+
+        new_target = f"{x_coord}, {y_coord}"
+        self.parent.target.setText(new_target)
+        self.parent.target.setCursorPosition(len(new_target))
+        # Visible confirmation - especially when the real pick happens to be
+        # (0, 0), which otherwise looks identical to a failed/empty pick.
+        QToolTip.showText(
+            self.get_coordinates_button.mapToGlobal(QPoint(0, 0)),
+            f"Coordinates captured: {new_target}",
+            self.get_coordinates_button,
+        )
+
+    @staticmethod
+    def _safe_close_tracker(tracker):
+        """Best-effort teardown of a tracker's Tk window, always idempotent."""
+        window = getattr(tracker, "window", None)
+        if window is None:
+            return
+        try:
+            window.destroy()
+        except Exception:
+            pass
+        tracker.window = None
+
+    def _warn_picker_failure(self, title: str, message: str):
+        """Visible, non-silent feedback for cancelled/failed picking."""
+        QMessageBox.warning(self, title, message)
 
     def browse_img(self):
         self.img_target = QFileDialog.getOpenFileName(self, "Select Image", "", "Image Files (*.png *.jpg *.bmp)")[0]
@@ -154,12 +230,53 @@ class MonkeyHead(QWidget):
 
     def take_screenshot(self):
         monkeyshot = MonkeyShot()
-        scrn = monkeyshot.shoot(mode='dynamic')
+        try:
+            scrn = monkeyshot.shoot(mode='dynamic')
+        except Exception as exc:
+            self._warn_picker_failure(
+                "Screenshot failed",
+                f"An error occurred while taking the screenshot:\n{exc}"
+            )
+            return
+        finally:
+            # Guarantee the fullscreen Tk picker is gone and the main window
+            # is interactive again, on every code path.
+            monkeyshot.close()
+
+        # Cancelled/closed region window: keep the previous Target exactly as
+        # it was (empty, a "x, y" pair, or an existing image path).
+        if scrn is None:
+            self._warn_picker_failure(
+                "Screenshot cancelled",
+                "No region was selected, so the Target was left unchanged."
+            )
+            return
+
         location = QFileDialog.getSaveFileName(self, "Save Screenshot", "", "Image Files (*.png *.jpg *.bmp *.tiff)")[0]
-        scrn.save(location)
+        if not location:
+            self._warn_picker_failure(
+                "Screenshot discarded",
+                "No save location was selected, so the Target was left unchanged."
+            )
+            return
+        try:
+            scrn.save(location)
+        except (ValueError, OSError) as exc:
+            self._warn_picker_failure(
+                "Screenshot failed",
+                f"Could not save the screenshot:\n{exc}"
+            )
+            return
+
+        # Only now, after the region was selected AND the file was saved, is
+        # the Target allowed to change.
         self.parent.target.setText(location)
         self.parent.target.setCursorPosition(len(location))
-        monkeyshot = None
+        QToolTip.showText(
+            self.screenshot_button.mapToGlobal(QPoint(0, 0)),
+            f"Screenshot saved: {location}",
+            self.screenshot_button,
+        )
 
     def toggle_actions(self, new_list: tuple, button: QPushButton, svg_name: str):
         self.clear_action_toggle_style()

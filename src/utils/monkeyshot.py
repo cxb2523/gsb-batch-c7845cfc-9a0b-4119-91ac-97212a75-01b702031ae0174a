@@ -32,6 +32,7 @@ from tkinter import Toplevel
 from tkinter import TclError
 from tkinter import StringVar
 from tkinter import OptionMenu
+from tkinter import messagebox
 from tkinter.filedialog import asksaveasfilename
 
 from typing import Tuple
@@ -567,16 +568,42 @@ class MonkeyHouse:
         """
         self.window.withdraw()
         if self.settings_w is not None:
-            self.settings_w.withdraw()
+            try:
+                self.settings_w.withdraw()
+            except TclError:
+                self.settings_w = None
         screenshot_session = MonkeyShot()
-        monkey_screenshot = screenshot_session.shoot(mode)
-        self.window.deiconify()
-        if self.settings_w is not None:
-            self.settings_w.deiconify()
         try:
-            monkey_screenshot.save(asksaveasfilename(filetypes=IMAGES, defaultextension=IMAGES))
-        except ValueError:
+            monkey_screenshot = screenshot_session.shoot(mode)
+        finally:
+            # Make sure the picker's Tk window never lingers hidden.
+            screenshot_session.close()
+        try:
+            self.window.deiconify()
+        except TclError:
             pass
+        if self.settings_w is not None:
+            try:
+                self.settings_w.deiconify()
+            except TclError:
+                self.settings_w = None
+        if monkey_screenshot is None:
+            messagebox.showwarning(
+                "Screenshot cancelled",
+                "No region was selected, so no screenshot was taken."
+            )
+            return
+        location = asksaveasfilename(filetypes=IMAGES, defaultextension=IMAGES)
+        if not location:
+            messagebox.showinfo(
+                "Screenshot discarded",
+                "No save location was selected, so the screenshot was discarded."
+            )
+            return
+        try:
+            monkey_screenshot.save(location)
+        except (ValueError, OSError) as exc:
+            messagebox.showerror("Screenshot failed", f"Could not save screenshot:\n{exc}")
 
     def monkey_see(self, mode: str = 'fullscreen'):
         """Call video recording function
@@ -586,17 +613,35 @@ class MonkeyHouse:
         """
         self.window.withdraw()
         if self.settings_w is not None:
-            self.settings_w.withdraw()
+            try:
+                self.settings_w.withdraw()
+            except TclError:
+                self.settings_w = None
         video_recorder = MonkeyShot()
-        if mode == 'fullscreen':
-            video_recorder.record()
-        if mode == 'streaming':
-            video_recorder.streaming_record()
-        elif mode == 'region':
-            video_recorder.shoot(mode='video')
-        self.window.deiconify()
-        if self.settings_w is not None:
-            self.settings_w.deiconify()
+        try:
+            if mode == 'fullscreen':
+                video_recorder.record()
+            if mode == 'streaming':
+                video_recorder.streaming_record()
+            elif mode == 'region':
+                video_recorder.shoot(mode='video')
+        finally:
+            video_recorder.close()
+            try:
+                self.window.deiconify()
+            except TclError:
+                pass
+            if self.settings_w is not None:
+                try:
+                    self.settings_w.deiconify()
+                except TclError:
+                    self.settings_w = None
+        if mode == 'region' and video_recorder.cancelled:
+            messagebox.showwarning(
+                "Region recording cancelled",
+                "No region was selected, so no recording was started."
+            )
+            return
         monkey_recording = asksaveasfilename(filetypes=VIDEOS, defaultextension=VIDEOS)
         if isfile(monkey_recording):
             remove(monkey_recording)
@@ -625,6 +670,13 @@ class MonkeyShot(Toplevel):
         self.mode = None
         self.window = Tk()
         self.canvas = None
+        # Selection lifecycle flags. ``cancelled`` distinguishes "the user
+        # closed the window / pressed ESC without selecting anything" from a
+        # completed (even zero-based) selection, so callers can keep the
+        # previous target instead of writing back an empty value.
+        self.cancelled = False
+        self._completed = False
+        self._closed = False
 
     def shoot(self, mode: str = 'static'):
         """Take the screenshot
@@ -636,6 +688,11 @@ class MonkeyShot(Toplevel):
             - Dynamic mode: uses transparency. But the image is a more fuzzy and the corsshair is also partially transparent.
               This mode can be used to capture live images from videos.
             Defaults to 'static'.
+
+        Returns:
+            PIL.Image.Image or None: the captured region, or ``None`` when the
+            selection window was closed/cancelled before a valid region was
+            chosen (or an exception occurred while capturing).
         """
         if mode == 'static':
             transparency = 1
@@ -646,6 +703,8 @@ class MonkeyShot(Toplevel):
         elif mode == 'video':
             transparency = 1
             self.mode = 'video'
+        else:
+            raise ValueError(f"Unknown shoot mode: {mode}")
         # self.window = Toplevel()  # Tk()
         self.window.attributes('-fullscreen', True, '-alpha', transparency)
         self.window.configure(bg='black')
@@ -660,13 +719,26 @@ class MonkeyShot(Toplevel):
         self.canvas.bind("<Button-1>", self._two_clicks)
         self.canvas.pack()
 
+        # Closing the window (Alt+F4 / window manager close) or pressing ESC
+        # cancels the selection instead of silently producing an empty result.
+        self.window.protocol("WM_DELETE_WINDOW", self._cancel)
+        self.window.bind("<Escape>", lambda _event: self._cancel())
+
         if mode in ('static', 'video'):
             self.canvas.image = ImageTk.PhotoImage(screenshot())
             self.canvas.create_image(0, 0, image=self.canvas.image, anchor='nw')
 
         self.window.after(1, self._crosshair, None, None, None)
-        self.window.mainloop()
-        return self.monkey_screenshot
+        try:
+            self.window.mainloop()
+        finally:
+            # Guarantee no hidden Tk window / hanging mainloop survives, even
+            # if mainloop itself raised.
+            self.close()
+        # Only a genuinely completed, non-cancelled selection yields an image.
+        if self._completed and not self.cancelled:
+            return self.monkey_screenshot
+        return None
 
     def record(self, region=None, audio: str = None) -> None:
         """Record a video of the screen
@@ -818,6 +890,12 @@ class MonkeyShot(Toplevel):
         x_1, y_1 = pt1
         x_2, y_2 = pt2
 
+        if x_1 == x_2 or y_1 == y_2:
+            # Zero-width/zero-height "region" (e.g. both clicks on the same
+            # point) cannot be captured and must not be mistaken for a valid
+            # selection of (0, 0).
+            return None
+
         if x_1 > x_2 and y_1 < y_2:
             top_left_x = x_2
             top_left_y = y_1
@@ -843,53 +921,113 @@ class MonkeyShot(Toplevel):
 
     def _run(self):
         reg = self._points_to_region(self._points[0], self._points[1])
+        if reg is None:
+            # Degenerate selection: report cancellation rather than producing
+            # an invalid/empty capture.
+            self.cancelled = True
+            self._completed = False
+            return
+        # A valid region clears any earlier degenerate attempt's state.
+        self.cancelled = False
         if self.mode == 'video':
             self.record(reg)
         elif self.mode == 'screenshot':
             self.monkey_screenshot = screenshot(region=reg)
-        self.window.quit()
+        self._completed = True
+
+    def _cancel(self):
+        """User dismissed the selection window without completing a region."""
+        self.cancelled = True
+        self._completed = False
+        self.close()
+
+    def close(self):
+        """Tear down the Tk window and stop any pending crosshair polling.
+
+        Idempotent: safe to call from ``shoot()``'s cleanup, from a cancel
+        handler or more than once. Guarantees no hidden window or hanging
+        mainloop is left behind so the host application stays interactive.
+        """
+        if self._closed:
+            return
+        self._closed = True
+        if self.window is not None:
+            try:
+                self.window.destroy()
+            except TclError:
+                pass
 
     def _crosshair(self, vertical, horizontal, rectangle):
-        if self._clicks == 0:
-            x_point, y_point = position()
+        if self._closed or self.window is None:
+            return
+        try:
+            if self._clicks == 0:
+                x_point, y_point = position()
 
-            self.canvas.delete(vertical)
-            self.canvas.delete(horizontal)
+                self.canvas.delete(vertical)
+                self.canvas.delete(horizontal)
 
-            vertical = self.canvas.create_line(
-                x_point,
-                self.window.winfo_screenheight(),
-                x_point,
-                0,
-                fill='red'
-            )
-            horizontal = self.canvas.create_line(
-                0,
-                y_point,
-                self.window.winfo_screenwidth(),
-                y_point,
-                fill='red'
-            )
-        elif self._clicks == 1:
-            self.canvas.delete(vertical)
-            self.canvas.delete(horizontal)
-            self.canvas.delete(rectangle)
-            rectangle = self.canvas.create_rectangle(
-                self._points[0][0],
-                self._points[0][1],
-                position()[0],
-                position()[1],
-                outline='red'
-            )
+                vertical = self.canvas.create_line(
+                    x_point,
+                    self.window.winfo_screenheight(),
+                    x_point,
+                    0,
+                    fill='red'
+                )
+                horizontal = self.canvas.create_line(
+                    0,
+                    y_point,
+                    self.window.winfo_screenwidth(),
+                    y_point,
+                    fill='red'
+                )
+            elif self._clicks == 1:
+                self.canvas.delete(vertical)
+                self.canvas.delete(horizontal)
+                self.canvas.delete(rectangle)
+                rectangle = self.canvas.create_rectangle(
+                    self._points[0][0],
+                    self._points[0][1],
+                    position()[0],
+                    position()[1],
+                    outline='red'
+                )
 
-        self.window.after(1, self._crosshair, vertical, horizontal, rectangle)
+            self.window.after(1, self._crosshair, vertical, horizontal, rectangle)
+        except TclError:
+            # Window vanished underneath the polling loop: stop rescheduling
+            # instead of raising into Tk's event dispatch.
+            return
 
     def _two_clicks(self, event):
         self._clicks += 1
         self._points.append((event.x, event.y))
         if self._clicks == 2:
-            self.window.destroy()
             self._run()
+            if self._completed:
+                # Valid region: tear the window down and leave mainloop.
+                self.close()
+            else:
+                # Same point / degenerate region: keep the picker open and let
+                # the user try again. _clicks stays at 1 so the very next click
+                # becomes the first corner of the fresh selection rather than
+                # being swallowed, with a visible hint on the canvas.
+                self._clicks = 1
+                self._points = [(event.x, event.y)]
+                self.canvas.delete("all")
+                if self.mode == 'screenshot':
+                    try:
+                        self.canvas.image = ImageTk.PhotoImage(screenshot())
+                        self.canvas.create_image(0, 0, image=self.canvas.image, anchor='nw')
+                    except Exception:
+                        pass
+                self.canvas.create_text(
+                    self.window.winfo_screenwidth() // 2,
+                    40,
+                    text="Invalid region: select two different points (ESC to cancel)",
+                    fill='red',
+                    font=("Helvetica", 24)
+                )
 
 if __name__ == '__main__':
     MonkeyHouse()
