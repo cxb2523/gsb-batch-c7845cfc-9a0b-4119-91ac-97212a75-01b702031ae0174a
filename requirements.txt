@@ -1,0 +1,8 @@
+beautifulsoup4
+langchain
+langchain-ollama
+langchain-chroma
+chromadb
+ollama
+streamlit
+lxml
