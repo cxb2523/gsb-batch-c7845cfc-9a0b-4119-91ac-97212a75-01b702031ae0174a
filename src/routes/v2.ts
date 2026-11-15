@@ -230,6 +230,7 @@ v2Router.get(
           topicId: topic.topicId,
           title: result.value.title,
           pagesCrawled: result.value.pagesCrawled,
+          failedPages: result.value.failedPages,
           pageCount: result.value.pageCount,
         },
       );

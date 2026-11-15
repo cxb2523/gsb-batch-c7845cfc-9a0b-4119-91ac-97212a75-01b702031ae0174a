@@ -7,12 +7,21 @@ import { findRelated, rankArticles, scoreArticle } from '../src/lib/search';
 import { renderRss } from '../src/lib/feed';
 import { extractPageProps } from '../src/scrape/nextData';
 import { httpClient } from '../src/scrape/client';
-import { cleanId, idFromLink, toIso } from '../src/scrape/v2/normalize';
+import {
+  cleanId,
+  dedupeById,
+  idFromLink,
+  normalizeSummary,
+  toIso,
+  type NormalizedArticle,
+} from '../src/scrape/v2/normalize';
 import { resolveTopic, topicUrl } from '../src/scrape/v2/topic';
 import { ARTICLE_ID, fixture, stubUpstream } from './helpers';
 
 const app = createApp();
 let upstream: ReturnType<typeof stubUpstream>;
+
+const TECHNOLOGY_TOPIC_ID = 'c8y94k95v52t';
 
 beforeEach(() => {
   clearCache();
@@ -24,6 +33,31 @@ beforeEach(() => {
 afterEach(() => {
   vi.restoreAllMocks();
 });
+
+/**
+ * The page number behind every stubbed call to one topic listing, including the
+ * implicit page one (no `?page=`). Retries show up as repeated entries, so the
+ * list also answers "was any page fetched twice?".
+ */
+function requestedTopicPages(topicId = TECHNOLOGY_TOPIC_ID): number[] {
+  return upstream.mock.calls
+    .map((call) => String(call[0] ?? ''))
+    .filter((url) => url.includes(`/topics/${topicId}`))
+    .map((url) => {
+      const match = /[?&]page=(\d+)/.exec(url);
+      return match?.[1] ? Number.parseInt(match[1], 10) : 1;
+    });
+}
+
+/** Normalized, deduped article ids a fixture's topic page contributes. */
+function fixtureArticleIds(name: string): string[] {
+  const props = extractPageProps(fixture(name), `fixture:${name}`);
+  const articles = (props.pageData?.curations ?? [])
+    .flatMap((curation) => curation.summaries ?? [])
+    .map((summary) => normalizeSummary(summary, props.pageData?.title ?? null))
+    .filter((article): article is NormalizedArticle => article !== null);
+  return dedupeById(articles).map((article) => article.id);
+}
 
 describe('__NEXT_DATA__ parsing', () => {
   it('reads pageProps out of a real BBC page', () => {
@@ -295,6 +329,151 @@ describe('GET /api/v2/category/:slug', () => {
   it('404s a slug that is not a category at all', async () => {
     const res = await request(app).get('/api/v2/category/not%20a%20topic').expect(404);
     expect(res.body.error).toMatch(/No category matches/);
+    expect(upstream).not.toHaveBeenCalled();
+  });
+});
+
+describe('GET /api/v2/category/:slug/all (deep crawl)', () => {
+  // A failure on page 2 must not waste page one: the rest of the crawl keeps
+  // going and the failed page is reported rather than the whole request erroring.
+  it('skips a failed page 2, returns the other pages and lists the failed page', async () => {
+    upstream = stubUpstream({
+      failures: [{ topicId: TECHNOLOGY_TOPIC_ID, pages: [2], kind: 'http', status: 503 }],
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    vi.mocked(httpClient.get).mockImplementation(upstream as any);
+
+    const res = await request(app).get(`/api/v2/category/technology/all?pages=5`).expect(200);
+
+    expect(res.body.success).toBe(true);
+    expect(res.body.failedPages).toEqual([2]);
+    // Pages 1, 3, 4, 5 made it: pagesCrawled counts real successes only.
+    expect(res.body.pagesCrawled).toBe(4);
+    expect(res.body.pageCount).toBe(19);
+
+    // pagesCrawled agrees with what is actually in the deduped payload.
+    const returnedIds = res.body.data.map((article: { id: string }) => article.id);
+    expect(new Set(returnedIds).size).toBe(returnedIds.length);
+    expect(res.body.count).toBe(returnedIds.length);
+
+    // Every served page is the same fixture here, so every returned article is
+    // one page one could have provided; the failed page added nothing extra.
+    const expectedIds = new Set(fixtureArticleIds('category-technology.html'));
+    expect(returnedIds.every((id: string) => expectedIds.has(id))).toBe(true);
+
+    // Each page is fetched exactly once except page 2, which the retry policy
+    // attempts twice (one retry). No page beyond the requested five is fetched.
+    const pages = requestedTopicPages();
+    expect(pages.filter((page) => page === 2)).toHaveLength(2);
+    for (const page of [1, 3, 4, 5]) {
+      expect(pages.filter((candidate) => candidate === page)).toHaveLength(1);
+    }
+    expect(Math.max(...pages)).toBe(5);
+  });
+
+  // Timeouts and a changed page shape are the other two failure modes the
+  // limiter/parser can produce; both must be treated as skippable pages.
+  it('treats a timeout and a __NEXT_DATA__ parse failure as skipped pages', async () => {
+    upstream = stubUpstream({
+      failures: [
+        { topicId: TECHNOLOGY_TOPIC_ID, pages: [2], kind: 'timeout' },
+        { topicId: TECHNOLOGY_TOPIC_ID, pages: [4], kind: 'parse' },
+      ],
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    vi.mocked(httpClient.get).mockImplementation(upstream as any);
+
+    const res = await request(app).get('/api/v2/category/technology/all?pages=4').expect(200);
+
+    expect(res.body.failedPages).toEqual([2, 4]);
+    expect(res.body.pagesCrawled).toBe(2);
+    expect(res.body.data.length).toBe(fixtureArticleIds('category-technology.html').length);
+  });
+
+  // Page one carries the real pageCount; without it the crawl cannot be planned,
+  // so its failure still fails the whole request exactly as before.
+  it('errors the whole request when page 1 fails upstream', async () => {
+    upstream = stubUpstream({
+      failures: [{ topicId: TECHNOLOGY_TOPIC_ID, pages: [1], kind: 'http', status: 503 }],
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    vi.mocked(httpClient.get).mockImplementation(upstream as any);
+
+    const res = await request(app).get('/api/v2/category/technology/all?pages=3').expect(502);
+
+    expect(res.body.success).toBe(false);
+
+    // Page one is retried but no later page is ever attempted.
+    const pages = requestedTopicPages();
+    expect(pages.every((page) => page === 1)).toBe(true);
+  });
+
+  it('errors the whole request when page 1 has no parseable __NEXT_DATA__', async () => {
+    upstream = stubUpstream({
+      failures: [{ topicId: TECHNOLOGY_TOPIC_ID, pages: [1], kind: 'parse' }],
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    vi.mocked(httpClient.get).mockImplementation(upstream as any);
+
+    const res = await request(app).get('/api/v2/category/technology/all?pages=3').expect(502);
+    expect(res.body.success).toBe(false);
+    expect(requestedTopicPages().every((page) => page === 1)).toBe(true);
+  });
+
+  // The fixture's technology topic reports pageCount 19: asking for 40 must be
+  // clamped to 19 and never issue a request for pages 20..40.
+  it('truncates requested pages to the real pageCount without extra fetches', async () => {
+    const res = await request(app).get('/api/v2/category/technology/all?pages=40').expect(200);
+
+    expect(res.body.pageCount).toBe(19);
+    expect(res.body.pagesCrawled).toBe(19);
+    expect(res.body.failedPages).toEqual([]);
+
+    const pages = requestedTopicPages();
+    expect(new Set(pages)).toEqual(new Set(Array.from({ length: 19 }, (_unused, i) => i + 1)));
+    expect(pages.every((page) => page <= 19)).toBe(true);
+    expect(pages).toHaveLength(19);
+  });
+
+  // Dedup consistency across distinct page payloads: pages 2 and 3 serve the
+  // India fixture, which overlaps the technology fixture on exactly one id, so
+  // 24 + 24 + 24 - 1 = 47 unique articles across four successfully crawled pages.
+  it('keeps pagesCrawled consistent with the deduped article count', async () => {
+    upstream = stubUpstream({
+      pageFixtures: [
+        { topicId: TECHNOLOGY_TOPIC_ID, page: 2, fixture: 'category-india.html' },
+        { topicId: TECHNOLOGY_TOPIC_ID, page: 3, fixture: 'category-india.html' },
+      ],
+      failures: [{ topicId: TECHNOLOGY_TOPIC_ID, pages: [5], kind: 'http' }],
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    vi.mocked(httpClient.get).mockImplementation(upstream as any);
+
+    const res = await request(app).get('/api/v2/category/technology/all?pages=5').expect(200);
+
+    expect(res.body.failedPages).toEqual([5]);
+    expect(res.body.pagesCrawled).toBe(4);
+
+    const expected = new Set([
+      ...fixtureArticleIds('category-technology.html'),
+      ...fixtureArticleIds('category-india.html'),
+    ]);
+    const returned = res.body.data.map((article: { id: string }) => article.id);
+
+    expect(returned).toHaveLength(expected.size);
+    expect(new Set(returned)).toEqual(expected);
+    expect(res.body.count).toBe(returned.length);
+  });
+
+  // Existing query-param validation is untouched; neither the deep route nor
+  // the single-page route may reach the upstream with an out-of-range number.
+  it('rejects out-of-range page and pages params with 400 before fetching', async () => {
+    const deep = await request(app).get('/api/v2/category/technology/all?pages=9999').expect(400);
+    expect(deep.body.error).toMatch(/between/);
+
+    const single = await request(app).get('/api/v2/category/technology?page=9999').expect(400);
+    expect(single.body.error).toMatch(/between/);
+
     expect(upstream).not.toHaveBeenCalled();
   });
 });

@@ -82,28 +82,64 @@ export async function scrapeTopicPage(topic: ResolvedTopic, page = 1): Promise<T
 
 export interface TopicCrawl extends TopicPage {
   pagesCrawled: number;
+  /**
+   * Page numbers (2..n) that could not be fetched or parsed. Page one can never
+   * appear here: a page-one failure aborts the whole crawl because its
+   * `pageCount` is what bounds the remaining requests.
+   */
+  failedPages: number[];
 }
 
 /**
  * Crawl pages 1..n of a topic.
  *
  * Page one is fetched first because it reports the real `pageCount`, so asking
- * for more pages than exist costs nothing extra. The rest run in parallel but
- * queue through the shared fetch limiter, so a 40-page crawl is still only
- * `MAX_CONCURRENCY` connections at a time.
+ * for more pages than exist costs nothing extra. A page-one failure still
+ * aborts the request -- without it there is no `pageCount` to plan around.
+ *
+ * The remaining pages run in parallel but queue through the shared fetch
+ * limiter, so a 40-page crawl is still only `MAX_CONCURRENCY` connections at a
+ * time. Each page is requested exactly once. A failure on page 2..n (upstream
+ * 5xx, timeout or a `__NEXT_DATA__` parse error) skips that page rather than
+ * discarding the pages already fetched: it is recorded in `failedPages` and the
+ * rest of the crawl proceeds, so `pagesCrawled` counts only pages whose
+ * articles made it into the deduped result.
  */
 export async function scrapeTopicPages(topic: ResolvedTopic, pages: number): Promise<TopicCrawl> {
+  // Not wrapped: a failure here must propagate exactly as a single-page scrape.
   const first = await scrapeTopicPage(topic, 1);
   const total = Math.min(pages, first.pageCount, config.maxTopicPages);
 
-  if (total <= 1) return { ...first, pagesCrawled: 1 };
+  if (total <= 1) return { ...first, pagesCrawled: 1, failedPages: [] };
 
-  const rest = await Promise.all(
+  const settled = await Promise.allSettled(
     Array.from({ length: total - 1 }, (_unused, index) => scrapeTopicPage(topic, index + 2)),
   );
 
-  const articles = dedupeById([first, ...rest].flatMap((result) => result.articles));
+  const succeeded: TopicPage[] = [];
+  const failedPages: number[] = [];
+
+  settled.forEach((outcome, index) => {
+    const page = index + 2;
+    if (outcome.status === 'fulfilled') {
+      succeeded.push(outcome.value);
+    } else {
+      failedPages.push(page);
+      console.warn(
+        `[topic] skipping ${topic.topicId} page ${page} after failure:`,
+        (outcome.reason as Error)?.message ?? outcome.reason,
+      );
+    }
+  });
+
+  const articles = dedupeById([first, ...succeeded].flatMap((result) => result.articles));
   indexArticles(articles);
 
-  return { ...first, page: null, pagesCrawled: total, articles };
+  return {
+    ...first,
+    page: null,
+    pagesCrawled: succeeded.length + 1,
+    failedPages,
+    articles,
+  };
 }

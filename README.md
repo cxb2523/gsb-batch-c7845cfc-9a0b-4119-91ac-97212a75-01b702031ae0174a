@@ -329,11 +329,17 @@ Query: `page` (1..40), `limit` (1..24). Response adds `slug`, `topicId`, `title`
 
 ### `GET /api/v2/category/:slug/all?pages=5`
 
-Pages 1..n in a single call, deduped. Page one is fetched first because it reports the real `pageCount`, so asking for more pages than exist costs nothing. Fetches queue through the shared concurrency limiter rather than flooding upstream.
+Pages 1..n in a single call, deduped. Page one is fetched first because it reports the real `pageCount`, so asking for more pages than exist costs nothing: the request is truncated to `pageCount` and no page beyond it is ever fetched. Fetches queue through the shared concurrency limiter rather than flooding upstream, and each page is requested at most once.
 
-Capped at `MAX_TOPIC_PAGES` (40) and rate limited separately -- this is the expensive route.
+Capped at `MAX_TOPIC_PAGES` (40) and rate limited separately -- this is the expensive route. An out-of-range `pages` (or `page` on the single-page route) is still rejected with `400` before anything is fetched.
 
-Response adds `pagesCrawled` alongside `pageCount`.
+A failure on page one (upstream 5xx, timeout or an unparseable `__NEXT_DATA__`) fails the whole request, since it is the only source of the real `pageCount`. A failure on page 2..n no longer discards the crawl: that page is skipped, the remaining pages are still fetched, and the response carries on.
+
+Response adds `pagesCrawled`, `failedPages` and `pageCount` alongside the v2 envelope:
+
+- `pagesCrawled` counts only pages that actually succeeded, so it always agrees with the deduped `data` (page one plus the surviving pages).
+- `failedPages` lists the 1-based page numbers that were skipped; it is `[]` when every requested page succeeded. Page one never appears here -- its failure produces an error response instead.
+- `pageCount` is the real number of pages the topic has upstream, regardless of how many were requested or failed.
 
 ### `GET /api/v2/article/:id`
 
