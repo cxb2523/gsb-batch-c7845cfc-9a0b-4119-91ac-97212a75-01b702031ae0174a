@@ -1,14 +1,15 @@
+import json
 import logging
 import os
-import json
-import requests
-import pandas as pd
+from datetime import datetime, timedelta
 
-from datetime import datetime, timedelta, timezone
+import pandas as pd
 from airflow import DAG
 from airflow.hooks.base import BaseHook
 from airflow.operators.python import PythonOperator
 from airflow.providers.postgres.hooks.postgres import PostgresHook
+from weather_pipeline import fetch_weather_data as fetch_weather_records
+from weather_pipeline import insert_weather_data as upsert_weather_records
 
 # Configure module-level logger
 logger = logging.getLogger(__name__)
@@ -61,55 +62,26 @@ with DAG(
     # -----------------------------------------------------------------
     def fetch_weather_data(locations):
         """
-        Fetch the current weather data for each location from the OpenWeather API.
-        Returns the collected data as a JSON string.
+        Fetch the current weather data for each location from the
+        OpenWeather API.
+
+        Per-city failures (request error, timeout or a body missing
+        main/wind/weather) are collected instead of being swallowed: the
+        returned XCom payload contains both the successful records and a
+        ``failures`` list. The task raises only when every city fails.
         """
         connection = BaseHook.get_connection("openweather_api_key")
-        api_key = connection.extra_dejson.get("api_key")
-
-        # Parse the incoming locations string
-        locations_list = json.loads(locations)
-        base_url = connection.host
-        weather_data = []
-
-        for location_info in locations_list:
-            lat, lon = location_info["lat"], location_info["lon"]
-            city = location_info["city"]
-            try:
-                response = requests.get(
-                    base_url,
-                    params={
-                        "lat": lat,
-                        "lon": lon,
-                        "appid": api_key,
-                        "units": "metric",
-                    },
-                    timeout=10,  # optional: set a timeout for requests
-                )
-                if response.status_code == 200:
-                    data = response.json()
-                    # Append weather record with an ISO-formatted date
-                    weather_data.append(
-                        {
-                            "city": city,
-                            "date": datetime.now(timezone.utc).date().isoformat(),
-                            "temperature": data["main"]["temp"],
-                            "humidity": data["main"]["humidity"],
-                            "wind_speed": data["wind"]["speed"],
-                            "weather_condition": data["weather"][0]["description"],
-                        }
-                    )
-                else:
-                    logger.error(
-                        "Failed API call for %s (HTTP %s). Response: %s",
-                        city,
-                        response.status_code,
-                        response.text,
-                    )
-            except Exception as exc:
-                logger.error("Exception occurred for %s: %s", city, exc)
-
-        return json.dumps(weather_data)
+        payload = fetch_weather_records(
+            locations=json.loads(locations),
+            connection=connection,
+        )
+        logger.info(
+            "Fetched %s weather records; %s city/cities failed: %s",
+            len(payload["weather_data"]),
+            len(payload["failures"]),
+            [item["city"] for item in payload["failures"]],
+        )
+        return payload
 
     fetch_weather_data_task = PythonOperator(
         task_id="fetch_weather_data",
@@ -120,55 +92,24 @@ with DAG(
     # -----------------------------------------------------------------
     # Step 3: Insert Weather Data into PostgreSQL
     # -----------------------------------------------------------------
-    def insert_weather_data(weather_data):
+    def insert_weather_data(weather_payload):
         """
-        Insert the weather data (JSON string) into a PostgreSQL table.
+        Upsert the fetched weather data into the PostgreSQL ``weather`` table.
+
+        Rows are keyed by (city, date), so re-running the same batch updates
+        the existing rows instead of creating duplicates. The fetched failure
+        list is surfaced in the logs and forwarded through XCom.
         """
-        # Convert JSON string to list of dicts
-        if isinstance(weather_data, str):
-            weather_data = json.loads(weather_data)
-
-        # Convert ISO-formatted date strings to date objects
-        for record in weather_data:
-            record["date"] = datetime.fromisoformat(record["date"]).date()
-
-        # Validate data format
-        if not isinstance(weather_data, list) or not all(
-            isinstance(record, dict) for record in weather_data
-        ):
-            raise ValueError(
-                "Invalid format for weather_data; expected a list of dictionaries."
-            )
-
-        # Insert every record in a single batch
         postgres_hook = PostgresHook(postgres_conn_id="postgres_weather_db")
-        rows = [
-            (
-                record["city"],
-                record["date"],
-                record["temperature"],
-                record["humidity"],
-                record["wind_speed"],
-                record["weather_condition"],
+        summary = upsert_weather_records(weather_payload, postgres_hook)
+
+        logger.info("Successful inserts/updates: %s", summary["inserted"])
+        if summary["failures"]:
+            logger.warning(
+                "Failed cities (no row written): %s",
+                [item["city"] for item in summary["failures"]],
             )
-            for record in weather_data
-        ]
-
-        postgres_hook.insert_rows(
-            table="weather",
-            rows=rows,
-            target_fields=[
-                "city",
-                "date",
-                "temperature",
-                "humidity",
-                "wind_speed",
-                "weather_condition",
-            ],
-            commit_every=100,
-        )
-
-        logger.info("Inserted %s weather records.", len(rows))
+        return summary
 
     insert_weather_data_task = PythonOperator(
         task_id="insert_weather_data",

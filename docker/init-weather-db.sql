@@ -15,4 +15,19 @@ CREATE TABLE IF NOT EXISTS weather (
     weather_condition VARCHAR(150)
 );
 
-CREATE INDEX IF NOT EXISTS idx_weather_city_date ON weather (city, date);
+-- Unique on (city, date): the insert task upserts against this index so a
+-- re-run of the same daily batch updates the existing row instead of
+-- inserting a duplicate.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_weather_city_date
+    ON weather (city, date);
+
+-- Migration for databases created before the unique index existed:
+--
+--   DROP INDEX IF EXISTS idx_weather_city_date;
+--   CREATE UNIQUE INDEX idx_weather_city_date ON weather (city, date);
+--
+-- De-duplicate any pre-existing repeated (city, date) rows first, e.g. keep
+-- the row with the highest id per (city, date):
+--
+--   DELETE FROM weather a USING weather b
+--     WHERE a.city = b.city AND a.date = b.date AND a.id < b.id;

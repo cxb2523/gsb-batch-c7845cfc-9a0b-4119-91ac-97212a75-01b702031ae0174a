@@ -35,11 +35,15 @@ Chicago,41.8781,-87.6298
 
 The `fetch_weather_data` task retrieves weather data for the cities in the CSV using the OpenWeather API. The task uses an Airflow connection named **`openweather_api_key`** to securely access the API.
 
+A failed request, a timeout or a response missing the `main`, `wind` or `weather` fields does not abort the run: the city and the failure reason are logged and collected in a `failures` list while the remaining cities are still fetched. The task only fails when every city fails. The XCom payload is `{"weather_data": [...], "failures": [{"city", "reason"}, ...]}`, so downstream tasks and operators can see exactly which cities have no data for the day.
+
 ---
 
 ### Step 3: Insert Weather Data
 
-The `insert_weather_data` task inserts the fetched weather data into the PostgreSQL database. This task requires a valid Airflow connection named **`postgres_weather_db`**.
+The `insert_weather_data` task writes the fetched weather data into the PostgreSQL database. This task requires a valid Airflow connection named **`postgres_weather_db`**.
+
+Rows are upserted on the unique `(city, date)` index, so re-running the same daily batch updates the existing rows instead of creating duplicates. The task log and its XCom return value report the number of rows written and carry forward the failed-city list from the fetch step.
 
 ---
 

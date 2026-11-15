@@ -4,9 +4,39 @@ What the test suite covers, and what it deliberately does not.
 
 ## What runs
 
-The suite loads the DagBag and asserts that no file in the dags folder raised on import. That single assertion catches the failure mode that costs beginners the most time, because a syntax error or a missing provider package shows up in the UI as nothing at all rather than as an error.
+The suite has two layers, both offline.
 
-Run it with `pytest tests -q` from the repository root, with the same environment the DAGs expect.
+### DAG integrity (`test_dag_integrity.py`)
+
+These tests load the DagBag and assert that no file in the dags folder raised
+on import, that the three expected task IDs (`load_locations`,
+`fetch_weather_data`, `insert_weather_data`) exist and that their dependency
+order is unchanged. A syntax error or a missing provider package otherwise
+shows up in the UI as nothing at all rather than as an error. They need an
+Airflow install, matching the CI environment.
+
+### ETL unit tests (`test_weather_pipeline.py`)
+
+The fetch and insert logic lives in `dags/weather_pipeline.py`, which imports
+no Airflow code. These tests run without Airflow, an API key or a database:
+
+- the OpenWeather HTTP layer is replaced with a fake returning canned
+  responses, including timeouts, non-200 status codes and bodies missing
+  `main` / `wind` / `weather`;
+- the database is replaced with an in-memory fake hook that enforces the
+  unique `(city, date)` index and emulates `INSERT ... ON CONFLICT DO UPDATE`.
+
+They assert that:
+
+1. with some cities failing, the other cities are still written and the
+   failure list (city plus reason) is complete and visible in the logs/XCom;
+2. when every city fails, the fetch raises so the task is marked failed;
+3. running the same batch twice leaves exactly one row per city and date,
+   with the latest values, both across runs and for duplicates inside a batch.
+
+Run everything with `pytest tests -q` from the repository root, with the same
+environment the DAGs expect. The ETL unit tests alone also run in any
+environment that has `pytest` and `requests` installed.
 
 ## What CI adds
 
@@ -16,9 +46,15 @@ The ordering matters: the cheap checks fail fast, so the slow job only runs on c
 
 ## What is not covered
 
-There are no tests that call the weather API or write to Postgres. That is intentional. Tests that need a live API key and a live database are not tests a contributor can run, and a tutorial repository is the wrong place to teach people to depend on network access in CI.
+There are no tests that call the weather API or write to a real Postgres
+instance. Tests that need a live API key and a live database are not tests a
+contributor can run, and a tutorial repository is the wrong place to teach
+people to depend on network access in CI.
 
-If you want that coverage, mock the hook rather than the HTTP layer. Asserting that the task calls insert_rows with the rows you expect is more useful than asserting that Postgres accepted them.
+If you want that coverage, mock the hook rather than the HTTP layer. The fake
+hook in `test_weather_pipeline.py` is the pattern: assert that the task runs
+the upsert with the rows you expect rather than asserting that Postgres
+accepted them.
 
 ## Adding a test
 
