@@ -29,6 +29,14 @@ def browse_files(widget : Entry, is_input_file_entry : bool) -> None:
         widget.delete(0,'end')
         widget.insert('end',file_path)
 
+def browse_folder(widget : Entry) -> None:
+    """Browse for a directory and put it in the input entry (batch mode)."""
+    folder_path = filedialog.askdirectory(title='Browse folder')
+
+    if folder_path:
+        widget.delete(0,'end')
+        widget.insert('end',folder_path)
+
 class MenuCreators:
 
     @staticmethod
@@ -81,6 +89,9 @@ class MenuCreators:
         menu.add_command(label='Clear', command=lambda : widget.delete(0,'end'), accelerator='Ctrl+Shift+C', underline=1) # 5
         if is_file_entry:
             menu.add_command(label='Browse',command=lambda : browse_files(widget, not is_output_file_entry), accelerator='Ctrl+B', underline=0) # 6
+            if not is_output_file_entry:
+                # Input entry: a directory switches the convert action to batch mode
+                menu.add_command(label='Browse folder',command=lambda : browse_folder(widget), underline=7) # 7
             if is_output_file_entry:
                 menu.add_separator() # 7
                 menu.add_radiobutton(label='Excel',variable=excel_var,value=True,

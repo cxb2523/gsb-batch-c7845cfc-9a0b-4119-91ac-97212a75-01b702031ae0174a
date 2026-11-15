@@ -2,14 +2,17 @@
 Text2Excel is a GUI desktop application that can extract data from a text file
 and put them in an Excel or CSV file using regular expression (regex) patterns.
 
-version 2.8.0
+A directory in the input entry switches the convert action to batch mode:
+every text file in that directory is processed and appended to one output.
+
+version 2.9.0
 
 https://github.com/AmirAli104/Text2Excel
 
 License: MIT License
 """
 
-__version__ = '2.8.0'
+__version__ = '2.9.0'
 
 import tkinter as tk
 from tkinter import ttk
@@ -41,7 +44,7 @@ window.iconphoto(True,icon)
 
 # ----- defining 'input file', 'output file' and 'sheet name' labels and entries -----
 
-input_file_lbl = tk.Label(frm,text='Input file:')
+input_file_lbl = tk.Label(frm,text='Input file/folder:')
 output_file_lbl = tk.Label(frm,text='Output file:')
 sheet_name_lbl = tk.Label(frm,text='Sheet name:')
 
@@ -180,9 +183,19 @@ row_rb.config(command=CommandsObjects.csv_excel_switch_functions.hide_exact_orde
 
 data_extractor = DataExtractor(excel_var, log_text, col_var, exact_var)
 
+def convert() -> None:
+    # A directory in the input entry triggers batch mode; a file keeps
+    # the original single-file behaviour.
+    input_path = input_file_entry.get()
+    if os.path.isdir(input_path):
+        data_extractor.prepare_to_extract_data_batch(output_file_entry.get(),
+                        input_path, sheet_name_entry.get(), patterns_list.get(0,'end'))
+    else:
+        data_extractor.prepare_to_extract_data(output_file_entry.get(),
+                        input_path, sheet_name_entry.get(), patterns_list.get(0,'end'))
+
 btn_convert = tk.Button(frm,text='convert',width=10,height=5,background='#0080e5',
-                        command=lambda : data_extractor.prepare_to_extract_data(output_file_entry.get(),
-                        input_file_entry.get(), sheet_name_entry.get(), patterns_list.get(0,'end')), cursor='hand2')
+                        command=convert, cursor='hand2')
 
 btn_convert.bind('<Enter>', lambda event : btn_convert.config(bg = '#0092ff'))
 btn_convert.bind('<Leave>', lambda event : btn_convert.config(bg = '#0080e5'))

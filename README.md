@@ -17,6 +17,10 @@
     ```  
     This matches 5 word characters followed by a digit, but only the digit will be saved if wrapped in a group.  
 - Export to **Excel (.xlsx)** or **CSV (.csv)** (CSV available via the output file context menu).
+- **Batch mode**: put a directory in the *Input file/folder* entry (right-click it → **Browse folder**) and press *convert*. Every text file in that directory is processed in turn with the current pattern list, and all matches are appended to a single output file.
+  - Failures are isolated: an unreadable file (binary, bad encoding, no permission) or an illegal pattern is skipped and reported, while every other file and pattern still runs.
+  - Already written data is never rolled back. In batch mode the workbook is opened and saved exactly once (the CSV file is opened once).
+  - The log lists, per file, how many values were written or why the file was skipped, and ends with the number of successful and failed files. An empty directory or a run with no matches produces an explicit message instead of ending silently.
 
 **note: You cannot place multiple groups in one pattern**
 
@@ -35,6 +39,13 @@ python -m pip install openpyxl==3.1.5
 Run the app with:
 ```bash
 python src/text2excel.py
+```
+
+## Tests
+The test suite covers normal batch extraction, bad-file skipping, illegal-regex
+skipping, empty directories, no-match runs and the original single-file behaviour:
+```bash
+python -m pytest tests/
 ```
 ## Build
 To build an executable with `pyinstaller`:
