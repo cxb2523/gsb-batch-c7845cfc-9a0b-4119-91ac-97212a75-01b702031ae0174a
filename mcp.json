@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "substack": {
+      "command": "uvx",
+      "args": [
+        "substack-api-mcp",
+        "mcp"
+      ]
+    }
+  }
+}
