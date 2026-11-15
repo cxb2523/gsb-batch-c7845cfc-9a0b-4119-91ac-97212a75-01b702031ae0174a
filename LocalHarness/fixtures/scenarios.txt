@@ -1,0 +1,177 @@
+# ============================================================================
+# Hand-written mail metadata fixtures for the offline archiving harness.
+#
+# Every `mail=` line stands for one unread message that a real run would have
+# received through ForEachEmailX.  Only the metadata the workflow actually
+# touches is modelled: sender address, subject, Date header and whether any
+# attachment exists.
+#
+# Format
+#   [scenario-key]                scenario identifier
+#   description=...               human readable note
+#   success=N                     number of emails expected to be archived
+#   failure=N                     number of emails expected to be listed as failed
+#   template=success|failure      report template expected to be used
+#   mail=sender|subject|date|attachments|failAt
+#       sender       From address, or <empty> for a missing address
+#       subject      Subject text, or <empty> for an empty subject
+#       date         raw Date header value, or <empty> for a missing header
+#       attachments  yes | no
+#       failAt       -                      behaves normally
+#                    subject-read           reading .Subject throws
+#                    date-parse             the Date header cannot be parsed
+#                    save-mail              SaveMailX throws
+#                    save-attachments       SaveMailAttachmentsX throws
+#                    sender-read            reading .From throws (non fatal)
+#
+# The failAt values are injected at exactly the step named, so a failure is
+# reproducible without a mail server.
+# ============================================================================
+
+[all-success]
+description=Ten ordinary unread emails, all archivable.
+success=10
+failure=0
+template=success
+mail=no-reply@m.mail.coursera.org|Your weekly course digest|Mon, 16 Nov 2026 10:10:30 +1100|no|-
+mail=mail@bigw.com.au|Order confirmation 88213|Mon, 16 Nov 2026 10:11:30 +1100|yes|-
+mail=ubereats@uber.com|Your Uber Eats receipt|Mon, 16 Nov 2026 10:12:30 +1100|no|-
+mail=noreplytickets@taronga.org.au|Your Taronga Zoo tickets|Mon, 16 Nov 2026 10:13:30 +1100|yes|-
+mail=ebills@winconnect.com.au|Electricity bill: due soon|Mon, 16 Nov 2026 10:14:30 +1100|yes|-
+mail=meenoxiong@gmail.com|Notes to self|Mon, 16 Nov 2026 10:15:30 +1100|no|-
+mail=someone@example.com|Random newsletter|Mon, 16 Nov 2026 10:16:30 +1100|yes|-
+mail=another@example.org|Meeting invite for Thursday|Mon, 16 Nov 2026 10:17:30 +1100|no|-
+mail=third@example.net|Invoice 2026-11|Mon, 16 Nov 2026 10:18:30 +1100|yes|-
+mail=fourth@example.com|Weekly summary|Mon, 16 Nov 2026 10:19:30 +1100|no|-
+
+[one-attachment-failure]
+description=Ten emails; the fourth fails while its attachments are saved.
+success=9
+failure=1
+template=failure
+mail=no-reply@m.mail.coursera.org|Your weekly course digest|Mon, 16 Nov 2026 10:10:30 +1100|no|-
+mail=mail@bigw.com.au|Order confirmation 88213|Mon, 16 Nov 2026 10:11:30 +1100|yes|-
+mail=ubereats@uber.com|Your Uber Eats receipt|Mon, 16 Nov 2026 10:12:30 +1100|no|-
+mail=ubereats@uber.com|Broken attachment email|Mon, 16 Nov 2026 10:13:30 +1100|yes|save-attachments
+mail=noreplytickets@taronga.org.au|Your Taronga Zoo tickets|Mon, 16 Nov 2026 10:14:30 +1100|yes|-
+mail=ebills@winconnect.com.au|Electricity bill: due soon|Mon, 16 Nov 2026 10:15:30 +1100|yes|-
+mail=meenoxiong@gmail.com|Notes to self|Mon, 16 Nov 2026 10:16:30 +1100|no|-
+mail=someone@example.com|Random newsletter|Mon, 16 Nov 2026 10:17:30 +1100|yes|-
+mail=another@example.org|Meeting invite for Thursday|Mon, 16 Nov 2026 10:18:30 +1100|no|-
+mail=third@example.net|Invoice 2026-11|Mon, 16 Nov 2026 10:19:30 +1100|yes|-
+
+[same-sender-same-second]
+description=Three emails from one sender, all arriving in the same second.
+success=3
+failure=0
+template=success
+mail=mail@bigw.com.au|Receipt A|Mon, 16 Nov 2026 10:20:30 +1100|no|-
+mail=mail@bigw.com.au|Receipt B|Mon, 16 Nov 2026 10:20:30 +1100|no|-
+mail=mail@bigw.com.au|Receipt C|Mon, 16 Nov 2026 10:20:30 +1100|yes|-
+
+[empty-subject]
+description=Ten emails; the first has an empty subject.
+success=9
+failure=1
+template=failure
+mail=someone@example.com|<empty>|Mon, 16 Nov 2026 10:10:30 +1100|no|-
+mail=mail@bigw.com.au|Order confirmation 88213|Mon, 16 Nov 2026 10:11:30 +1100|yes|-
+mail=ubereats@uber.com|Your Uber Eats receipt|Mon, 16 Nov 2026 10:12:30 +1100|no|-
+mail=noreplytickets@taronga.org.au|Your Taronga Zoo tickets|Mon, 16 Nov 2026 10:13:30 +1100|yes|-
+mail=ebills@winconnect.com.au|Electricity bill: due soon|Mon, 16 Nov 2026 10:14:30 +1100|yes|-
+mail=meenoxiong@gmail.com|Notes to self|Mon, 16 Nov 2026 10:15:30 +1100|no|-
+mail=someone@example.com|Random newsletter|Mon, 16 Nov 2026 10:16:30 +1100|yes|-
+mail=another@example.org|Meeting invite for Thursday|Mon, 16 Nov 2026 10:17:30 +1100|no|-
+mail=third@example.net|Invoice 2026-11|Mon, 16 Nov 2026 10:18:30 +1100|yes|-
+mail=fourth@example.com|Weekly summary|Mon, 16 Nov 2026 10:19:30 +1100|no|-
+
+[subject-read-error]
+description=Ten emails; reading the subject of the sixth throws.
+success=9
+failure=1
+template=failure
+mail=no-reply@m.mail.coursera.org|Your weekly course digest|Mon, 16 Nov 2026 10:10:30 +1100|no|-
+mail=mail@bigw.com.au|Order confirmation 88213|Mon, 16 Nov 2026 10:11:30 +1100|yes|-
+mail=ubereats@uber.com|Your Uber Eats receipt|Mon, 16 Nov 2026 10:12:30 +1100|no|-
+mail=noreplytickets@taronga.org.au|Your Taronga Zoo tickets|Mon, 16 Nov 2026 10:13:30 +1100|yes|-
+mail=ebills@winconnect.com.au|Electricity bill: due soon|Mon, 16 Nov 2026 10:14:30 +1100|yes|-
+mail=third@example.net|Anything at all|Mon, 16 Nov 2026 10:15:30 +1100|no|subject-read
+mail=someone@example.com|Random newsletter|Mon, 16 Nov 2026 10:16:30 +1100|yes|-
+mail=another@example.org|Meeting invite for Thursday|Mon, 16 Nov 2026 10:17:30 +1100|no|-
+mail=third@example.net|Invoice 2026-11|Mon, 16 Nov 2026 10:18:30 +1100|yes|-
+mail=fourth@example.com|Weekly summary|Mon, 16 Nov 2026 10:19:30 +1100|no|-
+
+[bad-date]
+description=Ten emails; the third has an unparsable Date header.
+success=9
+failure=1
+template=failure
+mail=no-reply@m.mail.coursera.org|Your weekly course digest|Mon, 16 Nov 2026 10:10:30 +1100|no|-
+mail=mail@bigw.com.au|Order confirmation 88213|Mon, 16 Nov 2026 10:11:30 +1100|yes|-
+mail=ubereats@uber.com|Bad date|not a date at all|no|-
+mail=noreplytickets@taronga.org.au|Your Taronga Zoo tickets|Mon, 16 Nov 2026 10:13:30 +1100|yes|-
+mail=ebills@winconnect.com.au|Electricity bill: due soon|Mon, 16 Nov 2026 10:14:30 +1100|yes|-
+mail=meenoxiong@gmail.com|Notes to self|Mon, 16 Nov 2026 10:15:30 +1100|no|-
+mail=someone@example.com|Random newsletter|Mon, 16 Nov 2026 10:16:30 +1100|yes|-
+mail=another@example.org|Meeting invite for Thursday|Mon, 16 Nov 2026 10:17:30 +1100|no|-
+mail=third@example.net|Invoice 2026-11|Mon, 16 Nov 2026 10:18:30 +1100|yes|-
+mail=fourth@example.com|Weekly summary|Mon, 16 Nov 2026 10:19:30 +1100|no|-
+
+[sender-read-error]
+description=Ten emails; reading the sender of the second throws, which is non fatal.
+success=10
+failure=0
+template=success
+mail=no-reply@m.mail.coursera.org|Your weekly course digest|Mon, 16 Nov 2026 10:10:30 +1100|no|-
+mail=<empty>|Senderless email|Mon, 16 Nov 2026 10:11:30 +1100|no|sender-read
+mail=ubereats@uber.com|Your Uber Eats receipt|Mon, 16 Nov 2026 10:12:30 +1100|no|-
+mail=noreplytickets@taronga.org.au|Your Taronga Zoo tickets|Mon, 16 Nov 2026 10:13:30 +1100|yes|-
+mail=ebills@winconnect.com.au|Electricity bill: due soon|Mon, 16 Nov 2026 10:14:30 +1100|yes|-
+mail=meenoxiong@gmail.com|Notes to self|Mon, 16 Nov 2026 10:15:30 +1100|no|-
+mail=someone@example.com|Random newsletter|Mon, 16 Nov 2026 10:16:30 +1100|yes|-
+mail=another@example.org|Meeting invite for Thursday|Mon, 16 Nov 2026 10:17:30 +1100|no|-
+mail=third@example.net|Invoice 2026-11|Mon, 16 Nov 2026 10:18:30 +1100|yes|-
+mail=fourth@example.com|Weekly summary|Mon, 16 Nov 2026 10:19:30 +1100|no|-
+
+[all-fail]
+description=Every email fails while saving attachments; the run must still report.
+success=0
+failure=10
+template=failure
+mail=mail@bigw.com.au|Fragile 1|Mon, 16 Nov 2026 10:20:30 +1100|yes|save-attachments
+mail=mail@bigw.com.au|Fragile 2|Mon, 16 Nov 2026 10:20:30 +1100|yes|save-attachments
+mail=mail@bigw.com.au|Fragile 3|Mon, 16 Nov 2026 10:20:30 +1100|yes|save-attachments
+mail=mail@bigw.com.au|Fragile 4|Mon, 16 Nov 2026 10:20:30 +1100|yes|save-attachments
+mail=mail@bigw.com.au|Fragile 5|Mon, 16 Nov 2026 10:20:30 +1100|yes|save-attachments
+mail=mail@bigw.com.au|Fragile 6|Mon, 16 Nov 2026 10:20:30 +1100|yes|save-attachments
+mail=mail@bigw.com.au|Fragile 7|Mon, 16 Nov 2026 10:20:30 +1100|yes|save-attachments
+mail=mail@bigw.com.au|Fragile 8|Mon, 16 Nov 2026 10:20:30 +1100|yes|save-attachments
+mail=mail@bigw.com.au|Fragile 9|Mon, 16 Nov 2026 10:20:30 +1100|yes|save-attachments
+mail=mail@bigw.com.au|Fragile 10|Mon, 16 Nov 2026 10:20:30 +1100|yes|save-attachments
+
+[mixed]
+description=Duplicate sender/second plus an unparsable date plus an empty subject.
+success=3
+failure=2
+template=failure
+mail=mail@bigw.com.au|Receipt A|Mon, 16 Nov 2026 10:20:30 +1100|no|-
+mail=mail@bigw.com.au|Receipt B|Mon, 16 Nov 2026 10:20:30 +1100|no|-
+mail=ubereats@uber.com|No date|not a date at all|no|-
+mail=<empty>|<empty>|Mon, 16 Nov 2026 10:22:30 +1100|no|-
+mail=ebills@winconnect.com.au|Invoice|Mon, 16 Nov 2026 10:23:30 +1100|yes|-
+
+[save-mail-failure]
+description=Ten emails; the fifth fails inside SaveMailX after its folder was created.
+success=9
+failure=1
+template=failure
+mail=no-reply@m.mail.coursera.org|Your weekly course digest|Mon, 16 Nov 2026 10:10:30 +1100|no|-
+mail=mail@bigw.com.au|Order confirmation 88213|Mon, 16 Nov 2026 10:11:30 +1100|yes|-
+mail=ubereats@uber.com|Your Uber Eats receipt|Mon, 16 Nov 2026 10:12:30 +1100|no|-
+mail=noreplytickets@taronga.org.au|Your Taronga Zoo tickets|Mon, 16 Nov 2026 10:13:30 +1100|yes|-
+mail=ebills@winconnect.com.au|Locked: message file|Mon, 16 Nov 2026 10:14:30 +1100|no|save-mail
+mail=meenoxiong@gmail.com|Notes to self|Mon, 16 Nov 2026 10:15:30 +1100|no|-
+mail=someone@example.com|Random newsletter|Mon, 16 Nov 2026 10:16:30 +1100|yes|-
+mail=another@example.org|Meeting invite for Thursday|Mon, 16 Nov 2026 10:17:30 +1100|no|-
+mail=third@example.net|Invoice 2026-11|Mon, 16 Nov 2026 10:18:30 +1100|yes|-
+mail=fourth@example.com|Weekly summary|Mon, 16 Nov 2026 10:19:30 +1100|no|-

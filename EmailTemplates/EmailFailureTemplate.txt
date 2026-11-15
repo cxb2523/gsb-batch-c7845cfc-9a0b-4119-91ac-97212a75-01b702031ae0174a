@@ -1,0 +1,17 @@
+Dear Human,
+
+Your email automation robot completed at {0}, but some emails could not be archived.
+
+Emails archived successfully: {1}
+Emails that failed: {2}
+
+The following emails/attachments were saved to your machine:
+
+{3}
+
+The following emails could NOT be archived and need your attention:
+
+{4}
+
+Kind regards
+Email Automation Robot

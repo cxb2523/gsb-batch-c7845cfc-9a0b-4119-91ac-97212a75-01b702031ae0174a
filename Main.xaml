@@ -123,8 +123,39 @@
         </Variable.Default>
       </Variable>
       <Variable x:TypeArguments="x:String" Name="varMailSender" />
+      <Variable x:TypeArguments="x:String" Name="varMailSenderAddress" />
       <Variable x:TypeArguments="x:String" Name="varMailSubject" />
+      <Variable x:TypeArguments="x:String" Name="varMailSubjectRaw" />
+      <Variable x:TypeArguments="x:String" Name="varMailSubjectDisplay" />
+      <Variable x:TypeArguments="x:String" Name="varMailSubjectFile" />
+      <Variable x:TypeArguments="s:DateTime" Name="varMailDate" />
+      <Variable x:TypeArguments="x:String" Name="varMailDateStamp" />
+      <Variable x:TypeArguments="x:String" Name="varMailFolder" />
+      <Variable x:TypeArguments="x:String" Name="varMailFolderResolved" />
+      <Variable x:TypeArguments="x:Int32" Name="varMailFolderSuffix" />
+      <Variable x:TypeArguments="x:String" Name="varErrorReason" />
+      <Variable x:TypeArguments="x:Int32" Name="varSuccessCount">
+        <Variable.Default>
+          <Literal x:TypeArguments="x:Int32" Value="0" />
+        </Variable.Default>
+      </Variable>
+      <Variable x:TypeArguments="x:Int32" Name="varFailureCount">
+        <Variable.Default>
+          <Literal x:TypeArguments="x:Int32" Value="0" />
+        </Variable.Default>
+      </Variable>
+      <Variable x:TypeArguments="x:Boolean" Name="varAbortFlow">
+        <Variable.Default>
+          <Literal x:TypeArguments="x:Boolean" Value="False" />
+        </Variable.Default>
+      </Variable>
+      <Variable x:TypeArguments="x:String" Name="varAbortMessage" />
       <Variable x:TypeArguments="scg:ICollection(x:String)" Name="varListOfEmailAttrs">
+        <Variable.Default>
+          <VisualBasicValue x:TypeArguments="scg:ICollection(x:String)" ExpressionText="New List(Of String)" />
+        </Variable.Default>
+      </Variable>
+      <Variable x:TypeArguments="scg:ICollection(x:String)" Name="varFailureList">
         <Variable.Default>
           <VisualBasicValue x:TypeArguments="scg:ICollection(x:String)" ExpressionText="New List(Of String)" />
         </Variable.Default>
@@ -133,7 +164,12 @@
       <Variable x:TypeArguments="ui:Image" Name="varErrorScreen" />
       <Variable x:TypeArguments="x:String" Name="varHasAttachments" />
       <Variable x:TypeArguments="x:String" Name="varEmailReport" />
+      <Variable x:TypeArguments="x:String" Name="varFailureReport" />
       <Variable x:TypeArguments="x:String" Name="varEmailSuccessTemplate" />
+      <Variable x:TypeArguments="x:String" Name="varEmailFailureTemplate" />
+      <Variable x:TypeArguments="x:String" Name="varReportBody" />
+      <Variable x:TypeArguments="x:String" Name="varReportSubject" />
+      <Variable x:TypeArguments="x:String" Name="varEmailAbortedTemplate" />
     </Sequence.Variables>
     <sap:WorkflowViewStateService.ViewState>
       <scg:Dictionary x:TypeArguments="x:String, x:Object">
@@ -154,19 +190,6 @@
               <x:Boolean x:Key="IsExpanded">True</x:Boolean>
             </scg:Dictionary>
           </sap:WorkflowViewStateService.ViewState>
-          <ui:WriteTextFile File="{x:Null}" DisplayName="Clear all the content within &quot;EmailReport.txt&quot;" FileName="EmailReport.txt" sap:VirtualizedContainerService.HintSize="724,133" sap2010:WorkflowViewState.IdRef="WriteTextFile_3">
-            <ui:WriteTextFile.Text>
-              <InArgument x:TypeArguments="x:String">
-                <Literal x:TypeArguments="x:String" Value="" />
-              </InArgument>
-            </ui:WriteTextFile.Text>
-            <sap:WorkflowViewStateService.ViewState>
-              <scg:Dictionary x:TypeArguments="x:String, x:Object">
-                <x:Boolean x:Key="IsExpanded">True</x:Boolean>
-                <x:Boolean x:Key="IsPinned">False</x:Boolean>
-              </scg:Dictionary>
-            </sap:WorkflowViewStateService.ViewState>
-          </ui:WriteTextFile>
           <Sequence DisplayName="Save the 10 most recent unread email messages to local folders" sap:VirtualizedContainerService.HintSize="724,2706" sap2010:WorkflowViewState.IdRef="Sequence_5">
             <sap:WorkflowViewStateService.ViewState>
               <scg:Dictionary x:TypeArguments="x:String, x:Object">
@@ -195,150 +218,429 @@
                           <ActivityAction.Argument2>
                             <DelegateInArgument x:TypeArguments="x:Int32" Name="CurrentIndex" />
                           </ActivityAction.Argument2>
-                          <Sequence DisplayName="Do" sap:VirtualizedContainerService.HintSize="552,2076" sap2010:WorkflowViewState.IdRef="Sequence_15">
+                          <Sequence DisplayName="Archive the current email with per-email failure isolation" sap:VirtualizedContainerService.HintSize="552,2076" sap2010:WorkflowViewState.IdRef="Sequence_15">
                             <sap:WorkflowViewStateService.ViewState>
                               <scg:Dictionary x:TypeArguments="x:String, x:Object">
                                 <x:Boolean x:Key="IsExpanded">True</x:Boolean>
                               </scg:Dictionary>
                             </sap:WorkflowViewStateService.ViewState>
-                            <Assign DisplayName="Get current email's subject" sap:VirtualizedContainerService.HintSize="510,82" sap2010:WorkflowViewState.IdRef="Assign_1">
+                            <Assign DisplayName="Reset per-email state to safe defaults" sap:VirtualizedContainerService.HintSize="510,82" sap2010:WorkflowViewState.IdRef="Assign_ResetSender">
+                              <Assign.To>
+                                <OutArgument x:TypeArguments="x:String">[varMailSender]</OutArgument>
+                              </Assign.To>
+                              <Assign.Value>
+                                <InArgument x:TypeArguments="x:String">Unknown</InArgument>
+                              </Assign.Value>
+                            </Assign>
+                            <Assign DisplayName="Reset subject to placeholder" sap:VirtualizedContainerService.HintSize="510,82" sap2010:WorkflowViewState.IdRef="Assign_ResetSubject">
                               <Assign.To>
                                 <OutArgument x:TypeArguments="x:String">[varMailSubject]</OutArgument>
                               </Assign.To>
                               <Assign.Value>
-                                <InArgument x:TypeArguments="x:String">[CurrentMail.Subject.Replace("'", " ").Replace(":", " ").Replace(".", " ").Replace("【", " ").Replace("】", " ").Replace("+", " ").Replace("?", " ").Replace("!", " ")]</InArgument>
+                                <InArgument x:TypeArguments="x:String">(No Subject)</InArgument>
                               </Assign.Value>
                             </Assign>
-                            <Switch x:TypeArguments="x:String" DisplayName="Categorise email senders" Expression="[CurrentMail.From.Address]" sap:VirtualizedContainerService.HintSize="510,442" sap2010:WorkflowViewState.IdRef="Switch`1_2">
-                              <Switch.Default>
-                                <Assign DisplayName="Define email sender" sap:VirtualizedContainerService.HintSize="434,82" sap2010:WorkflowViewState.IdRef="Assign_23">
-                                  <Assign.To>
-                                    <OutArgument x:TypeArguments="x:String">[varMailSender]</OutArgument>
-                                  </Assign.To>
-                                  <Assign.Value>
-                                    <InArgument x:TypeArguments="x:String">Unkown</InArgument>
-                                  </Assign.Value>
-                                </Assign>
-                              </Switch.Default>
+                            <Assign DisplayName="Reset raw subject" sap:VirtualizedContainerService.HintSize="510,82" sap2010:WorkflowViewState.IdRef="Assign_ResetRawSubject">
+                              <Assign.To>
+                                <OutArgument x:TypeArguments="x:String">[varMailSubjectRaw]</OutArgument>
+                              </Assign.To>
+                              <Assign.Value>
+                                <InArgument x:TypeArguments="x:String">[String.Empty]</InArgument>
+                              </Assign.Value>
+                            </Assign>
+                            <Assign DisplayName="Reset subject file name" sap:VirtualizedContainerService.HintSize="510,82" sap2010:WorkflowViewState.IdRef="Assign_ResetSubjectFile">
+                              <Assign.To>
+                                <OutArgument x:TypeArguments="x:String">[varMailSubjectFile]</OutArgument>
+                              </Assign.To>
+                              <Assign.Value>
+                                <InArgument x:TypeArguments="x:String">[String.Empty]</InArgument>
+                              </Assign.Value>
+                            </Assign>
+                            <Assign DisplayName="Reset report subject" sap:VirtualizedContainerService.HintSize="510,82" sap2010:WorkflowViewState.IdRef="Assign_ResetSubjectDisplay">
+                              <Assign.To>
+                                <OutArgument x:TypeArguments="x:String">[varMailSubjectDisplay]</OutArgument>
+                              </Assign.To>
+                              <Assign.Value>
+                                <InArgument x:TypeArguments="x:String">[String.Empty]</InArgument>
+                              </Assign.Value>
+                            </Assign>
+                            <Assign DisplayName="Reset sender address" sap:VirtualizedContainerService.HintSize="510,82" sap2010:WorkflowViewState.IdRef="Assign_ResetSenderAddress">
+                              <Assign.To>
+                                <OutArgument x:TypeArguments="x:String">[varMailSenderAddress]</OutArgument>
+                              </Assign.To>
+                              <Assign.Value>
+                                <InArgument x:TypeArguments="x:String">[String.Empty]</InArgument>
+                              </Assign.Value>
+                            </Assign>
+                            <Assign DisplayName="Reset archived folder path" sap:VirtualizedContainerService.HintSize="510,82" sap2010:WorkflowViewState.IdRef="Assign_ResetFolder">
+                              <Assign.To>
+                                <OutArgument x:TypeArguments="x:String">[varMailFolder]</OutArgument>
+                              </Assign.To>
+                              <Assign.Value>
+                                <InArgument x:TypeArguments="x:String">[String.Empty]</InArgument>
+                              </Assign.Value>
+                            </Assign>
+                            <Assign DisplayName="Reset resolved folder path" sap:VirtualizedContainerService.HintSize="510,82" sap2010:WorkflowViewState.IdRef="Assign_ResetResolvedFolder">
+                              <Assign.To>
+                                <OutArgument x:TypeArguments="x:String">[varMailFolderResolved]</OutArgument>
+                              </Assign.To>
+                              <Assign.Value>
+                                <InArgument x:TypeArguments="x:String">[String.Empty]</InArgument>
+                              </Assign.Value>
+                            </Assign>
+                            <Assign DisplayName="Reset attachment flag" sap:VirtualizedContainerService.HintSize="510,82" sap2010:WorkflowViewState.IdRef="Assign_ResetHasAttachments">
+                              <Assign.To>
+                                <OutArgument x:TypeArguments="x:String">[varHasAttachments]</OutArgument>
+                              </Assign.To>
+                              <Assign.Value>
+                                <InArgument x:TypeArguments="x:String">No</InArgument>
+                              </Assign.Value>
+                            </Assign>
+                            <Assign DisplayName="Reset error reason" sap:VirtualizedContainerService.HintSize="510,82" sap2010:WorkflowViewState.IdRef="Assign_ResetErrorReason">
+                              <Assign.To>
+                                <OutArgument x:TypeArguments="x:String">[varErrorReason]</OutArgument>
+                              </Assign.To>
+                              <Assign.Value>
+                                <InArgument x:TypeArguments="x:String">[String.Empty]</InArgument>
+                              </Assign.Value>
+                            </Assign>
+                            <TryCatch DisplayName="Isolate one email: any failure is recorded and the loop continues" sap:VirtualizedContainerService.HintSize="510,1500" sap2010:WorkflowViewState.IdRef="TryCatch_PerMail">
                               <sap:WorkflowViewStateService.ViewState>
                                 <scg:Dictionary x:TypeArguments="x:String, x:Object">
                                   <x:Boolean x:Key="IsExpanded">True</x:Boolean>
-                                  <x:Boolean x:Key="IsPinned">False</x:Boolean>
                                 </scg:Dictionary>
                               </sap:WorkflowViewStateService.ViewState>
-                              <Assign x:Key="no-reply@m.mail.coursera.org" DisplayName="Define email sender" sap:VirtualizedContainerService.HintSize="434,82" sap2010:WorkflowViewState.IdRef="Assign_13">
-                                <Assign.To>
-                                  <OutArgument x:TypeArguments="x:String">[varMailSender]</OutArgument>
-                                </Assign.To>
-                                <Assign.Value>
-                                  <InArgument x:TypeArguments="x:String">Coursera</InArgument>
-                                </Assign.Value>
-                              </Assign>
-                              <Assign x:Key="Coursera@email.coursera.org" DisplayName="Define email sender" sap:VirtualizedContainerService.HintSize="434,82" sap2010:WorkflowViewState.IdRef="Assign_14">
-                                <Assign.To>
-                                  <OutArgument x:TypeArguments="x:String">[varMailSender]</OutArgument>
-                                </Assign.To>
-                                <Assign.Value>
-                                  <InArgument x:TypeArguments="x:String">Coursera</InArgument>
-                                </Assign.Value>
-                              </Assign>
-                              <Assign x:Key="online@e.bigw.com.au" DisplayName="Define email sender" sap:VirtualizedContainerService.HintSize="434,82" sap2010:WorkflowViewState.IdRef="Assign_15">
-                                <Assign.To>
-                                  <OutArgument x:TypeArguments="x:String">[varMailSender]</OutArgument>
-                                </Assign.To>
-                                <Assign.Value>
-                                  <InArgument x:TypeArguments="x:String">BIG W</InArgument>
-                                </Assign.Value>
-                              </Assign>
-                              <Assign x:Key="mail@bigw.com.au" DisplayName="Define email sender" sap:VirtualizedContainerService.HintSize="434,82" sap2010:WorkflowViewState.IdRef="Assign_16">
-                                <Assign.To>
-                                  <OutArgument x:TypeArguments="x:String">[varMailSender]</OutArgument>
-                                </Assign.To>
-                                <Assign.Value>
-                                  <InArgument x:TypeArguments="x:String">BIG W</InArgument>
-                                </Assign.Value>
-                              </Assign>
-                              <Assign x:Key="ubereats@uber.com" DisplayName="Define email sender" sap:VirtualizedContainerService.HintSize="434,82" sap2010:WorkflowViewState.IdRef="Assign_17">
-                                <Assign.To>
-                                  <OutArgument x:TypeArguments="x:String">[varMailSender]</OutArgument>
-                                </Assign.To>
-                                <Assign.Value>
-                                  <InArgument x:TypeArguments="x:String">Uber</InArgument>
-                                </Assign.Value>
-                              </Assign>
-                              <Assign x:Key="uberone@uber.com" DisplayName="Define email sender" sap:VirtualizedContainerService.HintSize="434,82" sap2010:WorkflowViewState.IdRef="Assign_18">
-                                <Assign.To>
-                                  <OutArgument x:TypeArguments="x:String">[varMailSender]</OutArgument>
-                                </Assign.To>
-                                <Assign.Value>
-                                  <InArgument x:TypeArguments="x:String">Uber</InArgument>
-                                </Assign.Value>
-                              </Assign>
-                              <Assign x:Key="noreplytickets@taronga.org.au" DisplayName="Define email sender" sap:VirtualizedContainerService.HintSize="434,82" sap2010:WorkflowViewState.IdRef="Assign_19">
-                                <Assign.To>
-                                  <OutArgument x:TypeArguments="x:String">[varMailSender]</OutArgument>
-                                </Assign.To>
-                                <Assign.Value>
-                                  <InArgument x:TypeArguments="x:String">Taronga Zoo</InArgument>
-                                </Assign.Value>
-                              </Assign>
-                              <Assign x:Key="ebills@winconnect.com.au" DisplayName="Define email sender" sap:VirtualizedContainerService.HintSize="434,82" sap2010:WorkflowViewState.IdRef="Assign_20">
-                                <Assign.To>
-                                  <OutArgument x:TypeArguments="x:String">[varMailSender]</OutArgument>
-                                </Assign.To>
-                                <Assign.Value>
-                                  <InArgument x:TypeArguments="x:String">WinConnect Electricity</InArgument>
-                                </Assign.Value>
-                              </Assign>
-                              <Assign x:Key="meenoxiong@gmail.com" DisplayName="Define email sender" sap:VirtualizedContainerService.HintSize="434,82" sap2010:WorkflowViewState.IdRef="Assign_24">
-                                <Assign.To>
-                                  <OutArgument x:TypeArguments="x:String">[varMailSender]</OutArgument>
-                                </Assign.To>
-                                <Assign.Value>
-                                  <InArgument x:TypeArguments="x:String">Me</InArgument>
-                                </Assign.Value>
-                              </Assign>
-                            </Switch>
-                            <umab:SaveMailX DisplayName="Save the current email" FileName="[varMailSubject]" FolderPath="[&quot;EmailsSaved\&quot; + varMailSender + &quot;\&quot; + &#xD;&#xA;CDate(CurrentMail.Headers(&quot;Date&quot;)).ToString(&quot;yyyy-MM-dd hh-mm-ss&quot;) + &quot;\&quot;]" sap:VirtualizedContainerService.HintSize="510,186" sap2010:WorkflowViewState.IdRef="SaveMailX_1" MailMessage="[CurrentMail]" />
-                            <umab:SaveMailAttachmentsX Attachments="{x:Null}" DisplayName="Save Email Attachments" ExcludeInlineAttachments="True" FolderPath="[&quot;EmailsSaved\&quot; + varMailSender + &quot;\&quot; + &#xD;&#xA;CDate(CurrentMail.Headers(&quot;Date&quot;)).ToString(&quot;yyyy-MM-dd hh-mm-ss&quot;) + &#xD;&#xA;&quot;\Attachments\&quot;]" sap:VirtualizedContainerService.HintSize="510,228" sap2010:WorkflowViewState.IdRef="SaveMailAttachmentsX_1" Message="[CurrentMail]" OverwriteExisting="True" />
-                            <ui:LogMessage DisplayName="Log progress message" sap:VirtualizedContainerService.HintSize="510,141" sap2010:WorkflowViewState.IdRef="LogMessage_1" Level="[UiPath.Core.Activities.LogLevel.Info]" Message="[&quot;Successfully Saved: &quot; + varMailSubject]" />
-                            <If Condition="[Directory.GetFiles(&quot;EmailsSaved\&quot; + varMailSender + &quot;\&quot; + &#xD;&#xA;&#x9;&#x9;&#x9;&#x9;&#x9;&#x9;&#x9;CDate(CurrentMail.Headers(&quot;Date&quot;)).ToString(&quot;yyyy-MM-dd hh-mm-ss&quot;) + &#xD;&#xA;&#x9;&#x9;&#x9;&#x9;&#x9;&#x9;&#x9;&quot;\Attachments\&quot;).Length &gt; 0]" DisplayName="Check if any attachment exist in the current email" sap:VirtualizedContainerService.HintSize="510,522" sap2010:WorkflowViewState.IdRef="If_2">
-                              <If.Then>
-                                <Sequence sap:VirtualizedContainerService.HintSize="476,170" sap2010:WorkflowViewState.IdRef="Sequence_18">
+                              <TryCatch.Try>
+                                <Sequence DisplayName="Archive one email" sap:VirtualizedContainerService.HintSize="476,1300" sap2010:WorkflowViewState.IdRef="Sequence_PerMailTry">
                                   <sap:WorkflowViewStateService.ViewState>
                                     <scg:Dictionary x:TypeArguments="x:String, x:Object">
                                       <x:Boolean x:Key="IsExpanded">True</x:Boolean>
                                     </scg:Dictionary>
                                   </sap:WorkflowViewStateService.ViewState>
-                                  <Assign DisplayName="Assign" sap:VirtualizedContainerService.HintSize="434,82" sap2010:WorkflowViewState.IdRef="Assign_26">
+                                  <TryCatch DisplayName="Read the sender address without letting a bad sender abort the email" sap:VirtualizedContainerService.HintSize="434,300" sap2010:WorkflowViewState.IdRef="TryCatch_Sender">
+                                    <sap:WorkflowViewStateService.ViewState>
+                                      <scg:Dictionary x:TypeArguments="x:String, x:Object">
+                                        <x:Boolean x:Key="IsExpanded">False</x:Boolean>
+                                        <x:Boolean x:Key="IsPinned">False</x:Boolean>
+                                      </scg:Dictionary>
+                                    </sap:WorkflowViewStateService.ViewState>
+                                    <TryCatch.Try>
+                                      <Assign DisplayName="Get the current sender address" sap:VirtualizedContainerService.HintSize="400,82" sap2010:WorkflowViewState.IdRef="Assign_SenderAddress">
+                                        <Assign.To>
+                                          <OutArgument x:TypeArguments="x:String">[varMailSenderAddress]</OutArgument>
+                                        </Assign.To>
+                                        <Assign.Value>
+                                          <InArgument x:TypeArguments="x:String">[If(CurrentMail.From Is Nothing, "", CurrentMail.From.Address)]</InArgument>
+                                        </Assign.Value>
+                                      </Assign>
+                                    </TryCatch.Try>
+                                    <TryCatch.Catches>
+                                      <Catch x:TypeArguments="s:Exception" sap:VirtualizedContainerService.HintSize="416,21" sap2010:WorkflowViewState.IdRef="Catch_Sender">
+                                        <sap:WorkflowViewStateService.ViewState>
+                                          <scg:Dictionary x:TypeArguments="x:String, x:Object">
+                                            <x:Boolean x:Key="IsExpanded">False</x:Boolean>
+                                            <x:Boolean x:Key="IsPinned">False</x:Boolean>
+                                          </scg:Dictionary>
+                                        </sap:WorkflowViewStateService.ViewState>
+                                        <ActivityAction x:TypeArguments="s:Exception">
+                                          <ActivityAction.Argument>
+                                            <DelegateInArgument x:TypeArguments="s:Exception" Name="senderException" />
+                                          </ActivityAction.Argument>
+                                          <Sequence DisplayName="Fall back to an unknown sender" sap:VirtualizedContainerService.HintSize="376,220" sap2010:WorkflowViewState.IdRef="Sequence_SenderCatch">
+                                            <sap:WorkflowViewStateService.ViewState>
+                                              <scg:Dictionary x:TypeArguments="x:String, x:Object">
+                                                <x:Boolean x:Key="IsExpanded">True</x:Boolean>
+                                              </scg:Dictionary>
+                                            </sap:WorkflowViewStateService.ViewState>
+                                            <ui:LogMessage DisplayName="Log sender read failure" sap:VirtualizedContainerService.HintSize="334,141" sap2010:WorkflowViewState.IdRef="LogMessage_SenderFailure" Level="[UiPath.Core.Activities.LogLevel.Warn]" Message="[&quot;Could not read the sender address of the current email: &quot; + senderException.Message]" />
+                                          </Sequence>
+                                        </ActivityAction>
+                                      </Catch>
+                                    </TryCatch.Catches>
+                                  </TryCatch>
+                                  <Switch x:TypeArguments="x:String" DisplayName="Categorise email senders" Expression="[varMailSenderAddress]" sap:VirtualizedContainerService.HintSize="434,442" sap2010:WorkflowViewState.IdRef="Switch`1_2">
+                                    <Switch.Default>
+                                      <Assign DisplayName="Define email sender" sap:VirtualizedContainerService.HintSize="434,82" sap2010:WorkflowViewState.IdRef="Assign_23">
+                                        <Assign.To>
+                                          <OutArgument x:TypeArguments="x:String">[varMailSender]</OutArgument>
+                                        </Assign.To>
+                                        <Assign.Value>
+                                          <InArgument x:TypeArguments="x:String">Unknown</InArgument>
+                                        </Assign.Value>
+                                      </Assign>
+                                    </Switch.Default>
+                                    <sap:WorkflowViewStateService.ViewState>
+                                      <scg:Dictionary x:TypeArguments="x:String, x:Object">
+                                        <x:Boolean x:Key="IsExpanded">False</x:Boolean>
+                                        <x:Boolean x:Key="IsPinned">False</x:Boolean>
+                                      </scg:Dictionary>
+                                    </sap:WorkflowViewStateService.ViewState>
+                                    <Assign x:Key="no-reply@m.mail.coursera.org" DisplayName="Define email sender" sap:VirtualizedContainerService.HintSize="434,82" sap2010:WorkflowViewState.IdRef="Assign_13">
+                                      <Assign.To>
+                                        <OutArgument x:TypeArguments="x:String">[varMailSender]</OutArgument>
+                                      </Assign.To>
+                                      <Assign.Value>
+                                        <InArgument x:TypeArguments="x:String">Coursera</InArgument>
+                                      </Assign.Value>
+                                    </Assign>
+                                    <Assign x:Key="Coursera@email.coursera.org" DisplayName="Define email sender" sap:VirtualizedContainerService.HintSize="434,82" sap2010:WorkflowViewState.IdRef="Assign_14">
+                                      <Assign.To>
+                                        <OutArgument x:TypeArguments="x:String">[varMailSender]</OutArgument>
+                                      </Assign.To>
+                                      <Assign.Value>
+                                        <InArgument x:TypeArguments="x:String">Coursera</InArgument>
+                                      </Assign.Value>
+                                    </Assign>
+                                    <Assign x:Key="online@e.bigw.com.au" DisplayName="Define email sender" sap:VirtualizedContainerService.HintSize="434,82" sap2010:WorkflowViewState.IdRef="Assign_15">
+                                      <Assign.To>
+                                        <OutArgument x:TypeArguments="x:String">[varMailSender]</OutArgument>
+                                      </Assign.To>
+                                      <Assign.Value>
+                                        <InArgument x:TypeArguments="x:String">BIG W</InArgument>
+                                      </Assign.Value>
+                                    </Assign>
+                                    <Assign x:Key="mail@bigw.com.au" DisplayName="Define email sender" sap:VirtualizedContainerService.HintSize="434,82" sap2010:WorkflowViewState.IdRef="Assign_16">
+                                      <Assign.To>
+                                        <OutArgument x:TypeArguments="x:String">[varMailSender]</OutArgument>
+                                      </Assign.To>
+                                      <Assign.Value>
+                                        <InArgument x:TypeArguments="x:String">BIG W</InArgument>
+                                      </Assign.Value>
+                                    </Assign>
+                                    <Assign x:Key="ubereats@uber.com" DisplayName="Define email sender" sap:VirtualizedContainerService.HintSize="434,82" sap2010:WorkflowViewState.IdRef="Assign_17">
+                                      <Assign.To>
+                                        <OutArgument x:TypeArguments="x:String">[varMailSender]</OutArgument>
+                                      </Assign.To>
+                                      <Assign.Value>
+                                        <InArgument x:TypeArguments="x:String">Uber</InArgument>
+                                      </Assign.Value>
+                                    </Assign>
+                                    <Assign x:Key="uberone@uber.com" DisplayName="Define email sender" sap:VirtualizedContainerService.HintSize="434,82" sap2010:WorkflowViewState.IdRef="Assign_18">
+                                      <Assign.To>
+                                        <OutArgument x:TypeArguments="x:String">[varMailSender]</OutArgument>
+                                      </Assign.To>
+                                      <Assign.Value>
+                                        <InArgument x:TypeArguments="x:String">Uber</InArgument>
+                                      </Assign.Value>
+                                    </Assign>
+                                    <Assign x:Key="noreplytickets@taronga.org.au" DisplayName="Define email sender" sap:VirtualizedContainerService.HintSize="434,82" sap2010:WorkflowViewState.IdRef="Assign_19">
+                                      <Assign.To>
+                                        <OutArgument x:TypeArguments="x:String">[varMailSender]</OutArgument>
+                                      </Assign.To>
+                                      <Assign.Value>
+                                        <InArgument x:TypeArguments="x:String">Taronga Zoo</InArgument>
+                                      </Assign.Value>
+                                    </Assign>
+                                    <Assign x:Key="ebills@winconnect.com.au" DisplayName="Define email sender" sap:VirtualizedContainerService.HintSize="434,82" sap2010:WorkflowViewState.IdRef="Assign_20">
+                                      <Assign.To>
+                                        <OutArgument x:TypeArguments="x:String">[varMailSender]</OutArgument>
+                                      </Assign.To>
+                                      <Assign.Value>
+                                        <InArgument x:TypeArguments="x:String">WinConnect Electricity</InArgument>
+                                      </Assign.Value>
+                                    </Assign>
+                                    <Assign x:Key="meenoxiong@gmail.com" DisplayName="Define email sender" sap:VirtualizedContainerService.HintSize="434,82" sap2010:WorkflowViewState.IdRef="Assign_24">
+                                      <Assign.To>
+                                        <OutArgument x:TypeArguments="x:String">[varMailSender]</OutArgument>
+                                      </Assign.To>
+                                      <Assign.Value>
+                                        <InArgument x:TypeArguments="x:String">Me</InArgument>
+                                      </Assign.Value>
+                                    </Assign>
+                                  </Switch>
+                                  <Assign DisplayName="Get the raw subject of the current email" sap:VirtualizedContainerService.HintSize="434,82" sap2010:WorkflowViewState.IdRef="Assign_GetRawSubject">
                                     <Assign.To>
-                                      <OutArgument x:TypeArguments="x:String">[varHasAttachments]</OutArgument>
+                                      <OutArgument x:TypeArguments="x:String">[varMailSubjectRaw]</OutArgument>
                                     </Assign.To>
                                     <Assign.Value>
-                                      <InArgument x:TypeArguments="x:String">Yes</InArgument>
+                                      <InArgument x:TypeArguments="x:String">[CurrentMail.Subject]</InArgument>
+                                    </Assign.Value>
+                                  </Assign>
+                                  <If Condition="[String.IsNullOrWhiteSpace(varMailSubjectRaw)]" DisplayName="Reject an email without a usable subject" sap:VirtualizedContainerService.HintSize="434,220" sap2010:WorkflowViewState.IdRef="If_EmptySubject">
+                                    <If.Then>
+                                      <Throw DisplayName="Throw a subject error that is caught per email" Exception="[New System.Exception(&quot;The email subject is empty or unavailable, so the email cannot be archived.&quot;)]" sap:VirtualizedContainerService.HintSize="334,90" sap2010:WorkflowViewState.IdRef="Throw_EmptySubject" />
+                                    </If.Then>
+                                  </If>
+                                  <Assign DisplayName="Keep the readable subject for the report" sap:VirtualizedContainerService.HintSize="434,82" sap2010:WorkflowViewState.IdRef="Assign_ReportSubject">
+                                    <Assign.To>
+                                      <OutArgument x:TypeArguments="x:String">[varMailSubject]</OutArgument>
+                                    </Assign.To>
+                                    <Assign.Value>
+                                      <InArgument x:TypeArguments="x:String">[varMailSubjectRaw.Trim]</InArgument>
+                                    </Assign.Value>
+                                  </Assign>
+                                  <Assign DisplayName="Build the sanitised file name from the subject" sap:VirtualizedContainerService.HintSize="434,82" sap2010:WorkflowViewState.IdRef="Assign_SubjectFileName">
+                                    <Assign.To>
+                                      <OutArgument x:TypeArguments="x:String">[varMailSubjectFile]</OutArgument>
+                                    </Assign.To>
+                                    <Assign.Value>
+                                      <InArgument x:TypeArguments="x:String">[varMailSubjectRaw.Replace("'", " ").Replace(":", " ").Replace(".", " ").Replace("【", " ").Replace("】", " ").Replace("+", " ").Replace("?", " ").Replace("!", " ").Trim]</InArgument>
+                                    </Assign.Value>
+                                  </Assign>
+                                  <Assign DisplayName="Strip any character Windows forbids in a folder or file name" sap:VirtualizedContainerService.HintSize="434,82" sap2010:WorkflowViewState.IdRef="Assign_SubjectStripInvalidChars">
+                                    <Assign.To>
+                                      <OutArgument x:TypeArguments="x:String">[varMailSubjectFile]</OutArgument>
+                                    </Assign.To>
+                                    <Assign.Value>
+                                      <InArgument x:TypeArguments="x:String">[String.Join(" ", varMailSubjectFile.Split(Path.GetInvalidFileNameChars())).Trim]</InArgument>
+                                    </Assign.Value>
+                                  </Assign>
+                                  <If Condition="[String.IsNullOrWhiteSpace(varMailSubjectFile)]" DisplayName="Reject an email whose subject leaves no usable file name" sap:VirtualizedContainerService.HintSize="434,220" sap2010:WorkflowViewState.IdRef="If_PlaceholderSubject">
+                                    <If.Then>
+                                      <Throw DisplayName="Throw a subject error that is caught per email" Exception="[New System.Exception(&quot;The email subject is empty or contains no usable character, so the email cannot be archived.&quot;)]" sap:VirtualizedContainerService.HintSize="334,90" sap2010:WorkflowViewState.IdRef="Throw_EmptySubjectAfterSanitise" />
+                                    </If.Then>
+                                  </If>
+                                  <Assign DisplayName="Use the sanitised subject in the success report" sap:VirtualizedContainerService.HintSize="434,82" sap2010:WorkflowViewState.IdRef="Assign_ReportSubjectSanitised">
+                                    <Assign.To>
+                                      <OutArgument x:TypeArguments="x:String">[varMailSubjectDisplay]</OutArgument>
+                                    </Assign.To>
+                                    <Assign.Value>
+                                      <InArgument x:TypeArguments="x:String">[varMailSubjectFile]</InArgument>
+                                    </Assign.Value>
+                                  </Assign>
+                                  <Assign DisplayName="Parse the Date header of the current email" sap:VirtualizedContainerService.HintSize="434,82" sap2010:WorkflowViewState.IdRef="Assign_ParseDate">
+                                    <Assign.To>
+                                      <OutArgument x:TypeArguments="s:DateTime">[varMailDate]</OutArgument>
+                                    </Assign.To>
+                                    <Assign.Value>
+                                      <InArgument x:TypeArguments="s:DateTime">[CDate(CurrentMail.Headers("Date"))]</InArgument>
+                                    </Assign.Value>
+                                  </Assign>
+                                  <Assign DisplayName="Format the arrival timestamp" sap:VirtualizedContainerService.HintSize="434,82" sap2010:WorkflowViewState.IdRef="Assign_DateStamp">
+                                    <Assign.To>
+                                      <OutArgument x:TypeArguments="x:String">[varMailDateStamp]</OutArgument>
+                                    </Assign.To>
+                                    <Assign.Value>
+                                      <InArgument x:TypeArguments="x:String">[varMailDate.ToString("yyyy-MM-dd hh-mm-ss")]</InArgument>
+                                    </Assign.Value>
+                                  </Assign>
+                                  <Assign DisplayName="Build the base archive folder name" sap:VirtualizedContainerService.HintSize="434,82" sap2010:WorkflowViewState.IdRef="Assign_BaseFolder">
+                                    <Assign.To>
+                                      <OutArgument x:TypeArguments="x:String">[varMailFolder]</OutArgument>
+                                    </Assign.To>
+                                    <Assign.Value>
+                                      <InArgument x:TypeArguments="x:String">["EmailsSaved\" + varMailSender + "\" + varMailDateStamp]</InArgument>
+                                    </Assign.Value>
+                                  </Assign>
+                                  <Assign DisplayName="Start the unique-name counter" sap:VirtualizedContainerService.HintSize="434,82" sap2010:WorkflowViewState.IdRef="Assign_UniqueSuffixStart">
+                                    <Assign.To>
+                                      <OutArgument x:TypeArguments="x:Int32">[varMailFolderSuffix]</OutArgument>
+                                    </Assign.To>
+                                    <Assign.Value>
+                                      <InArgument x:TypeArguments="x:Int32">1</InArgument>
+                                    </Assign.Value>
+                                  </Assign>
+                                  <While Condition="[Directory.Exists(varMailFolder)]" DisplayName="Find a unique archive folder name for this email" sap:VirtualizedContainerService.HintSize="434,300" sap2010:WorkflowViewState.IdRef="While_UniqueFolder">
+                                    <sap:WorkflowViewStateService.ViewState>
+                                      <scg:Dictionary x:TypeArguments="x:String, x:Object">
+                                        <x:Boolean x:Key="IsExpanded">True</x:Boolean>
+                                      </scg:Dictionary>
+                                    </sap:WorkflowViewStateService.ViewState>
+                                    <While.Body>
+                                      <Sequence DisplayName="Append a numeric suffix until the folder name is free" sap:VirtualizedContainerService.HintSize="400,180" sap2010:WorkflowViewState.IdRef="Sequence_UniqueFolder">
+                                        <sap:WorkflowViewStateService.ViewState>
+                                          <scg:Dictionary x:TypeArguments="x:String, x:Object">
+                                            <x:Boolean x:Key="IsExpanded">True</x:Boolean>
+                                          </scg:Dictionary>
+                                        </sap:WorkflowViewStateService.ViewState>
+                                        <Assign DisplayName="Increase the suffix" sap:VirtualizedContainerService.HintSize="334,82" sap2010:WorkflowViewState.IdRef="Assign_UniqueSuffix">
+                                          <Assign.To>
+                                            <OutArgument x:TypeArguments="x:Int32">[varMailFolderSuffix]</OutArgument>
+                                          </Assign.To>
+                                          <Assign.Value>
+                                            <InArgument x:TypeArguments="x:Int32">[varMailFolderSuffix + 1]</InArgument>
+                                          </Assign.Value>
+                                        </Assign>
+                                        <Assign DisplayName="Rebuild the folder name with a suffix" sap:VirtualizedContainerService.HintSize="334,82" sap2010:WorkflowViewState.IdRef="Assign_SuffixedFolder">
+                                          <Assign.To>
+                                            <OutArgument x:TypeArguments="x:String">[varMailFolder]</OutArgument>
+                                          </Assign.To>
+                                          <Assign.Value>
+                                            <InArgument x:TypeArguments="x:String">["EmailsSaved\" + varMailSender + "\" + varMailDateStamp + "_" + varMailFolderSuffix.ToString]</InArgument>
+                                          </Assign.Value>
+                                        </Assign>
+                                      </Sequence>
+                                    </While.Body>
+                                  </While>
+                                  <Assign DisplayName="Create the archive folder and resolve its absolute path" sap:VirtualizedContainerService.HintSize="434,82" sap2010:WorkflowViewState.IdRef="Assign_CreateFolder">
+                                    <Assign.To>
+                                      <OutArgument x:TypeArguments="x:String">[varMailFolderResolved]</OutArgument>
+                                    </Assign.To>
+                                    <Assign.Value>
+                                      <InArgument x:TypeArguments="x:String">[Directory.CreateDirectory(varMailFolder).FullName]</InArgument>
+                                    </Assign.Value>
+                                  </Assign>
+                                  <umab:SaveMailX DisplayName="Save the current email" FileName="[varMailSubjectFile]" FolderPath="[varMailFolderResolved]" sap:VirtualizedContainerService.HintSize="434,186" sap2010:WorkflowViewState.IdRef="SaveMailX_1" MailMessage="[CurrentMail]" />
+                                  <umab:SaveMailAttachmentsX Attachments="{x:Null}" DisplayName="Save Email Attachments" ExcludeInlineAttachments="True" FolderPath="[varMailFolderResolved + &quot;\Attachments&quot;]" sap:VirtualizedContainerService.HintSize="434,228" sap2010:WorkflowViewState.IdRef="SaveMailAttachmentsX_1" Message="[CurrentMail]" OverwriteExisting="True" />
+                                  <If Condition="[Directory.Exists(varMailFolderResolved + &quot;\Attachments&quot;) AndAlso Directory.GetFiles(varMailFolderResolved + &quot;\Attachments&quot;).Length &gt; 0]" DisplayName="Check if any attachment exist in the current email" sap:VirtualizedContainerService.HintSize="434,220" sap2010:WorkflowViewState.IdRef="If_2">
+                                    <If.Then>
+                                      <Assign DisplayName="Assign" sap:VirtualizedContainerService.HintSize="334,82" sap2010:WorkflowViewState.IdRef="Assign_26">
+                                        <Assign.To>
+                                          <OutArgument x:TypeArguments="x:String">[varHasAttachments]</OutArgument>
+                                        </Assign.To>
+                                        <Assign.Value>
+                                          <InArgument x:TypeArguments="x:String">Yes</InArgument>
+                                        </Assign.Value>
+                                      </Assign>
+                                    </If.Then>
+                                  </If>
+                                  <ui:LogMessage DisplayName="Log progress message" sap:VirtualizedContainerService.HintSize="434,141" sap2010:WorkflowViewState.IdRef="LogMessage_1" Level="[UiPath.Core.Activities.LogLevel.Info]" Message="[&quot;Successfully Saved: &quot; + varMailSubjectDisplay + &quot; to &quot; + varMailFolderResolved]" />
+                                  <AddToCollection x:TypeArguments="x:String" Collection="[varListOfEmailAttrs]" DisplayName="Add the attributes of the archived email to the success list" sap:VirtualizedContainerService.HintSize="434,25" sap2010:WorkflowViewState.IdRef="AddToCollection_1_1" Item="[&quot;Email &quot; + counter.ToString + &quot; sent on &quot; + varMailDate.ToString(&quot;dd/MM/yyyy hh:mm:ss&quot;) + Environment.NewLine + &quot;Subject: &quot; + varMailSubjectDisplay + Environment.NewLine + &quot;From: &quot; + varMailSender + Environment.NewLine + &quot;Has Attachments: &quot; + varHasAttachments + Environment.NewLine + &quot;Saved to: &quot; + varMailFolderResolved + Environment.NewLine + &quot;----------------------------------------------------------------------------------&quot;]" />
+                                  <Assign DisplayName="Count the successful email" sap:VirtualizedContainerService.HintSize="434,82" sap2010:WorkflowViewState.IdRef="Assign_SuccessCount">
+                                    <Assign.To>
+                                      <OutArgument x:TypeArguments="x:Int32">[varSuccessCount]</OutArgument>
+                                    </Assign.To>
+                                    <Assign.Value>
+                                      <InArgument x:TypeArguments="x:Int32">[varSuccessCount + 1]</InArgument>
                                     </Assign.Value>
                                   </Assign>
                                 </Sequence>
-                              </If.Then>
-                              <If.Else>
-                                <Sequence sap:VirtualizedContainerService.HintSize="476,170" sap2010:WorkflowViewState.IdRef="Sequence_19">
+                              </TryCatch.Try>
+                              <TryCatch.Catches>
+                                <Catch x:TypeArguments="s:Exception" sap:VirtualizedContainerService.HintSize="416,21" sap2010:WorkflowViewState.IdRef="Catch_PerMail">
                                   <sap:WorkflowViewStateService.ViewState>
                                     <scg:Dictionary x:TypeArguments="x:String, x:Object">
-                                      <x:Boolean x:Key="IsExpanded">True</x:Boolean>
+                                      <x:Boolean x:Key="IsExpanded">False</x:Boolean>
+                                      <x:Boolean x:Key="IsPinned">False</x:Boolean>
                                     </scg:Dictionary>
                                   </sap:WorkflowViewStateService.ViewState>
-                                  <Assign sap:VirtualizedContainerService.HintSize="434,82" sap2010:WorkflowViewState.IdRef="Assign_27">
-                                    <Assign.To>
-                                      <OutArgument x:TypeArguments="x:String">[varHasAttachments]</OutArgument>
-                                    </Assign.To>
-                                    <Assign.Value>
-                                      <InArgument x:TypeArguments="x:String">No</InArgument>
-                                    </Assign.Value>
-                                  </Assign>
-                                </Sequence>
-                              </If.Else>
-                            </If>
-                            <AddToCollection x:TypeArguments="x:String" Collection="[varListOfEmailAttrs]" DisplayName="Add the attributes of current email to a list" sap:VirtualizedContainerService.HintSize="510,25" sap2010:WorkflowViewState.IdRef="AddToCollection`1_1" Item="[&quot;Email &quot; + counter.ToString + &quot; sent on &quot; + &#xD;&#xA;CDate(CurrentMail.Headers(&quot;Date&quot;)).ToString(&quot;dd/MM/yyyy hh:mm:ss&quot;) +Environment.NewLine +&#xD;&#xA;&quot;Subject: &quot; + varMailSubject + Environment.NewLine + &#xD;&#xA;&quot;From: &quot; + varMailSender + Environment.NewLine +&#xD;&#xA;&quot;Has Attachments: &quot; + varHasAttachments + Environment.NewLine +&#xD;&#xA;&quot;----------------------------------------------------------------------------------&quot;]" />
+                                  <ActivityAction x:TypeArguments="s:Exception">
+                                    <ActivityAction.Argument>
+                                      <DelegateInArgument x:TypeArguments="s:Exception" Name="mailException" />
+                                    </ActivityAction.Argument>
+                                    <Sequence DisplayName="Record the failed email and continue with the next one" sap:VirtualizedContainerService.HintSize="376,560" sap2010:WorkflowViewState.IdRef="Sequence_PerMailCatch">
+                                      <sap:WorkflowViewStateService.ViewState>
+                                        <scg:Dictionary x:TypeArguments="x:String, x:Object">
+                                          <x:Boolean x:Key="IsExpanded">True</x:Boolean>
+                                        </scg:Dictionary>
+                                      </sap:WorkflowViewStateService.ViewState>
+                                      <Assign DisplayName="Capture the error reason" sap:VirtualizedContainerService.HintSize="334,82" sap2010:WorkflowViewState.IdRef="Assign_ErrorReason">
+                                        <Assign.To>
+                                          <OutArgument x:TypeArguments="x:String">[varErrorReason]</OutArgument>
+                                        </Assign.To>
+                                        <Assign.Value>
+                                          <InArgument x:TypeArguments="x:String">[mailException.Message]</InArgument>
+                                        </Assign.Value>
+                                      </Assign>
+                                      <ui:LogMessage DisplayName="Log the isolated email failure" sap:VirtualizedContainerService.HintSize="334,141" sap2010:WorkflowViewState.IdRef="LogMessage_PerMailFailure" Level="[UiPath.Core.Activities.LogLevel.Error]" Message="[&quot;Failed to archive email &quot; + counter.ToString + &quot; from &quot; + varMailSender + &quot; (subject: &quot; + varMailSubject + &quot;): &quot; + varErrorReason]" />
+                                      <AddToCollection x:TypeArguments="x:String" Collection="[varFailureList]" DisplayName="Add the failed email to the failure list" sap:VirtualizedContainerService.HintSize="334,25" sap2010:WorkflowViewState.IdRef="AddToCollection_Failure">
+                                        <AddToCollection.Item>
+                                          <InArgument x:TypeArguments="x:String">[&quot;Email &quot; + counter.ToString + &quot; NOT ARCHIVED&quot; + Environment.NewLine + &quot;From: &quot; + varMailSender + If(String.IsNullOrWhiteSpace(varMailSenderAddress), "", &quot; &lt;&quot; + varMailSenderAddress + &quot;&gt;&quot;) + Environment.NewLine + &quot;Subject: &quot; + varMailSubject + Environment.NewLine + &quot;Reason: &quot; + varErrorReason + Environment.NewLine + If(String.IsNullOrWhiteSpace(varMailFolderResolved), &quot;Archive folder: none created&quot;, &quot;Partial archive folder: &quot; + varMailFolderResolved) + Environment.NewLine + &quot;----------------------------------------------------------------------------------&quot;]</InArgument>
+                                        </AddToCollection.Item>
+                                      </AddToCollection>
+                                      <Assign DisplayName="Count the failed email" sap:VirtualizedContainerService.HintSize="334,82" sap2010:WorkflowViewState.IdRef="Assign_FailureCount">
+                                        <Assign.To>
+                                          <OutArgument x:TypeArguments="x:Int32">[varFailureCount]</OutArgument>
+                                        </Assign.To>
+                                        <Assign.Value>
+                                          <InArgument x:TypeArguments="x:Int32">[varFailureCount + 1]</InArgument>
+                                        </Assign.Value>
+                                      </Assign>
+                                    </Sequence>
+                                  </ActivityAction>
+                                </Catch>
+                              </TryCatch.Catches>
+                            </TryCatch>
                             <Assign DisplayName="Increment Email Counter" sap:VirtualizedContainerService.HintSize="510,82" sap2010:WorkflowViewState.IdRef="Assign_25">
                               <Assign.To>
                                 <OutArgument x:TypeArguments="x:Int32">[counter]</OutArgument>
@@ -376,6 +678,22 @@
                   <x:Boolean x:Key="IsExpanded">True</x:Boolean>
                 </scg:Dictionary>
               </sap:WorkflowViewStateService.ViewState>
+              <Assign DisplayName="Mark the run as aborted before the summary" sap:VirtualizedContainerService.HintSize="510,82" sap2010:WorkflowViewState.IdRef="Assign_AbortFlow">
+                <Assign.To>
+                  <OutArgument x:TypeArguments="x:Boolean">[varAbortFlow]</OutArgument>
+                </Assign.To>
+                <Assign.Value>
+                  <InArgument x:TypeArguments="x:Boolean">True</InArgument>
+                </Assign.Value>
+              </Assign>
+              <Assign DisplayName="Capture the interruption reason for the summary" sap:VirtualizedContainerService.HintSize="510,82" sap2010:WorkflowViewState.IdRef="Assign_AbortMessage">
+                <Assign.To>
+                  <OutArgument x:TypeArguments="x:String">[varAbortMessage]</OutArgument>
+                </Assign.To>
+                <Assign.Value>
+                  <InArgument x:TypeArguments="x:String">[exception.Message]</InArgument>
+                </Assign.Value>
+              </Assign>
               <ui:MessageBox Caption="{x:Null}" ChosenButton="{x:Null}" AutoCloseAfter="00:00:00" DisplayName="Display error message" sap:VirtualizedContainerService.HintSize="510,85" sap2010:WorkflowViewState.IdRef="MessageBox_1" Text="[exception.Message]" />
               <ui:LogMessage DisplayName="Log error message" sap:VirtualizedContainerService.HintSize="510,141" sap2010:WorkflowViewState.IdRef="LogMessage_2" Level="[UiPath.Core.Activities.LogLevel.Error]" Message="[exception.Message]" />
               <Sequence DisplayName="Take and save screenshot" sap:VirtualizedContainerService.HintSize="510,371" sap2010:WorkflowViewState.IdRef="Sequence_10">
@@ -437,62 +755,150 @@
         </Catch>
       </TryCatch.Catches>
       <TryCatch.Finally>
-        <Sequence DisplayName="Document the details of the current email in a list" sap:VirtualizedContainerService.HintSize="552,1423" sap2010:WorkflowViewState.IdRef="Sequence_7">
+        <Sequence DisplayName="Send the consolidated report that lists archived and failed emails" sap:VirtualizedContainerService.HintSize="552,1423" sap2010:WorkflowViewState.IdRef="Sequence_7">
           <sap:WorkflowViewStateService.ViewState>
             <scg:Dictionary x:TypeArguments="x:String, x:Object">
               <x:Boolean x:Key="IsExpanded">True</x:Boolean>
             </scg:Dictionary>
           </sap:WorkflowViewStateService.ViewState>
-          <ui:ForEach x:TypeArguments="x:String" CurrentIndex="{x:Null}" DisplayName="Iterate through the attributes of each mail message" sap:VirtualizedContainerService.HintSize="510,407" sap2010:WorkflowViewState.IdRef="ForEach`1_2" Values="[varListOfEmailAttrs]">
-            <ui:ForEach.Body>
-              <ActivityAction x:TypeArguments="x:String">
-                <ActivityAction.Argument>
-                  <DelegateInArgument x:TypeArguments="x:String" Name="currentEmailAttrs" />
-                </ActivityAction.Argument>
-                <Sequence DisplayName="Body" sap:VirtualizedContainerService.HintSize="376,221" sap2010:WorkflowViewState.IdRef="Sequence_11">
+          <Sequence DisplayName="Build and send the report that lists archived and failed emails" sap:VirtualizedContainerService.HintSize="510,1120" sap2010:WorkflowViewState.IdRef="Sequence_Report">
+            <sap:WorkflowViewStateService.ViewState>
+              <scg:Dictionary x:TypeArguments="x:String, x:Object">
+                <x:Boolean x:Key="IsExpanded">True</x:Boolean>
+              </scg:Dictionary>
+            </sap:WorkflowViewStateService.ViewState>
+            <Assign DisplayName="Join the archived emails into the report text" sap:VirtualizedContainerService.HintSize="434,80" sap2010:WorkflowViewState.IdRef="Assign_JoinEmailReport">
+              <Assign.To>
+                <OutArgument x:TypeArguments="x:String">[varEmailReport]</OutArgument>
+              </Assign.To>
+              <Assign.Value>
+                <InArgument x:TypeArguments="x:String">[If(varListOfEmailAttrs.Count = 0, String.Empty, String.Join(Environment.NewLine, varListOfEmailAttrs) + Environment.NewLine)]</InArgument>
+              </Assign.Value>
+            </Assign>
+            <Assign DisplayName="Join the failed emails into the report text" sap:VirtualizedContainerService.HintSize="434,80" sap2010:WorkflowViewState.IdRef="Assign_JoinFailureReport">
+              <Assign.To>
+                <OutArgument x:TypeArguments="x:String">[varFailureReport]</OutArgument>
+              </Assign.To>
+              <Assign.Value>
+                <InArgument x:TypeArguments="x:String">[If(varFailureList.Count = 0, String.Empty, String.Join(Environment.NewLine, varFailureList) + Environment.NewLine)]</InArgument>
+              </Assign.Value>
+            </Assign>
+            <If Condition="[varAbortFlow]" DisplayName="Choose the report template" sap:VirtualizedContainerService.HintSize="434,640" sap2010:WorkflowViewState.IdRef="If_TemplateChoice">
+              <If.Then>
+                <Sequence DisplayName="The run was interrupted by a fatal error" sap:VirtualizedContainerService.HintSize="400,400" sap2010:WorkflowViewState.IdRef="Sequence_AbortedReport">
                   <sap:WorkflowViewStateService.ViewState>
                     <scg:Dictionary x:TypeArguments="x:String, x:Object">
                       <x:Boolean x:Key="IsExpanded">True</x:Boolean>
                     </scg:Dictionary>
                   </sap:WorkflowViewStateService.ViewState>
-                  <ui:AppendLine File="{x:Null}" DisplayName="Append the attributes of current email to EmailReport.txt" FileName="EmailReport.txt" sap:VirtualizedContainerService.HintSize="334,133" sap2010:WorkflowViewState.IdRef="AppendLine_3" Text="[currentEmailAttrs]" UseDefaultEncoding="False" />
+                  <ui:ReadTextFile File="{x:Null}" Content="[varEmailAbortedTemplate]" DisplayName="Read EmailAbortedTemplate.txt" FileName="EmailTemplates\EmailAbortedTemplate.txt" sap:VirtualizedContainerService.HintSize="334,80" sap2010:WorkflowViewState.IdRef="ReadTextFile_AbortedTemplate" />
+                  <Assign DisplayName="Build the interrupted-run report body" sap:VirtualizedContainerService.HintSize="334,82" sap2010:WorkflowViewState.IdRef="Assign_ReportBodyAborted">
+                    <Assign.To>
+                      <OutArgument x:TypeArguments="x:String">[varReportBody]</OutArgument>
+                    </Assign.To>
+                    <Assign.Value>
+                      <InArgument x:TypeArguments="x:String">[String.Format(varEmailAbortedTemplate, Now, varAbortMessage, varSuccessCount, varFailureCount, varEmailReport, varFailureReport)]</InArgument>
+                    </Assign.Value>
+                  </Assign>
+                  <Assign DisplayName="Build the interrupted-run report subject" sap:VirtualizedContainerService.HintSize="334,82" sap2010:WorkflowViewState.IdRef="Assign_ReportSubjectAborted">
+                    <Assign.To>
+                      <OutArgument x:TypeArguments="x:String">[varReportSubject]</OutArgument>
+                    </Assign.To>
+                    <Assign.Value>
+                      <InArgument x:TypeArguments="x:String">["Email Automation Report: interrupted after " + varSuccessCount.ToString + " archived, " + varFailureCount.ToString + " failed"]</InArgument>
+                    </Assign.Value>
+                  </Assign>
                 </Sequence>
-              </ActivityAction>
-            </ui:ForEach.Body>
-          </ui:ForEach>
-          <ui:ReadTextFile File="{x:Null}" Content="[varEmailReport]" DisplayName="Read the complete EmailReport.txt" FileName="EmailReport.txt" sap:VirtualizedContainerService.HintSize="510,80" sap2010:WorkflowViewState.IdRef="ReadTextFile_3" />
-          <ui:ReadTextFile File="{x:Null}" Content="[varEmailSuccessTemplate]" DisplayName="Read EmailSuccessTemplate.txt" FileName="EmailTemplates\EmailSuccessTemplate.txt" sap:VirtualizedContainerService.HintSize="510,80" sap2010:WorkflowViewState.IdRef="ReadTextFile_4" />
-          <umab:OutlookApplicationCard Account="Meeno2b@outlook.com" AccountMismatchBehavior="UseDefaultEmailAccount" DisplayName="Use Desktop Outlook App" sap:VirtualizedContainerService.HintSize="510,648" sap2010:WorkflowViewState.IdRef="OutlookApplicationCard_3">
-            <umab:OutlookApplicationCard.Body>
-              <ActivityAction x:TypeArguments="um:IMailQuickHandle">
-                <ActivityAction.Argument>
-                  <DelegateInArgument x:TypeArguments="um:IMailQuickHandle" Name="Outlook" />
-                </ActivityAction.Argument>
-                <Sequence DisplayName="Do" sap:VirtualizedContainerService.HintSize="476,468" sap2010:WorkflowViewState.IdRef="Sequence_17">
-                  <sap:WorkflowViewStateService.ViewState>
-                    <scg:Dictionary x:TypeArguments="x:String, x:Object">
-                      <x:Boolean x:Key="IsExpanded">True</x:Boolean>
-                    </scg:Dictionary>
-                  </sap:WorkflowViewStateService.ViewState>
-                  <umab:SendMailX Bcc="{x:Null}" HtmlBodyFromText="{x:Null}" ReplyTo="{x:Null}" Account="[Outlook]" Body="[string.Format(varEmailSuccessTemplate, Now, varEmailReport)]" BodyType="Text" Cc="maxinexiong2@gmail.com" DisplayName="Private: Email final report to recipient" sap:VirtualizedContainerService.HintSize="434,380" sap2010:WorkflowViewState.IdRef="SendMailX_2" Importance="Normal" IsDraft="False" MaxBodyDocumentSizeMB="2" Sensitivity="Normal" Subject="Email Automation Report: Your 10 Most Recent Unread Emails" To="meenoxiong@gmail.com" UseDocumentAsBody="False">
-                    <umab:SendMailX.Files>
-                      <scg:List x:TypeArguments="InArgument(x:String)" Capacity="0" />
-                    </umab:SendMailX.Files>
-                    <umab:SendMailX.HtmlBodyFromFile>
-                      <umabh:HtmlContentArgument FilePath=".data/HtmlContent0.html">
-                        <umabh:HtmlContentArgument.RuntimeImages>
-                          <scg:Dictionary x:TypeArguments="x:String, InArgument(x:String)" />
-                        </umabh:HtmlContentArgument.RuntimeImages>
-                        <umabh:HtmlContentArgument.ValueMappings>
-                          <scg:List x:TypeArguments="umabh:HtmlValueMappingBase" Capacity="0" />
-                        </umabh:HtmlContentArgument.ValueMappings>
-                      </umabh:HtmlContentArgument>
-                    </umab:SendMailX.HtmlBodyFromFile>
-                  </umab:SendMailX>
-                </Sequence>
-              </ActivityAction>
-            </umab:OutlookApplicationCard.Body>
-          </umab:OutlookApplicationCard>
+              </If.Then>
+              <If.Else>
+                <If Condition="[varFailureCount &gt; 0]" DisplayName="Choose between the success and failure templates" sap:VirtualizedContainerService.HintSize="434,520" sap2010:WorkflowViewState.IdRef="If_FailureTemplateChoice">
+                  <If.Then>
+                    <Sequence DisplayName="Some emails failed" sap:VirtualizedContainerService.HintSize="400,400" sap2010:WorkflowViewState.IdRef="Sequence_FailureReport">
+                      <sap:WorkflowViewStateService.ViewState>
+                        <scg:Dictionary x:TypeArguments="x:String, x:Object">
+                          <x:Boolean x:Key="IsExpanded">True</x:Boolean>
+                        </scg:Dictionary>
+                      </sap:WorkflowViewStateService.ViewState>
+                      <ui:ReadTextFile File="{x:Null}" Content="[varEmailFailureTemplate]" DisplayName="Read EmailFailureTemplate.txt" FileName="EmailTemplates\EmailFailureTemplate.txt" sap:VirtualizedContainerService.HintSize="334,80" sap2010:WorkflowViewState.IdRef="ReadTextFile_FailureTemplate" />
+                      <Assign DisplayName="Build the failure report body" sap:VirtualizedContainerService.HintSize="334,82" sap2010:WorkflowViewState.IdRef="Assign_ReportBodyFailure">
+                        <Assign.To>
+                          <OutArgument x:TypeArguments="x:String">[varReportBody]</OutArgument>
+                        </Assign.To>
+                        <Assign.Value>
+                          <InArgument x:TypeArguments="x:String">[String.Format(varEmailFailureTemplate, Now, varSuccessCount, varFailureCount, varEmailReport, varFailureReport)]</InArgument>
+                        </Assign.Value>
+                      </Assign>
+                      <Assign DisplayName="Build the failure report subject" sap:VirtualizedContainerService.HintSize="334,82" sap2010:WorkflowViewState.IdRef="Assign_ReportSubjectFailure">
+                        <Assign.To>
+                          <OutArgument x:TypeArguments="x:String">[varReportSubject]</OutArgument>
+                        </Assign.To>
+                        <Assign.Value>
+                          <InArgument x:TypeArguments="x:String">["Email Automation Report: " + varFailureCount.ToString + " of " + (varSuccessCount + varFailureCount).ToString + " emails could not be archived"]</InArgument>
+                        </Assign.Value>
+                      </Assign>
+                    </Sequence>
+                  </If.Then>
+                  <If.Else>
+                    <Sequence DisplayName="All emails were archived" sap:VirtualizedContainerService.HintSize="400,320" sap2010:WorkflowViewState.IdRef="Sequence_SuccessReport">
+                      <sap:WorkflowViewStateService.ViewState>
+                        <scg:Dictionary x:TypeArguments="x:String, x:Object">
+                          <x:Boolean x:Key="IsExpanded">True</x:Boolean>
+                        </scg:Dictionary>
+                      </sap:WorkflowViewStateService.ViewState>
+                      <ui:ReadTextFile File="{x:Null}" Content="[varEmailSuccessTemplate]" DisplayName="Read EmailSuccessTemplate.txt" FileName="EmailTemplates\EmailSuccessTemplate.txt" sap:VirtualizedContainerService.HintSize="334,80" sap2010:WorkflowViewState.IdRef="ReadTextFile_4" />
+                      <Assign DisplayName="Build the success report body" sap:VirtualizedContainerService.HintSize="334,82" sap2010:WorkflowViewState.IdRef="Assign_ReportBodySuccess">
+                        <Assign.To>
+                          <OutArgument x:TypeArguments="x:String">[varReportBody]</OutArgument>
+                        </Assign.To>
+                        <Assign.Value>
+                          <InArgument x:TypeArguments="x:String">[String.Format(varEmailSuccessTemplate, Now, varEmailReport)]</InArgument>
+                        </Assign.Value>
+                      </Assign>
+                      <Assign DisplayName="Keep the existing success report subject" sap:VirtualizedContainerService.HintSize="334,82" sap2010:WorkflowViewState.IdRef="Assign_ReportSubjectSuccess">
+                        <Assign.To>
+                          <OutArgument x:TypeArguments="x:String">[varReportSubject]</OutArgument>
+                        </Assign.To>
+                        <Assign.Value>
+                          <InArgument x:TypeArguments="x:String">Email Automation Report: Your 10 Most Recent Unread Emails</InArgument>
+                        </Assign.Value>
+                      </Assign>
+                    </Sequence>
+                  </If.Else>
+                </If>
+              </If.Else>
+            </If>
+            <umab:OutlookApplicationCard Account="Meeno2b@outlook.com" AccountMismatchBehavior="UseDefaultEmailAccount" DisplayName="Use Desktop Outlook App" sap:VirtualizedContainerService.HintSize="434,648" sap2010:WorkflowViewState.IdRef="OutlookApplicationCard_3">
+              <umab:OutlookApplicationCard.Body>
+                <ActivityAction x:TypeArguments="um:IMailQuickHandle">
+                  <ActivityAction.Argument>
+                    <DelegateInArgument x:TypeArguments="um:IMailQuickHandle" Name="Outlook" />
+                  </ActivityAction.Argument>
+                  <Sequence DisplayName="Do" sap:VirtualizedContainerService.HintSize="400,468" sap2010:WorkflowViewState.IdRef="Sequence_17">
+                    <sap:WorkflowViewStateService.ViewState>
+                      <scg:Dictionary x:TypeArguments="x:String, x:Object">
+                        <x:Boolean x:Key="IsExpanded">True</x:Boolean>
+                      </scg:Dictionary>
+                    </sap:WorkflowViewStateService.ViewState>
+                    <umab:SendMailX Bcc="{x:Null}" HtmlBodyFromText="{x:Null}" ReplyTo="{x:Null}" Account="[Outlook]" Body="[varReportBody]" BodyType="Text" Cc="maxinexiong2@gmail.com" DisplayName="Private: Email final report to recipient" sap:VirtualizedContainerService.HintSize="334,380" sap2010:WorkflowViewState.IdRef="SendMailX_2" Importance="Normal" IsDraft="False" MaxBodyDocumentSizeMB="2" Sensitivity="Normal" Subject="[varReportSubject]" To="meenoxiong@gmail.com" UseDocumentAsBody="False">
+                      <umab:SendMailX.Files>
+                        <scg:List x:TypeArguments="InArgument(x:String)" Capacity="0" />
+                      </umab:SendMailX.Files>
+                      <umab:SendMailX.HtmlBodyFromFile>
+                        <umabh:HtmlContentArgument FilePath=".data/HtmlContent0.html">
+                          <umabh:HtmlContentArgument.RuntimeImages>
+                            <scg:Dictionary x:TypeArguments="x:String, InArgument(x:String)" />
+                          </umabh:HtmlContentArgument.RuntimeImages>
+                          <umabh:HtmlContentArgument.ValueMappings>
+                            <scg:List x:TypeArguments="umabh:HtmlValueMappingBase" Capacity="0" />
+                          </umabh:HtmlContentArgument.ValueMappings>
+                        </umabh:HtmlContentArgument>
+                      </umab:SendMailX.HtmlBodyFromFile>
+                    </umab:SendMailX>
+                  </Sequence>
+                </ActivityAction>
+              </umab:OutlookApplicationCard.Body>
+            </umab:OutlookApplicationCard>
+          </Sequence>
         </Sequence>
       </TryCatch.Finally>
     </TryCatch>

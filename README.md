@@ -178,6 +178,53 @@ To run the RPA workflow on your local machine, follow these steps:
 
 <br/>
 
+## **Failure handling and unique archive folders**
+
+Each unread email is now archived inside its own `TryCatch`, so one bad message
+no longer aborts the batch:
+
+- A failure while reading the subject, parsing the `Date` header or saving the
+  message/attachments is recorded for **that email only**; the loop moves on to
+  the next one. The failed entry records the sender, the subject (or the
+  `(No Subject)` placeholder when it cannot be read) and the error reason.
+- The final summary always lists what was archived **and** what failed. When
+  every email succeeds, the existing success template and subject are used
+  unchanged. As soon as one email fails, `EmailTemplates\EmailFailureTemplate.txt`
+  is used, with separate "archived" and "could NOT be archived" sections and a
+  subject that states how many failed.
+- If a fatal error interrupts the run outside the per-email scope (for example
+  Outlook losing its connection), `EmailTemplates\EmailAbortedTemplate.txt` is
+  used: the summary still names what was archived before the interruption and
+  why the run stopped, instead of degrading to an error-screenshot-only mail.
+- Archive folders are unique. The base name is still
+  `EmailsSaved\<sender>\<yyyy-MM-dd hh-mm-ss>`, but if that directory already
+  exists the workflow appends `_2`, `_3`, … until the name is free, so two
+  emails from the same sender in the same second no longer overwrite each
+  other. The resolved absolute path (`Directory.CreateDirectory(...).FullName`)
+  is the one used for both the save calls and the `Saved to:` line in the
+  report, so the reported path always matches the disk.
+- The Outlook account (`Meeno2b@outlook.com`), the target folder
+  (`UiPath Test`) and the 10-email limit are unchanged.
+
+### Verifying it without Outlook
+
+A full run needs UiPath Studio, the desktop Outlook app and unread mail in the
+`UiPath Test` folder, which cannot be reproduced offline. `LocalHarness\`
+contains a small .NET Framework program that mirrors the per-email logic and
+drives it with hand-written mail metadata (sender, subject, `Date` header,
+attachments, injected failure step), plus a structural validator for
+`Main.xaml`:
+
+```
+LocalHarness\run-harness.cmd
+```
+
+It needs nothing beyond Windows itself. See
+[`LocalHarness/README.md`](LocalHarness/README.md) for the scenario table and an
+explicit list of which Outlook interactions are **not** covered.
+
+<br/>
+
 ## **Acknowledgement**
 
 I would like to express my gratitude to the **[UiPath community](https://community.uipath.com/)** for providing resources, tutorials, and a platform for automation enthusiasts to learn and collaborate.

@@ -1,0 +1,21 @@
+Dear Human,
+
+Your email automation robot stopped early at {0} while processing your unread emails.
+
+The run was interrupted by this error:
+
+{1}
+
+Emails archived successfully before the interruption: {2}
+Emails that failed before the interruption: {3}
+
+The following emails/attachments were saved to your machine before the interruption:
+
+{4}
+
+The following emails could NOT be archived:
+
+{5}
+
+Kind regards
+Email Automation Robot
