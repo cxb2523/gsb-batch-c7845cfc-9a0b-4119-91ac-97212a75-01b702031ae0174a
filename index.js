@@ -17,12 +17,19 @@ const cnnindonesia = require('./api/cnnindonesia');
 const tempo = require('./api/tempo');
 const kompas = require('./api/kompas');
 const liputan6 = require('./api/liputan6');
+const aggregate = require('./api/all');
 
 app.get('/', async (req, res) => {
     res.setHeader('Content-Type', 'application/json');
     const data = {
         message: 'Semua data hasil dari scraping',
         api:[
+            {
+                name: 'Aggregate (semua situs)',
+                type: 'aggregate',
+                all: '/all',
+                description: 'Daftar berita dari kelima situs dalam satu request. Tiap situs dikelompokkan; kegagalan satu situs tidak menggagalkan situs lain, dan HTTP hanya 500 bila kelima situs gagal.'
+            },
             {
                 name: 'Tribunnews',
                 all: '/tribunnews',
@@ -107,6 +114,28 @@ app.get('/', async (req, res) => {
         ]
     };
     res.end(JSON.stringify(data));
+});
+
+// Aggregate list endpoint: fetches all five site lists concurrently via
+// api/all.js. Partial failures still return 200 with per-site error objects;
+// only when every site fails do we answer 500.
+app.get('/all', async (req, res) => {
+    res.setHeader('Content-Type', 'application/json');
+    try {
+        const result = await aggregate.getAll();
+        if (result.summary.all_failed) {
+            res.status(500);
+        }
+        res.end(JSON.stringify(result));
+    } catch (error) {
+        // Defensive: getAll() should settle per-site failures itself, so a
+        // throw here means something genuinely unexpected happened.
+        res.status(500);
+        res.end(JSON.stringify({
+            message: 'Aggregate endpoint gagal memproses permintaan',
+            error: error.message || String(error),
+        }));
+    }
 });
 
 app.get('/tribunnews', async (req, res) => {
@@ -273,8 +302,12 @@ app.get('/liputan6/:cat/:read/:id/:slug', async (req, res) => {
 
 
 
-app.listen(process.env.PORT || port, () => {
-    console.log(`Web app listening on port ${port}`)
-});
+// Only bind the port when run directly (npm start). When the module is
+// required (tests, or Vercel's @vercel/node handler), just export the app.
+if (require.main === module) {
+    app.listen(process.env.PORT || port, () => {
+        console.log(`Web app listening on port ${port}`)
+    });
+}
 
 module.exports = app;

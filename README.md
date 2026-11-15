@@ -2,6 +2,15 @@
 - `npm install`
 - `npm start`
 
+## Tes
+
+`npm test` menjalankan test runner bawaan Node (`node --test`) pada
+`tests/aggregate.test.js`. Tes memakai situs palsu (injeksi `getData`) sehingga
+tidak bergantung pada jaringan, mencakup: situs yang melempar error,
+mengembalikan `undefined`, array kosong, semua situs gagal (status 500),
+pembuktian eksekusi paralel lewat pengukuran waktu, serta uji level HTTP
+untuk route `/all` dan pendaftarannya di manifest `/`.
+
 ## Library yang digunakan
 - axios
 - cheerio
@@ -9,6 +18,54 @@
 - moment
 
 ## API
+
+### Agregasi semua situs
+
+`GET /all` mengambil daftar berita dari kelima situs (Tribunnews, CNN Indonesia,
+Tempo, Kompas, Liputan6) secara **bersamaan (concurrent)** dalam satu request.
+Fungsi ini hanya memakai ulang `getData` masing-masing situs tanpa menulis ulang
+parser-nya.
+
+Respon dikelompokkan per situs di field `results`, dengan ringkasan di `summary`:
+
+- `success`: field `data` berisi array artikel dan `count` jumlahnya.
+- `empty`: situs merespons tetapi tidak ada artikel yang bisa diparsing
+  (ditandai eksplisit dengan `status: "empty"` dan `message`, bukan dianggap error).
+- `error`: field `error` memakai format `message`/`status`/`code` yang sama
+  dengan `helpers.errorResult`, lengkap dengan `name` dan `path` situs agar
+  mudah dilacak. Ini mencakup situs yang `getData`-nya melempar exception
+  maupun yang mengembalikan `undefined`/`null`.
+
+Aturan status HTTP:
+
+- Sebagian situs gagal tetap **200** selama masih ada situs yang sukses/empty.
+- Hanya bila kelima situs gagal, endpoint mengembalikan **500** dengan
+  rincian error per situs.
+
+Contoh struktur:
+
+```json
+{
+  "message": "Agregasi daftar berita dari lima situs berita Indonesia",
+  "summary": { "total": 5, "success": 3, "empty": 1, "failed": 1, "all_failed": false },
+  "results": [
+    { "name": "Tribunnews", "path": "/tribunnews", "status": "success", "count": 20, "data": [] },
+    { "name": "CNN Indonesia", "path": "/cnnindonesia", "status": "empty", "count": 0, "data": [], "message": "..." },
+    { "name": "Tempo", "path": "/tempo", "status": "error", "error": { "message": "...", "status": 503, "code": "SERVICE_UNAVAILABLE" } }
+  ]
+}
+```
+
+Catatan waktu tunggu: agregator tidak menambah lapisan timeout/retry sendiri.
+Setiap situs tetap tunduk pada strategi yang sudah ada — `fetchHtml` dengan
+timeout 20 detik dan 2 kali retry (empat situs HTML), serta `fetchApi` Tempo
+dengan timeout axios 20 detik. Karena request berjalan paralel, total waktu
+terbatas oleh situs terlama, bukan jumlah dari kelima situs. Tradeoff-nya:
+satu situs yang menggantung tetap bisa menahan request agregat sampai anggaran
+timeout/retry situs itu habis, sehingga kebijakan retry tetap terpusat di satu
+tempat.
+
+### Daftar endpoint per situs
 
 ```json
 {
