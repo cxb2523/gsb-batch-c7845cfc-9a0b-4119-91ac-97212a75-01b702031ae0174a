@@ -1,0 +1,24 @@
+FROM rockylinux:9.3
+
+ARG PYTHON_VERSION=3.12
+
+RUN mkdir -p /app/config
+
+WORKDIR /app
+
+RUN dnf install -y epel-release \
+        && dnf install -y python${PYTHON_VERSION} python${PYTHON_VERSION}-pip git procps-ng lsof telnet screen iputils \
+        && dnf clean all \
+        && update-alternatives --install /usr/bin/python python /usr/bin/python${PYTHON_VERSION} 1000 --slave /usr/bin/pip pip /usr/bin/pip${PYTHON_VERSION}
+
+# mcpo proxies the MCP server over HTTP and does not run this project's code,
+# so it is pinned here rather than in uv.lock. mcpo 0.0.20 imports
+# mcp.client.streamable_http.streamablehttp_client, which mcp 2.x removed, so
+# keep the proxy on mcp 1.x until an mcpo release supports mcp 2.x. An mcp 1.x
+# client still negotiates with the mcp 2.x server.
+RUN pip install \
+        'mcpo==0.0.20' \
+        'mcp==1.30.0' \
+        'fastapi==0.128.0'
+
+CMD ["mcpo", "--host", "0.0.0.0", "--port", "8000", "--config", "/app/config/mcp-config.json", "--hot-reload"]

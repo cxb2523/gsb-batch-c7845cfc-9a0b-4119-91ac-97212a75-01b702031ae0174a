@@ -1,0 +1,404 @@
+"""Request-local Application Credential authentication for remote clients."""
+
+import asyncio
+import hmac
+import json
+import logging
+import os
+from contextvars import ContextVar
+from dataclasses import dataclass, field
+from time import perf_counter
+from typing import Any
+from urllib.parse import urlsplit
+from uuid import uuid4
+
+import anyio
+import requests
+from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
+from keystoneauth1 import exceptions as auth_exceptions
+from keystoneauth1.identity.v3 import ApplicationCredential
+from keystoneauth1.session import Session
+from openstack.config.cloud_region import CloudRegion
+from openstack.config.defaults import get_defaults
+from openstack.connection import Connection
+from starlette.datastructures import Headers
+from starlette.responses import JSONResponse
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
+
+logger = logging.getLogger(__name__)
+enabled = False
+
+
+class RestrictedSession(requests.Session):
+    """Restrict credential-bearing requests to the configured protocol."""
+
+    def __init__(self, protocol: str) -> None:
+        super().__init__()
+        self.protocol = protocol
+
+    def send(
+        self, request: requests.PreparedRequest, **kwargs: Any
+    ) -> requests.Response:
+        """Check the final prepared URL before sending credentials."""
+        if urlsplit(request.url).scheme != self.protocol:
+            raise ValueError(
+                f"Multi-user OpenStack requests require {self.protocol.upper()}"
+            )
+        kwargs["allow_redirects"] = False
+        return super().send(request, **kwargs)
+
+
+def service_protocol() -> str:
+    """Return the validated protocol used by multi-user service probes."""
+    return os.getenv("OS_AUTH_PROTOCOL", "http").lower() if enabled else "http"
+
+
+@dataclass
+class RequestIdentity:
+    """Keep connections and sensitive values out of object representations."""
+
+    connection: Connection = field(repr=False)
+    user_id: str
+    project_id: str
+    sensitive: tuple[str, ...] = field(repr=False)
+    request_id: str = ""
+
+
+_identity: ContextVar[RequestIdentity | None] = ContextVar(
+    "openstack_request_identity", default=None
+)
+
+
+def get_connection() -> Connection | None:
+    """Return only the calling request's connection in multi-user mode."""
+    if not enabled:
+        return None
+    identity = _identity.get()
+    if identity is None:
+        raise RuntimeError("An authenticated HTTP request is required")
+    return identity.connection
+
+
+def _close_connection(conn: Connection) -> None:
+    try:
+        conn.close()
+    finally:
+        conn.session.session.close()
+
+
+def _discard_authentication(task: asyncio.Task[RequestIdentity]) -> None:
+    # A disconnected request may disappear before its authentication worker ends.
+    try:
+        identity = task.result()
+    except (Exception, asyncio.CancelledError):
+        return
+    _close_connection(identity.connection)
+
+
+class CredentialRedaction(logging.Filter):
+    """Redact this request's credentials even from SDK debug messages."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        identity = _identity.get()
+        if identity:
+            message = record.getMessage()
+            for value in identity.sensitive:
+                if value:
+                    message = message.replace(value, "[REDACTED]")
+            record.msg, record.args = message, ()
+            # Tracebacks may include SDK exception text containing credentials.
+            record.exc_info = None
+            record.exc_text = None
+        return True
+
+
+def configure(active: bool) -> None:
+    """Enable request isolation before serving requests."""
+    global enabled
+    enabled = active
+    if active:
+        for handler in logging.getLogger().handlers:
+            if not any(isinstance(f, CredentialRedaction) for f in handler.filters):
+                handler.addFilter(CredentialRedaction())
+        # Authentication occurs before a validated identity exists. Do not emit
+        # HTTP wire logs while exchanging application credentials for a token.
+        for name in ("keystoneauth", "openstack", "urllib3", "httpx", "httpcore"):
+            logging.getLogger(name).setLevel(logging.WARNING)
+
+
+class UserAuditMiddleware(Middleware):
+    """Attribute tool calls without logging tool arguments or results."""
+
+    async def on_call_tool(
+        self, context: MiddlewareContext[Any], call_next: CallNext[Any, Any]
+    ) -> Any:
+        """Audit the validated principal, tool name, and completion."""
+        identity = _identity.get()
+        if not enabled:
+            return await call_next(context)
+        if identity is None:
+            raise RuntimeError("An authenticated HTTP request is required")
+        logger.info(
+            "OpenStack tool started request_id=%s user_id=%s project_id=%s tool=%s",
+            identity.request_id, identity.user_id, identity.project_id,
+            context.message.name,
+        )
+        started = perf_counter()
+        try:
+            result = await call_next(context)
+        except BaseException as error:
+            logger.warning(
+                "OpenStack tool failed request_id=%s user_id=%s project_id=%s "
+                "tool=%s duration_ms=%.3f error_type=%s",
+                identity.request_id, identity.user_id, identity.project_id,
+                context.message.name, (perf_counter() - started) * 1000,
+                type(error).__name__,
+            )
+            raise
+        logger.info(
+            "OpenStack tool returned request_id=%s user_id=%s project_id=%s "
+            "tool=%s duration_ms=%.3f",
+            identity.request_id, identity.user_id, identity.project_id,
+            context.message.name, (perf_counter() - started) * 1000,
+        )
+        return result
+
+
+def authenticate(credential_id: str, secret: str) -> RequestIdentity:
+    """Authenticate afresh; never consult environment credentials or keyrings."""
+    host = os.environ["OS_AUTH_HOST"]
+    port = int(os.environ.get("OS_AUTH_PORT", "5000"))
+    protocol = os.environ.get("OS_AUTH_PROTOCOL", "http").lower()
+    allow_insecure_http = os.getenv(
+        "MCP_MULTI_USER_ALLOW_INSECURE_HTTP", "false"
+    ).strip().lower() in ("true", "1", "yes", "on")
+    if protocol != "https" and not (protocol == "http" and allow_insecure_http):
+        raise ValueError("Multi-user mode requires OS_AUTH_PROTOCOL=https")
+    if any(char in host for char in "/@?#"):
+        raise ValueError("OS_AUTH_HOST must be a hostname or IP address")
+    auth = ApplicationCredential(
+        auth_url=f"{protocol}://{host}:{port}/v3",
+        application_credential_id=credential_id,
+        application_credential_secret=secret,
+        reauthenticate=False,
+    )
+    session = Session(
+        auth=auth, session=RestrictedSession(protocol),
+        verify=os.getenv("OS_CACERT") or True, timeout=10, redirect=0,
+    )
+    conn = None
+    try:
+        access = auth.get_access(session)
+        if not access.project_id or not access.user_id:
+            raise ValueError("A user and project-scoped credential is required")
+        # Service endpoints come only from operator configuration, never headers.
+        config = {
+            **get_defaults(),
+            "auth": {},
+            "interface": "internal",
+            "region_name": os.getenv("OS_REGION_NAME", "RegionOne"),
+            "identity_api_version": "3",
+            "block_storage_api_version": "3",
+            "orchestration_api_version": "1",
+            "identity_endpoint_override": f"{protocol}://{host}:{port}/v3",
+        }
+        for service, variable, default, path in (
+            ("compute", "OS_COMPUTE_PORT", "8774", "/v2.1"),
+            ("network", "OS_NETWORK_PORT", "9696", "/v2.0"),
+            ("block_storage", "OS_VOLUME_PORT", "8776", f"/v3/{access.project_id}"),
+            ("image", "OS_IMAGE_PORT", "9292", ""),
+            ("placement", "OS_PLACEMENT_PORT", "8780", ""),
+            ("orchestration", "OS_HEAT_STACK_PORT", "8004", f"/v1/{access.project_id}"),
+        ):
+            service_port = int(os.getenv(variable, default))
+            config[f"{service}_endpoint_override"] = (
+                f"{protocol}://{host}:{service_port}{path}"
+            )
+        conn = Connection(config=CloudRegion(
+            config=config, session=session, auth_plugin=auth,
+            cache_auth=False,
+        ))
+        return RequestIdentity(
+            conn, access.user_id, access.project_id,
+            (credential_id, secret, access.auth_token),
+        )
+    except Exception:
+        try:
+            if conn:
+                conn.close()
+        finally:
+            session.session.close()
+        raise
+
+
+def _bad_request_reason(body: bytes) -> str:
+    """Classify SDK rejections without exposing response text or request values."""
+    try:
+        payload = json.loads(body)
+    except (ValueError, RecursionError):
+        return "unclassified"
+    error = payload.get("error") if isinstance(payload, dict) else None
+    message = error.get("message") if isinstance(error, dict) else None
+    if isinstance(message, str):
+        for prefix, reason in (
+            ("Parse error:", "invalid_json"),
+            ("Validation error:", "invalid_jsonrpc"),
+            ("Bad Request: Unsupported protocol version:", "unsupported_protocol"),
+            # mcp 2.x answers an unknown MCP-Protocol-Version header by
+            # requiring the newer protocol envelope in params._meta.
+            ("params._meta must be an object carrying the required "
+             "'io.modelcontextprotocol/protocolVersion'", "unsupported_protocol"),
+            ("Bad Request: Missing session ID", "missing_session_id"),
+        ):
+            if message.startswith(prefix):
+                return reason
+    return "unclassified"
+
+
+class UserConnectionMiddleware:
+    """Authenticate every HTTP request and close its connection after delivery.
+
+    Used with stateless HTTP so no long-lived MCP task inherits another
+    request's identity. No server-side credential or authentication cache.
+    """
+
+    def __init__(self, app: ASGIApp, bearer_secret: str | None = None) -> None:
+        self.app = app
+        self.bearer_secret = bearer_secret
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        # This mode uses application credentials, not OAuth. Never forward these
+        # unsupported discovery/registration routes to an authenticated handler.
+        path = scope.get("path", "")
+        discovery_paths = (
+            "/.well-known/oauth-protected-resource",
+            "/.well-known/oauth-authorization-server",
+            "/.well-known/openid-configuration",
+        )
+        if path in (
+            "/register",
+            "/register/",
+            "/mcp/.well-known/openid-configuration",
+        ) or any(
+            path == base or path.startswith(base + "/")
+            for base in discovery_paths
+        ):
+            await JSONResponse({"error": "Not found"}, status_code=404)(
+                scope, receive, send
+            )
+            return
+        headers = Headers(scope=scope)
+        if self.bearer_secret:
+            authorization = headers.getlist("authorization")
+            parts = authorization[0].split() if len(authorization) == 1 else []
+            valid_bearer = (
+                len(parts) == 2
+                and parts[0].lower() == "bearer"
+                and hmac.compare_digest(parts[1], self.bearer_secret)
+            )
+            if not valid_bearer:
+                await JSONResponse(
+                    {"error": "Authentication failed"},
+                    status_code=401,
+                    headers={"WWW-Authenticate": "Bearer"},
+                )(scope, receive, send)
+                return
+        ids = headers.getlist("x-openstack-application-credential-id")
+        secrets = headers.getlist("x-openstack-application-credential-secret")
+        if (
+            len(ids) != 1 or len(secrets) != 1 or not ids[0] or not secrets[0]
+            or len(ids[0]) > 256 or len(secrets[0]) > 4096
+        ):
+            await JSONResponse(
+                {"error": "Application credential headers are required"},
+                status_code=401,
+            )(scope, receive, send)
+            return
+        request_id = str(uuid4())
+        started = perf_counter()
+        authentication = asyncio.create_task(
+            anyio.to_thread.run_sync(authenticate, ids[0], secrets[0])
+        )
+        try:
+            identity = await asyncio.shield(authentication)
+        except asyncio.CancelledError:
+            authentication.add_done_callback(_discard_authentication)
+            raise
+        except (
+            auth_exceptions.Unauthorized,
+            auth_exceptions.Forbidden,
+            auth_exceptions.NotFound,
+        ) as error:
+            logger.warning(
+                "OpenStack authentication rejected request_id=%s "
+                "auth_duration_ms=%.3f error_type=%s", request_id,
+                (perf_counter() - started) * 1000, type(error).__name__
+            )
+            await JSONResponse({"error": "Authentication failed"}, status_code=401)(
+                scope, receive, send
+            )
+            return
+        except Exception as error:
+            logger.warning(
+                "OpenStack authentication unavailable request_id=%s "
+                "auth_duration_ms=%.3f error_type=%s", request_id,
+                (perf_counter() - started) * 1000, type(error).__name__
+            )
+            await JSONResponse(
+                {"error": "OpenStack authentication unavailable"}, status_code=503
+            )(scope, receive, send)
+            return
+        if self.bearer_secret:
+            identity.sensitive += (self.bearer_secret,)
+        identity.request_id = request_id
+        token = _identity.set(identity)
+        logger.info(
+            "OpenStack request started request_id=%s user_id=%s project_id=%s "
+            "auth_duration_ms=%.3f",
+            request_id, identity.user_id, identity.project_id,
+            (perf_counter() - started) * 1000,
+        )
+        status = 500
+        rejection_body = bytearray()
+
+        async def audit_send(message: Message) -> None:
+            nonlocal status
+            if message["type"] == "http.response.start":
+                status = message["status"]
+            elif status == 400 and message["type"] == "http.response.body":
+                # Bound diagnostic memory and never consume or log request bodies.
+                rejection_body.extend(
+                    message.get("body", b"")[:8192 - len(rejection_body)]
+                )
+                if not message.get("more_body", False):
+                    logger.info(
+                        "OpenStack transport rejected request_id=%s "
+                        "http_status=400 reason=%s",
+                        request_id, _bad_request_reason(bytes(rejection_body)),
+                    )
+            await send(message)
+
+        try:
+            await self.app(scope, receive, audit_send)
+        except BaseException as error:
+            logger.warning(
+                "OpenStack request interrupted request_id=%s error_type=%s",
+                request_id, type(error).__name__,
+            )
+            raise
+        finally:
+            try:
+                # Connection.close unregisters its atexit hook. cache_auth=False
+                # prevents SDK keyring writes, and the HTTP pool is closed too.
+                _close_connection(identity.connection)
+            finally:
+                logger.info(
+                    "OpenStack request finished request_id=%s user_id=%s "
+                    "project_id=%s http_status=%s duration_ms=%.3f", request_id,
+                    identity.user_id, identity.project_id, status,
+                    (perf_counter() - started) * 1000,
+                )
+                _identity.reset(token)

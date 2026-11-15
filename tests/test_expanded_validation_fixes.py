@@ -1,0 +1,276 @@
+"""Regressions discovered during the expanded issue #73 live validation."""
+
+import importlib
+from types import SimpleNamespace
+from unittest.mock import Mock
+
+import pytest
+
+from mcp_openstack_ops import connection
+from mcp_openstack_ops.services import compute, monitoring, storage
+
+
+def _tool_handler(module, name):
+    tool = getattr(module, name)
+    return getattr(tool, 'fn', tool)
+
+
+@pytest.mark.parametrize(
+    'tool,actions',
+    [
+        ('set_instance', {'delete', 'resize', 'snapshot', 'rebuild'}),
+        ('set_flavor', {'list', 'set_extra_specs'}),
+        ('set_project', {'update', 'show', 'list'}),
+        ('set_keypair', {'import', 'show'}),
+        ('set_network_ports', {'show'}),
+        ('set_subnets', {'show'}),
+    ],
+)
+def test_tool_descriptions_expose_supported_actions(tool, actions):
+    module = importlib.import_module(f'mcp_openstack_ops.tools.{tool}')
+    description = (_tool_handler(module, tool).__doc__ or '').lower()
+    assert all(action in description for action in actions)
+
+
+@pytest.mark.asyncio
+async def test_instance_tool_forwards_advanced_action_parameters(monkeypatch):
+    module = importlib.import_module('mcp_openstack_ops.tools.set_instance')
+    service = Mock(return_value={'success': True})
+    monkeypatch.setattr(module, '_set_instance', service)
+    monkeypatch.setattr(module, '_get_instance_by_name', Mock(return_value=None))
+    monkeypatch.setattr('time.sleep', lambda _: None)
+
+    await _tool_handler(module, 'set_instance')(
+        instance_names='vm', action='snapshot', force=True,
+        snapshot_name='backup', metadata='{"purpose": "test"}',
+        preserve_ephemeral=True,
+    )
+
+    assert service.call_args.args == ('vm', 'snapshot')
+    assert service.call_args.kwargs['force'] is True
+    assert service.call_args.kwargs['snapshot_name'] == 'backup'
+    assert service.call_args.kwargs['metadata'] == {'purpose': 'test'}
+    assert service.call_args.kwargs['preserve_ephemeral'] is True
+
+
+@pytest.mark.asyncio
+async def test_flavor_set_alias_uses_backend_action_and_parameter(monkeypatch):
+    module = importlib.import_module('mcp_openstack_ops.tools.set_flavor')
+    service = Mock(return_value={'success': True})
+    monkeypatch.setattr(module, '_set_flavor', service)
+
+    await _tool_handler(module, 'set_flavor')(
+        flavor_name='small', action='set', properties='{"hw:cpu_policy": "shared"}',
+    )
+
+    assert service.call_args.kwargs['action'] == 'set_extra_specs'
+    assert service.call_args.kwargs['extra_specs'] == {'hw:cpu_policy': 'shared'}
+
+
+@pytest.mark.asyncio
+async def test_project_set_alias_forwards_backend_parameter_names(monkeypatch):
+    module = importlib.import_module('mcp_openstack_ops.tools.set_project')
+    service = Mock(return_value={'success': True})
+    monkeypatch.setattr(module, '_set_project', service)
+
+    await _tool_handler(module, 'set_project')(
+        project_name='project', action='set', enable=True, domain='default',
+    )
+
+    assert service.call_args.kwargs['action'] == 'update'
+    assert service.call_args.kwargs['enabled'] is True
+    assert service.call_args.kwargs['domain_id'] == 'default'
+
+
+@pytest.mark.asyncio
+async def test_keypair_import_alias_calls_create(monkeypatch):
+    module = importlib.import_module('mcp_openstack_ops.tools.set_keypair')
+    service = Mock(return_value={'success': True})
+    monkeypatch.setattr(module, '_set_keypair', service)
+    monkeypatch.setattr(module, '_get_resource_status_by_name', Mock(return_value='Unknown'))
+    monkeypatch.setattr('time.sleep', lambda _: None)
+
+    await _tool_handler(module, 'set_keypair')(
+        action='import', keypair_names='key', public_key='ssh-ed25519 placeholder',
+    )
+
+    assert service.call_args.args[:2] == ('key', 'create')
+
+
+@pytest.fixture
+def volume_connection(monkeypatch):
+    server = SimpleNamespace(id='server-id', name='vm', project_id='project')
+    volume = SimpleNamespace(
+        id='volume-id', name='data', project_id='project', status='available',
+        attachments=[{'server_id': server.id}],
+    )
+    conn = Mock()
+    conn.compute.servers.return_value = [server]
+    conn.volume.volumes.return_value = [volume]
+    monkeypatch.setattr(connection, 'get_openstack_connection', lambda: conn)
+    monkeypatch.setattr(connection, 'get_current_project_id', lambda: 'project')
+    return conn, server, volume
+
+
+@pytest.mark.parametrize('identifier', ['instance_name', 'instance_id', 'server_id'])
+def test_volume_attach_resolves_owned_server_and_sdk_arguments(
+    volume_connection, identifier
+):
+    conn, server, volume = volume_connection
+    value = server.name if identifier == 'instance_name' else server.id
+    result = storage.set_volume(volume.name, 'attach', **{identifier: value})
+    assert result['success']
+    conn.compute.create_volume_attachment.assert_called_once_with(
+        server.id, volume.id)
+
+
+@pytest.mark.parametrize('foreign', ['server', 'volume'])
+def test_volume_attach_rejects_foreign_resources(volume_connection, foreign):
+    conn, server, volume = volume_connection
+    (server if foreign == 'server' else volume).project_id = 'other'
+    assert not storage.set_volume('data', 'attach', instance_name='vm')['success']
+    conn.compute.create_volume_attachment.assert_not_called()
+
+
+def test_volume_detach_uses_server_then_volume(volume_connection):
+    conn, server, volume = volume_connection
+    assert storage.set_volume('data', 'detach')['success']
+    conn.compute.delete_volume_attachment.assert_called_once_with(
+        server.id, volume.id)
+
+
+def test_volume_detach_rejects_foreign_server(volume_connection):
+    conn, server, volume = volume_connection
+    server.project_id = 'other'
+    assert not storage.set_volume('data', 'detach')['success']
+    conn.compute.delete_volume_attachment.assert_not_called()
+
+
+@pytest.mark.parametrize('kwargs,expected', [
+    ({'size': 1, 'new_size': 2}, 2),
+    ({'size': 3, 'new_size': None}, 3),
+    ({'size': 4}, 4),
+])
+def test_volume_extend_prefers_explicit_new_size(volume_connection, kwargs, expected):
+    conn, _, volume = volume_connection
+    volume.size = 1
+    result = storage.set_volume(volume.name, 'extend', **kwargs)
+    assert result['success']
+    conn.volume.extend_volume.assert_called_once_with(volume, size=expected)
+
+
+@pytest.mark.parametrize(
+    "snapshots,name,expected",
+    [
+        ([{"name": "snap-a", "status": "available"}], "snap-a", "available"),
+        ([{"name": "other", "status": "available"}], "snap-a", "Not Found"),
+        ({"error": "API failure"}, "snap-a", "Not Found"),
+    ],
+)
+def test_snapshot_resource_status(monkeypatch, snapshots, name, expected):
+    from mcp_openstack_ops import mcp_main
+
+    monkeypatch.setattr(mcp_main, "_get_volume_snapshots", lambda: snapshots)
+
+    assert mcp_main._get_resource_status_by_name("snapshot", name) == expected
+
+
+@pytest.mark.parametrize('available', [True, False, None])
+def test_availability_zones_read_sdk_state(monkeypatch, available):
+    from openstack.compute.v2.availability_zone import AvailabilityZone as ComputeZone
+    from openstack.block_storage.v3.availability_zone import AvailabilityZone as VolumeZone
+
+    conn = Mock()
+    state = {'available': available} if available is not None else None
+    conn.compute.availability_zones.return_value = [ComputeZone(name='nova', state=state)]
+    conn.volume.availability_zones.return_value = [VolumeZone(name='nova', state=state)]
+    conn.network.availability_zones.return_value = []
+    monkeypatch.setattr(connection, 'get_openstack_connection', lambda: conn)
+    zones = monitoring.get_availability_zones()['availability_zones']
+    assert zones['compute'][0]['available'] is available
+    assert zones['volume'][0]['available'] is available
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('mtu', [None, 1400])
+async def test_network_tool_uses_backend_mtu_unless_explicit(monkeypatch, mtu):
+    module = importlib.import_module('mcp_openstack_ops.tools.set_networks')
+    service = Mock(return_value={'success': True})
+    monkeypatch.setattr(module, '_set_networks', service)
+    monkeypatch.setattr(module, '_get_resource_status_by_name',
+                        Mock(return_value='ACTIVE'))
+    monkeypatch.setattr('time.sleep', lambda _: None)
+    target = getattr(module.set_networks, 'fn', module.set_networks)
+    await target(action='create', network_names='test',
+                 **({} if mtu is None else {'mtu': mtu}))
+    assert service.call_args.kwargs.get('mtu') == (0 if mtu is None else mtu)
+
+
+@pytest.mark.parametrize('sensitive,term,offset,expected', [
+    (False, 'WEB', 0, ['0', '1']),
+    (False, 'web', 2, ['2']),
+    (True, 'Web', 0, ['0']),
+    (True, 'WEB', 0, []),
+    (False, 'web', 10, []),
+])
+def test_search_case_and_offset(monkeypatch, sensitive, term, offset, expected):
+    rows = [{'id': str(i), 'name': name, 'status': 'ACTIVE'}
+            for i, name in enumerate(['Web-a', 'web-b', 'web-c'])]
+    query = Mock(side_effect=lambda **kw: {'instances': [r for r in rows if
+        not kw.get('instance_names') or r['id'] in kw['instance_names']]})
+    monkeypatch.setattr(connection, 'get_openstack_connection', Mock())
+    monkeypatch.setattr(compute, 'get_instance_details', query)
+    result = compute.search_instances(term, ['name'], limit=2,
+                                      offset=offset, case_sensitive=sensitive)
+    assert [r['id'] for r in result] == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('tool', ['search_instances', 'get_instance'])
+async def test_search_tools_forward_case_and_offset(monkeypatch, tool):
+    module = importlib.import_module('mcp_openstack_ops.tools.' + tool)
+    service = Mock(return_value=[])
+    monkeypatch.setattr(module, '_search_instances', service)
+    target = getattr(getattr(module, tool), 'fn', getattr(module, tool))
+    await target(search_term='Web', offset=3, case_sensitive=True)
+    assert service.call_args.kwargs['offset'] == 3
+    assert service.call_args.kwargs['case_sensitive'] is True
+    assert service.call_args.kwargs['with_pagination'] is True
+
+
+@pytest.mark.parametrize('offset,expected,has_more', [
+    (0, ['0', '1'], True), (2, ['2'], False), (10, [], False),
+])
+def test_search_pagination_metadata(monkeypatch, offset, expected, has_more):
+    rows = [{'id': str(i), 'name': 'web', 'status': 'ACTIVE'} for i in range(3)]
+    monkeypatch.setattr(connection, 'get_openstack_connection', Mock())
+    monkeypatch.setattr(compute, 'get_instance_details', Mock(side_effect=lambda **kw: {
+        'instances': [r for r in rows if not kw.get('instance_names')
+                      or r['id'] in kw['instance_names']],
+    }))
+    result = compute.search_instances('web', ['name'], limit=2, offset=offset,
+                                      with_pagination=True)
+    assert [r['id'] for r in result['instances']] == expected
+    assert result['pagination'] == {'limit': 2, 'offset': offset,
+                                    'has_more': has_more}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('tool', ['search_instances', 'get_instance'])
+async def test_search_tools_preserve_query_and_page_metadata(monkeypatch, tool):
+    import json
+    module = importlib.import_module('mcp_openstack_ops.tools.' + tool)
+    page = {'limit': 2, 'offset': 0, 'has_more': True}
+    service = Mock(return_value={'instances': [{'id': 'owned'}],
+                                 'pagination': page, 'search_info': {}})
+    monkeypatch.setattr(module, '_search_instances', service)
+    target = getattr(getattr(module, tool), 'fn', getattr(module, tool))
+    result = json.loads(await target(search_term='Web', limit=2,
+                                     case_sensitive=True))
+    assert result['pagination'] == page
+    info = result['search_info'] if tool == 'search_instances' else result
+    assert info['search_term'] == 'Web'
+    assert info['case_sensitive'] is True
+    if tool == 'get_instance':
+        assert result['query_type'] == 'search'
+        assert result['total_instances'] == 1

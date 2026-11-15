@@ -1,0 +1,57 @@
+services:
+  open-webui:
+    env_file: .env
+    # image: ghcr.io/open-webui/open-webui:latest
+    image: ghcr.io/open-webui/open-webui:v0.13.3
+    container_name: mcp-openstack-ops-open-webui
+    ports:
+      - "${DOCKER_BIND_ADDRESS:-127.0.0.1}:${DOCKER_EXTERNAL_PORT_OPENWEBUI}:8080"
+    environment:
+      - OLLAMA_BASE_URL=http://host.docker.internal:11434
+    volumes:
+      - open-webui-data:/app/backend/data
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+  mcp-server:
+    env_file: .env
+    image: call518/mcp-server-openstack-ops:1.0.5
+    container_name: mcp-openstack-ops-mcp-server
+    ports:
+      - "${DOCKER_BIND_ADDRESS:-127.0.0.1}:${DOCKER_EXTERNAL_PORT_MCP_SERVER}:8000"
+    volumes:
+      - ./src:/app/src/
+      - ./scripts:/app/scripts
+      - ./.env:/app/.env:ro
+      # Uncomment the line below to mount SSL CA certificate for HTTPS OpenStack connections
+      # - /path/to/your/ca-cert.pem:/etc/ssl/certs/openstack-ca.pem:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z localhost 8000 && sleep 5"]
+      interval: 5s
+      timeout: 10s
+      retries: 5
+      start_period: 10s
+
+  mcpo-proxy:
+    env_file: .env
+    image: call518/mcpo-proxy-openstack-ops:1.0.3
+    container_name: mcp-openstack-ops-mcpo-proxy
+    depends_on:
+      mcp-server:
+        condition: service_healthy
+    ports:
+      - "${DOCKER_BIND_ADDRESS:-127.0.0.1}:${DOCKER_EXTERNAL_PORT_MCPO_PROXY}:8000"
+    volumes:
+      - ./${MCPO_CONFIG_FILE:-mcp-config.json.http.local}:/app/config/mcp-config.json:ro
+      - ./src:/app/src
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+volumes:
+  open-webui-data:
+    name: open-webui-data-mcp-openstack-ops
