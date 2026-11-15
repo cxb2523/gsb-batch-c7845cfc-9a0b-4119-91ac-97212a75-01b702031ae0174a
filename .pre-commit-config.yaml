@@ -1,0 +1,62 @@
+exclude: ^skills/cli/e2e/fixtures\.yaml$
+repos:
+  # Pre-commit hooks for general file hygiene
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: cef0300fd0fc4d2a87a85fa2093c6b283ea36f4b  # v5.0.0
+    hooks:
+      - id: trailing-whitespace
+        exclude: ^src/spark_history_mcp/api_client/
+      - id: end-of-file-fixer
+        exclude: ^src/spark_history_mcp/api_client/
+      - id: check-yaml
+        exclude: ^deploy/kubernetes/helm/.*\.yaml$
+        args: [--allow-multiple-documents]
+      - id: check-json
+      - id: check-toml
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: ['--maxkb=1000']
+      - id: mixed-line-ending
+        args: ['--fix=lf']
+
+  # Python linting and formatting with Ruff run through `task lint`
+  # (ruff pinned via uv.lock) so there is a single source of truth and no
+  # second, drifting ruff version.
+  - repo: local
+    hooks:
+      - id: task-lint
+        name: task lint
+        entry: task lint
+        language: system
+        pass_filenames: false      # task lint runs on the whole repo
+        types_or: [python, pyi]    # only trigger when Python files are staged
+        require_serial: true
+
+  # Type checking with mypy (temporarily disabled - TODO: fix type annotations)
+  # - repo: https://github.com/pre-commit/mirrors-mypy
+  #   rev: v1.11.2
+  #   hooks:
+  #     - id: mypy
+  #       additional_dependencies: [types-PyYAML, types-requests]
+  #       args: [--ignore-missing-imports]
+
+  # Security scanning
+  - repo: https://github.com/PyCQA/bandit
+    rev: 2d0b675b04c80ae42277e10500db06a0a37bae17  # 1.8.6
+    hooks:
+      - id: bandit
+        args: [--recursive, --format, json, --output, bandit-report.json]
+        exclude: ^(tests/|src/spark_history_mcp/api_client/|skills/cli/)  # skills/cli is a Go project; Python files there are test helpers only
+
+  # Secret scanning (detects hardcoded credentials, API keys, tokens, etc.)
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: 83d9cd684c87d95d656c1458ef04895a7f1cbd8e  # v8.30.1
+    hooks:
+      - id: gitleaks
+
+  # Documentation and markdown
+  - repo: https://github.com/igorshubovych/markdownlint-cli
+    rev: 192ad822316c3a22fb3d3cc8aa6eafa0b8488360  # v0.45.0
+    hooks:
+      - id: markdownlint
+        args: [--disable, MD013, MD033, MD041]  # Disable line length, HTML, first line rules

@@ -1,0 +1,17 @@
+{
+    "mcpServers": {
+        "mcp-apache-spark-history-server": {
+            "command": "/full/path/to/uv",
+            "args": [
+                "run",
+                "--directory",
+                "/path/to/mcp-apache-spark-history-server",
+                "-m",
+                "spark_history_mcp.core.main"
+            ],
+            "env": {
+                "SHS_MCP__TRANSPORT": "stdio"
+            }
+        }
+    }
+}
