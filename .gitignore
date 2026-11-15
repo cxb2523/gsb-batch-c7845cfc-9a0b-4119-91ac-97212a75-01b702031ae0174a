@@ -1,0 +1,18 @@
+
+# Dependency directories
+node_modules/
+
+src/*.d.ts
+src/*.js
+
+
+src/commands/*.d.ts
+src/commands/*.js
+
+build
+
+.rpscript
+
+*.rps
+*.csv
+*.yaml
