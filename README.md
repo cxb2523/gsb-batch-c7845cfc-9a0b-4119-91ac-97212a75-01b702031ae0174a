@@ -98,6 +98,25 @@ A Mandarin learner uses Webtoon Vault to download *The King's Avatar* from a Chi
 **Case Study: The Digital Archivist**
 A librarian tasked with preserving a niche webcomic that is being removed from its hosting platform uses Webtoon Vault to capture all 340 chapters in a single session. The resulting CBZ files are deposited into a university's digital repository, ensuring long-term access for researchers.
 
+## Chapter Collection Panel (Development) 🧪
+
+The collection page (`index.html`) now embeds a chapter collection panel (`panel.js` + `collector.js`). Paste a series URL and the page harvests chapters sequentially:
+
+- **Per-page fault tolerance** — a failed page never discards the pages already fetched in that chapter; the failed page indices are recorded and the chapter is marked `partial`.
+- **Per-chapter fault tolerance** — if a chapter cannot be opened at all, it is skipped with the failure reason preserved, and the run continues with the next chapter.
+- **Summary & selective retry** — after the run, the panel shows each chapter's status with succeeded/failed page counts, and a "retry failed chapters" button re-runs only `failed`/`partial` chapters without re-counting already-succeeded pages.
+- **Adaptive pacing** — consecutive failures stretch the request interval exponentially (capped); a success drops it back to the base delay. Retries are bounded (`maxRetries`).
+- **Persistence** — panel state is stored in `localStorage`, so `completed` / `partial` / `failed` remain distinguishable after a refresh.
+
+Default fetchers are heuristic (same-origin chapter links, `<img>` page extraction); override them via `window.WebtoonVaultHooks` (`fetchChapterList`, `fetchChapterPages`, `fetchPage`, plus pacing knobs) before the panel mounts.
+
+Run the locally-runnable tests and the no-network demo (Node 18+, no dependencies):
+
+```bash
+node --test tests/collector.test.js   # normal path, single-page failure, whole-chapter failure, backoff, persistence/retry
+node samples/demo.js                  # end-to-end sample against an in-memory fake site
+```
+
 ## License & Legal Considerations 📜
 
 Webtoon Vault is released under the [MIT License](LICENSE). You are free to use, modify, and distribute this software for personal or commercial purposes, provided the original license notice is included.
