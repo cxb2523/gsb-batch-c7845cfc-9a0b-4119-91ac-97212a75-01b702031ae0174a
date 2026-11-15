@@ -1,0 +1,174 @@
+# Development
+
+This project uses [uv](https://docs.astral.sh/uv/) for env + dependencies,
+[ruff](https://docs.astral.sh/ruff/) for lint + format, and
+[ty](https://docs.astral.sh/ty/) for static type checking. Source lives
+under `src/zenrows/`; tests under `tests/`.
+
+## First-time setup
+
+```bash
+uv sync --all-extras
+```
+
+Creates `.venv/` and installs everything in `pyproject.toml`, including
+dev tools. After that, prefix commands with `uv run …` or use the
+Makefile targets below.
+
+## Layout
+
+```
+src/zenrows/
+├── __init__.py               # re-exports the clients
+├── client.py                 # ZenRowsClient (legacy sync scraper)
+├── batch/
+│   ├── __init__.py           # ZenRowsBatchClient + key models
+│   ├── client.py             # hand-written typed facade
+│   ├── _transport.py         # httpx wrapper, RFC 7807 → exceptions
+│   ├── errors.py             # BatchAPIError, ProblemDetail
+│   └── models.py             # GENERATED — pydantic v2 (do not edit)
+└── crawl/
+    ├── __init__.py           # ZenRowsCrawlClient + models
+    ├── client.py             # hand-written typed facade
+    ├── errors.py             # CrawlAPIError
+    └── models.py             # hand-written pydantic v2 models
+```
+
+The Batch SDK is split deliberately:
+
+| File           | Owner             | Regenerate?       |
+|----------------|-------------------|-------------------|
+| `models.py`    | datamodel-codegen | `make generate`   |
+| `client.py`    | hand-written      | never auto        |
+| `_transport.py`| hand-written      | never auto        |
+| `errors.py`    | hand-written      | never auto        |
+
+This way the wire types stay in lockstep with the OpenAPI document
+while the ergonomic surface (method names, helpers, retries, URL
+override) stays in our control.
+
+The Crawl client uses the shared HTTP transport (`_transport.py`: key
+header, retries, problem+json) with `CrawlAPIError.from_response` as
+its error mapping. Its models are
+hand-written: the surface is a few small schemas, so there is no Crawl
+codegen step.
+Keep them tolerant: unknown fields are ignored, and every response enum
+gets `_missing_ = classmethod(open_enum_missing)`.
+
+## Common tasks
+
+| Make target     | What it does |
+|-----------------|--------------|
+| `make sync`     | `uv sync --all-extras` |
+| `make test`     | `uv run pytest` (offline; e2e tests deselected) |
+| `make test-e2e` | End-to-end tests against a live API (see below) |
+| `make check`    | `ty check` + `ruff check` + `ruff format --check` (CI mode) |
+| `make typecheck`| `ty check src` (static types; `models.py` excluded) |
+| `make lint`     | `ruff check --fix` |
+| `make format`   | `ruff format` |
+| `make generate` | Re-emit `src/zenrows/batch/models.py` from `docs/openapi.yaml` |
+| `make build`    | Build wheel + sdist via hatchling |
+| `make clean`    | Drop caches + build outputs |
+
+## Running the Crawl e2e test
+
+`tests/e2e/test_crawl_e2e.py` drives a real crawl through the client:
+create (with `include_patterns`, `output_format="html"`), wait, read the
+results, one page and the NDJSON download, list, stop, and a 404. It
+costs a few credits. It is marked `e2e`, which `make test` deselects,
+and it skips unless the three required variables below are set.
+
+| Variable | |
+|---|---|
+| `ZENROWS_API_KEY` | required: a key with Crawl access |
+| `ZENROWS_CRAWL_BASE_URL` | required: the API base, e.g. `https://api.zenrows.com/v1`; the test passes it as `base_url=` |
+| `ZENROWS_E2E_CRAWL_URL` | required: the page the crawl starts from |
+| `ZENROWS_E2E_CRAWL_INCLUDE` | optional: an include pattern; every result must contain it |
+
+```bash
+export ZENROWS_API_KEY=zr_...                       # a key with Crawl access
+export ZENROWS_CRAWL_BASE_URL=https://api.zenrows.com/v1
+export ZENROWS_E2E_CRAWL_URL=https://example.com/products/
+export ZENROWS_E2E_CRAWL_INCLUDE=/product/          # optional
+make test-e2e
+```
+
+Pick a start page whose links include a few pages matching the pattern:
+the test crawls at depth 1 with `max_items=3` and `output_format="html"`.
+
+To test against a local or staging deployment, point
+`ZENROWS_CRAWL_BASE_URL` at its `/v1` base instead. When the account
+has reached its limit of active jobs (429 `too_many_crawls`: 3 by default,
+shared with its Batch jobs), the test waits and retries (up to 5 minutes)
+before creating its crawl.
+
+## Refreshing the OpenAPI spec
+
+`docs/openapi.yaml` is the SDK-local copy of the spec. `make generate`
+reads it to emit the models. To refresh after a backend spec change:
+
+1. Copy the updated spec into `docs/openapi.yaml`.
+2. Run `make generate`.
+3. Run `make check && make test`.
+4. If the wire shape changed, update `src/zenrows/batch/client.py`
+   so the facade method signatures still typecheck.
+
+## Open enums (generated)
+
+docs/openapi.yaml marks the response enums `x-extensible-enum: true`: the
+server may add values at any time. After datamodel-codegen runs,
+`make generate` calls `scripts/open_extensible_enums.py`, which matches each
+extensible schema in the spec to its generated Enum (by value set) and adds
+
+```python
+_missing_ = classmethod(open_enum_missing)
+```
+
+from `src/zenrows/batch/_open_enum.py`. An unknown value becomes a cached
+`UNKNOWN` pseudo-member keeping the raw value (serializes back verbatim,
+hashable, picklable, absent from iteration). Enums without the flag
+(request side, e.g. `JobType`) stay strict, so a typo still fails locally.
+The step is a script because datamodel-codegen does not expose schema
+extensions to enum templates.
+
+`tests/test_open_enums.py` derives both sets from the spec and fails if a
+regeneration drops the hook or applies it to a strict enum.
+
+## Releases
+
+Merge PRs with Conventional Commit titles, for example `fix(crawl): ...` or
+`feat(batch): ...`. `fix`, `feat` and `perf` need a scope.
+
+After each merge to `main`, release-please opens or updates the PR
+`chore: release X.Y.Z`. It sets the version in `pyproject.toml`,
+`src/zenrows/__version__.py` and `uv.lock`, and adds the release's entry at
+the top of `CHANGELOG.md`. Do not change these by hand.
+
+To flag a change in behaviour that callers must know about, end the PR body
+with a `BEGIN_COMMIT_OVERRIDE` / `END_COMMIT_OVERRIDE` block before you merge.
+Each line in it becomes one changelog entry. A line such as
+`behaviour(client): ...` lands under "Behaviour Changes", at the top of the
+release entry. Next to a `feat` or `fix` line, it does not bump the
+version on its own. A `behaviour` line alone still makes a patch release.
+
+To release, merge that PR. The workflow runs the checks, creates the tag `vX.Y.Z` and the
+GitHub release, and publishes to PyPI.
+
+To publish an existing tag again, run the Release workflow by hand from
+`main` with that tag.
+
+### If the checks fail after the release PR is merged
+
+The release PR runs CI like any other PR. After you merge it, the release
+run checks the code again before it tags and publishes. If that check
+fails, `main` already has the new version, but there is no tag, and the
+merged release PR keeps the `autorelease: pending` label, which blocks the
+next release PR. To recover:
+
+1. Fix the problem in a normal PR and merge it.
+2. Create the release on that fix commit, with the version from
+   `.release-please-manifest.json`:
+   `gh release create vX.Y.Z --target <fix commit> --title vX.Y.Z --generate-notes --notes-start-tag <previous tag>`
+3. On the merged release PR, replace the label `autorelease: pending` with
+   `autorelease: tagged`.
+4. Run the Release workflow by hand from `main` with the tag `vX.Y.Z`.
