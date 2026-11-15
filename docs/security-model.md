@@ -28,7 +28,7 @@ Leeds Harvester is a single-workspace web data collector for one machine. It has
   - `robots.txt` is read whatever content type the server labels it with.
 - Redirects are followed inside the fetcher, and the page finally served is checked against its own site's rules. A disallowed redirect target is discarded.
 - Public-platform page collectors always enforce robots.txt. Other page collectors can turn this off per run, and the UI warns them to do so only with permission.
-- Requests to the same host are at least 0.5 s apart, and longer when the site's `Crawl-delay` asks (honoured up to 10 s).
+- Requests to the same host run one at a time, at least 0.5 s apart, and longer when the site's `Crawl-delay` asks (honoured up to 10 s). A `Retry-After` answer holds that host's next request until the time the server asked for; other hosts are never held back.
 - Throttling (408, 429) and temporary server or network errors are retried at most twice, with backoff of up to 5 s that honours `Retry-After`.
 - OpenStreetMap services get one geocoding request and one Overpass query per run, with an identifying User-Agent, in line with their usage policies.
 

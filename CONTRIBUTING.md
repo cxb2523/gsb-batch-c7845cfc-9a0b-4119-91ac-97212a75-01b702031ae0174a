@@ -42,7 +42,8 @@ npm run build         # TypeScript check + production build
 | `server/input.mjs`          | Validates run input against the catalog's fields                                                                                                             |
 | `server/hosts.mjs`          | The host names and ports the app answers on (`LEEDS_HOSTS`), shared with Vite                                                                                |
 | `server/crawler.mjs`        | The outgoing-request guard (public addresses, pinned DNS, redirects), gzip limits and the HTML, XML, text and JSON fetchers                                  |
-| `server/session.mjs`        | Per-run politeness: `robots.txt`, per-host delay, retries with backoff, sitemap discovery                                                                    |
+| `server/session.mjs`        | Per-run politeness: `robots.txt`, retries with backoff, sitemap discovery                                                                                    |
+| `server/host-scheduler.mjs` | Per-run request queues, one per host: requests to a host run one at a time, spaced by its `Crawl-delay` and held back by `Retry-After`                       |
 | `server/robots.mjs`         | `robots.txt` parsing and matching                                                                                                                            |
 | `server/extractors.mjs`     | Turning a fetched page into records: text, contacts, metadata, structured data, products, tables, selectors, feeds                                           |
 | `server/markdown.mjs`       | HTML to Markdown                                                                                                                                             |

@@ -3,6 +3,7 @@ import { ACCEPT, validateUrl } from "./crawler.mjs";
 import { extractHtml, extractFeed, pageMarkdown } from "./extractors.mjs";
 import { normalizeInput, InputError } from "./input.mjs";
 import { createFetchSession, RobotsBlocked } from "./session.mjs";
+import { createHostScheduler } from "./host-scheduler.mjs";
 import { runPublicPlatform } from "./platforms.mjs";
 import { createGoogleSourceRunners } from "./google-sources.mjs";
 import {
@@ -359,12 +360,20 @@ export function createRunEngine({
     try {
       if (!actor) throw new Error("This Actor is no longer available");
       const signal = controller.signal;
+      // One scheduler per run: every request the run makes — from any of its
+      // sessions — queues per host, so a host is never hit concurrently and
+      // its Crawl-delay and Retry-After waits land before the next request.
+      const hostScheduler = createHostScheduler({
+        signal,
+        politenessMs: timing.politenessMs,
+      });
       // A fetch session for the run's signal, or for a shorter-lived signal
       // when a source bounds part of its work (e.g. website lookups).
       const session = (sessionSignal) => {
         const get = createFetchSession({
           fetchPage,
           signal: sessionSignal,
+          scheduler: hostScheduler,
           respectRobots: run.input.respectRobots !== false,
           politenessMs: timing.politenessMs,
           retryBaseMs: timing.retryBaseMs,
@@ -418,6 +427,7 @@ export function createRunEngine({
           const data = await fetchJson(url, {
             ...options,
             signal,
+            scheduler: hostScheduler,
             maxBytes: Math.min(
               options.maxBytes ?? 5 * 1024 * 1024,
               remainingBytes(),

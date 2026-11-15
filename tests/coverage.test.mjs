@@ -138,12 +138,15 @@ test("robots.txt: Crawl-delay paces requests to a host and is capped at 10 s", a
   const get = createFetchSession({
     signal: new AbortController().signal,
     politenessMs: 500,
-    fetchPage: async (url) => {
-      if (url.endsWith("/robots.txt"))
-        return page(url, "User-agent: *\nCrawl-delay: 3600");
-      times.push(Date.now());
-      return page(url);
-    },
+    // Like the real fetcher, the mock routes each request through the
+    // scheduler the session hands it.
+    fetchPage: (url, { scheduler } = {}) =>
+      scheduler.schedule(new URL(url).host, () => {
+        if (url.endsWith("/robots.txt"))
+          return page(url, "User-agent: *\nCrawl-delay: 3600");
+        times.push(Date.now());
+        return page(url);
+      }),
   });
   // Let the session reach its next wait, then move the clock.
   const settle = async () => {

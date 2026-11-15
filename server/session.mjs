@@ -1,5 +1,6 @@
 import { ACCEPT } from "./crawler.mjs";
 import { parseRobots } from "./robots.mjs";
+import { createHostScheduler } from "./host-scheduler.mjs";
 
 export class RobotsBlocked extends Error {
   constructor(url, reason = "disallowed by robots.txt") {
@@ -25,39 +26,35 @@ export function abortableDelay(ms, signal) {
   });
 }
 // One fetch session per run. It owns politeness for the run: robots.txt rules
-// per origin, a minimum delay between requests to the same host (raised by a
-// site's Crawl-delay up to 10 s), and bounded retries for transient failures.
+// per origin, and bounded retries for transient failures. The per-host queues
+// themselves live in the shared scheduler (one per run), so concurrent
+// callers can never hit the same host at once: a host's requests run one at a
+// time, spaced by its Crawl-delay (up to 10 s) over the politeness floor.
 export function createFetchSession({
   fetchPage,
   signal,
+  scheduler,
   respectRobots = true,
   politenessMs = 500,
   retryBaseMs = 1000,
   maxRetries = 2,
   log = () => {},
 }) {
-  const lastRequest = new Map(),
-    robots = new Map();
-  async function pace(host, crawlDelay) {
-    const gap = Math.max(
-      politenessMs,
-      Math.min((crawlDelay ?? 0) * 1000, 10000),
-    );
-    const wait = gap - (Date.now() - (lastRequest.get(host) ?? -Infinity));
-    if (wait > 0) await abortableDelay(wait, signal);
-    lastRequest.set(host, Date.now());
-  }
+  // Sessions of one run share the run's scheduler; a standalone session
+  // queues on its own.
+  const queues = scheduler ?? createHostScheduler({ signal, politenessMs });
+  const robots = new Map();
   // RFC 9309: a 4xx robots.txt allows crawling; a server error or an
   // unreachable robots.txt means the whole site is treated as disallowed.
   async function robotsFor(u) {
     if (robots.has(u.origin)) return robots.get(u.origin);
     let rules = null;
     try {
-      await pace(u.host);
       const response = await fetchPage(`${u.origin}/robots.txt`, {
         signal,
         maxBytes: 512 * 1024,
         accept: ACCEPT.any,
+        scheduler: queues,
       });
       rules = parseRobots(response.body);
     } catch (e) {
@@ -70,6 +67,7 @@ export function createFetchSession({
       }
     }
     robots.set(u.origin, rules);
+    queues.setCrawlDelay(u.host, rules?.crawlDelay);
     return rules;
   }
   const rulesFor = async (u) => (respectRobots ? robotsFor(u) : null);
@@ -83,9 +81,13 @@ export function createFetchSession({
     const rules = await rulesFor(u);
     if (blocked(rules, u)) throw new RobotsBlocked(url, reasonFor(rules));
     for (let attempt = 0; ; attempt++) {
-      await pace(u.host, rules?.crawlDelay);
       try {
-        const response = await fetchPage(url, { signal, maxBytes, accept });
+        const response = await fetchPage(url, {
+          signal,
+          maxBytes,
+          accept,
+          scheduler: queues,
+        });
         // Redirects are followed inside the fetcher; the page that was finally
         // served must be allowed too, or it is discarded.
         if (response.url !== u.href) {
@@ -98,6 +100,10 @@ export function createFetchSession({
       } catch (e) {
         if (e instanceof RobotsBlocked) throw e;
         if (signal.aborted) throw signal.reason;
+        // A 429/503 with Retry-After quiets the host's whole queue until the
+        // time the server asked for, not just this request's next attempt.
+        if (e?.retryable && e.retryAfterMs != null)
+          queues.defer(u.host, e.retryAfterMs);
         if (!e?.retryable || attempt >= maxRetries) throw e;
         const wait = Math.min(
           e.retryAfterMs ?? retryBaseMs * 2 ** attempt,

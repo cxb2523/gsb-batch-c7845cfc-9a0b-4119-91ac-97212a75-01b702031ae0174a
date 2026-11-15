@@ -147,6 +147,8 @@ const sizeLabel = (bytes) =>
     : `${Math.round(bytes / 1024)} KB`;
 // Fetches one public resource. Every hop (including redirects) is validated,
 // resolved to public IPv4 addresses only, and pinned to the checked address.
+// When a scheduler is given, each hop joins the queue of the hop's own host,
+// so a redirect to another host waits on that host's queue instead.
 export async function fetchPublicResource(
   value,
   {
@@ -157,127 +159,145 @@ export async function fetchPublicResource(
     headers = {},
     body,
     timeoutMs = 15000,
+    scheduler,
   } = {},
 ) {
   let u = validateUrl(value);
   for (let redirects = 0; redirects <= 5; redirects++) {
     const address = await publicAddress(u);
-    const response = await new Promise((resolve, reject) => {
-      const request = (u.protocol === "https:" ? https : http).request(
-        u,
-        {
-          method,
-          signal,
-          // One socket per request: no pooled socket outlives a rejected response.
-          agent: false,
-          timeout: timeoutMs,
-          lookup: (_host, opts, cb) =>
-            cb(null, opts?.all ? [{ address, family: 4 }] : address, 4),
-          headers: {
-            "User-Agent": USER_AGENT,
-            Accept: accept.header,
-            ...headers,
-            ...(body === undefined
-              ? {}
-              : { "Content-Length": Buffer.byteLength(body) }),
+    const hop = () =>
+      new Promise((resolve, reject) => {
+        const request = (u.protocol === "https:" ? https : http).request(
+          u,
+          {
+            method,
+            signal,
+            // One socket per request: no pooled socket outlives a rejected response.
+            agent: false,
+            timeout: timeoutMs,
+            lookup: (_host, opts, cb) =>
+              cb(null, opts?.all ? [{ address, family: 4 }] : address, 4),
+            headers: {
+              "User-Agent": USER_AGENT,
+              Accept: accept.header,
+              ...headers,
+              ...(body === undefined
+                ? {}
+                : { "Content-Length": Buffer.byteLength(body) }),
+            },
           },
-        },
-        (res) => {
-          // Unused bodies are discarded by closing the socket, never drained.
-          const discard = (error, result) => {
-            res.destroy();
-            if (error) reject(error);
-            else resolve(result);
-          };
-          const status = res.statusCode;
-          if ([301, 302, 303, 307, 308].includes(status)) {
-            if (method !== "GET")
-              discard(new FetchError(`Unexpected redirect (HTTP ${status})`));
-            else if (!res.headers.location)
-              discard(new FetchError("Redirect is missing a Location header"));
-            else discard(null, { redirect: res.headers.location });
-            return;
-          }
-          if (status < 200 || status >= 300) {
-            discard(
-              new FetchError(`HTTP ${status}`, {
-                status,
-                retryable: RETRYABLE_STATUS.has(status),
-                retryAfterMs: retryAfter(res.headers["retry-after"]),
-              }),
-            );
-            return;
-          }
-          const contentType = res.headers["content-type"] || "";
-          if (!accept.type.test(contentType)) {
-            discard(
-              new FetchError(`Target is not ${accept.label}`, {
-                wrongType: true,
-              }),
-            );
-            return;
-          }
-          if (Number(res.headers["content-length"]) > maxBytes) {
-            discard(
-              new FetchError(`Response exceeds ${sizeLabel(maxBytes)} limit`),
-            );
-            return;
-          }
-          let size = 0;
-          const chunks = [];
-          res.on("data", (chunk) => {
-            size += chunk.length;
-            if (size > maxBytes)
-              res.destroy(
-                new FetchError(`Response exceeds ${sizeLabel(maxBytes)} limit`),
-              );
-            else chunks.push(chunk);
-          });
-          res.on("error", reject);
-          res.on("close", () => {
-            if (!res.complete)
-              reject(
-                new FetchError(
-                  "Connection closed before the response completed",
-                  {
-                    retryable: true,
-                  },
-                ),
-              );
-          });
-          res.on("end", () => {
-            let raw = Buffer.concat(chunks);
-            try {
-              if (accept.gzip) raw = gunzipWithin(raw, maxBytes);
-            } catch (error) {
-              reject(error);
+          (res) => {
+            // Unused bodies are discarded by closing the socket, never drained.
+            const discard = (error, result) => {
+              res.destroy();
+              if (error) reject(error);
+              else resolve(result);
+            };
+            const status = res.statusCode;
+            if ([301, 302, 303, 307, 308].includes(status)) {
+              if (method !== "GET")
+                discard(new FetchError(`Unexpected redirect (HTTP ${status})`));
+              else if (!res.headers.location)
+                discard(
+                  new FetchError("Redirect is missing a Location header"),
+                );
+              else discard(null, { redirect: res.headers.location });
               return;
             }
-            // `bytes` stays the downloaded (compressed) size for run budgets.
-            resolve({
-              body: decodeBody(raw, contentType),
-              url: u.href,
-              bytes: size,
-              contentType,
-              status,
+            if (status < 200 || status >= 300) {
+              discard(
+                new FetchError(`HTTP ${status}`, {
+                  status,
+                  retryable: RETRYABLE_STATUS.has(status),
+                  retryAfterMs: retryAfter(res.headers["retry-after"]),
+                }),
+              );
+              return;
+            }
+            const contentType = res.headers["content-type"] || "";
+            if (!accept.type.test(contentType)) {
+              discard(
+                new FetchError(`Target is not ${accept.label}`, {
+                  wrongType: true,
+                }),
+              );
+              return;
+            }
+            if (Number(res.headers["content-length"]) > maxBytes) {
+              discard(
+                new FetchError(`Response exceeds ${sizeLabel(maxBytes)} limit`),
+              );
+              return;
+            }
+            let size = 0;
+            const chunks = [];
+            res.on("data", (chunk) => {
+              size += chunk.length;
+              if (size > maxBytes)
+                res.destroy(
+                  new FetchError(
+                    `Response exceeds ${sizeLabel(maxBytes)} limit`,
+                  ),
+                );
+              else chunks.push(chunk);
             });
-          });
-        },
-      );
-      request.on("timeout", () =>
-        request.destroy(
-          new FetchError("Request timed out", { retryable: true }),
-        ),
-      );
-      request.on("error", (e) =>
-        reject(
-          RETRYABLE_CODES.has(e.code)
-            ? new FetchError(e.message, { retryable: true })
-            : e,
-        ),
-      );
-      request.end(body);
-    });
+            res.on("error", reject);
+            res.on("close", () => {
+              if (!res.complete)
+                reject(
+                  new FetchError(
+                    "Connection closed before the response completed",
+                    {
+                      retryable: true,
+                    },
+                  ),
+                );
+            });
+            res.on("end", () => {
+              let raw = Buffer.concat(chunks);
+              try {
+                if (accept.gzip) raw = gunzipWithin(raw, maxBytes);
+              } catch (error) {
+                reject(error);
+                return;
+              }
+              // `bytes` stays the downloaded (compressed) size for run budgets.
+              resolve({
+                body: decodeBody(raw, contentType),
+                url: u.href,
+                bytes: size,
+                contentType,
+                status,
+              });
+            });
+          },
+        );
+        request.on("timeout", () =>
+          request.destroy(
+            new FetchError("Request timed out", { retryable: true }),
+          ),
+        );
+        request.on("error", (e) =>
+          reject(
+            RETRYABLE_CODES.has(e.code)
+              ? new FetchError(e.message, { retryable: true })
+              : e,
+          ),
+        );
+        request.end(body);
+      });
+    let response;
+    try {
+      response = scheduler
+        ? await scheduler.schedule(u.host, hop, signal)
+        : await hop();
+    } catch (e) {
+      // A throttled host (429/503 with Retry-After) is left alone until the
+      // time the server asked for, by this and any later request of the run.
+      if (scheduler && e?.retryable && e.retryAfterMs != null)
+        scheduler.defer(u.host, e.retryAfterMs);
+      throw e;
+    }
     if (response.redirect) {
       const next = validateUrl(new URL(response.redirect, u).href);
       if (
