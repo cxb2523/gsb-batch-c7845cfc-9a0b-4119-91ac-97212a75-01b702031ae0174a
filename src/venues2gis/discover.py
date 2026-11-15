@@ -7,6 +7,11 @@
 Источник задачи - либо рубрика каталога (rubric:10803), либо поисковое слово.
 Рубрика даёт гарантированное покрытие по классификации самого 2GIS,
 слово добирает "расширенные" результаты, которые в рубрику не попали.
+
+После каждой прочитанной страницы задача запоминает точку продолжения
+(Store.save_resume): оборванный прогон продолжит источник со следующей
+страницы, а не с первой. Точка снимается, когда задача получает итоговый
+статус (done|empty|failed) - см. Store.finish_task.
 """
 from __future__ import annotations
 
@@ -154,17 +159,84 @@ class Discoverer:
         except PWError:
             return False
 
-    def run_task(self, region: str, host: str, source: str) -> DiscoverResult:
-        url = source_url(host, region, source)
-        logger.info("[%s] %s -> %s", region, source, url)
+    def _current_page(self) -> int:
+        """Номер текущей страницы по URL (у первой страницы /page/N в адресе нет)."""
+        m = re.search(r"/page/(\d+)", self.page.url)
+        return int(m.group(1)) if m else 1
 
-        if not self._goto(url):
+    def _goto_page(self, base_url: str, page_number: int,
+                   region: str, source: str) -> Optional[bool]:
+        """Переход сразу на нужную страницу выдачи (продолжение после прерывания).
+
+        True  - мы на нужной странице;
+        False - выдачу открыть не удалось (задачу стоит повторить позже);
+        None  - такой страницы больше нет: выдача сократилась, считаем её концом.
+        """
+        if not self._goto(f"{base_url}/page/{page_number}"):
+            return False
+        current = self._current_page()
+        if current == page_number:
+            return True
+        if current > page_number:
+            logger.warning("[%s/%s] URL привёл на страницу %d вместо %d",
+                           region, source, current, page_number)
+            return False
+        # Прямой переход по /page/N 2GIS обычно сбрасывает на первую страницу -
+        # тогда докликиваемся до нужной, не считая пройденные страницы заново.
+        logger.info("[%s/%s] URL открыл страницу %d вместо %d - идём кликами",
+                    region, source, current, page_number)
+        while current < page_number:
+            nxt = current + 1
+            if not self._has_page_link(nxt):
+                return None
+            if not self._click_page(nxt):
+                logger.warning("[%s/%s] не удалось перейти на страницу %d",
+                               region, source, nxt)
+                return False
+            self._sleep(self.cfg.page_delay_ms)
+            self.s.wait_network_idle(20)
+            if self.s.is_antibot_page():
+                self._handle_antibot()
+                return False
+            if self._current_page() != nxt:
+                return None
+            current = nxt
+        return True
+
+    def run_task(self, region: str, host: str, source: str,
+                 task_id: Optional[int] = None, resume_page: int = 0,
+                 resume_seen: int = 0) -> DiscoverResult:
+        url = source_url(host, region, source)
+        start_page = resume_page + 1 if resume_page > 0 else 1
+        if start_page > 1:
+            logger.info("[%s] %s -> %s (продолжение со страницы %d, уже просмотрено %d)",
+                        region, source, url, start_page, resume_seen)
+        else:
+            logger.info("[%s] %s -> %s", region, source, url)
+
+        if start_page > 1:
+            reached = self._goto_page(url, start_page, region, source)
+            if reached is None:
+                # Страница, с которой должны были продолжить, исчезла: данные в
+                # выдаче изменились и список стал короче. Это не ошибка - источник
+                # дочитан, точку продолжения снимет finish_task.
+                logger.info("[%s/%s] страница %d исчезла: выдача стала короче - "
+                            "считаем источник дочитанным (просмотрено %d)",
+                            region, source, start_page, resume_seen)
+                return DiscoverResult("done" if resume_seen else "empty",
+                                      resume_page, resume_seen, 0)
+            if not reached:
+                return DiscoverResult("failed", error="не удалось открыть выдачу")
+        elif not self._goto(url):
             return DiscoverResult("failed", error="не удалось открыть выдачу")
 
         reported_total = self._read_total()
-        ids_seen = ids_new = 0
-        pages_done = 0
-        page_number = 1
+        # Счётчики накопительные: просмотренное до прерывания входит в итог и
+        # в лог покрытия, иначе продолжение занижало бы полноту обхода.
+        ids_seen = resume_seen
+        ids_new = 0
+        pages_done = resume_page
+        page_number = start_page
 
         while page_number <= self.cfg.max_pages_per_task:
             if self.should_stop():
@@ -179,6 +251,9 @@ class Discoverer:
             ids_seen += len(ids)
             ids_new += self.store.enqueue_firms(region, host, ids, source)
             pages_done = page_number
+            if task_id is not None:
+                # Страница подтверждена: после прерывания продолжим со следующей.
+                self.store.save_resume(task_id, page_number, ids_seen)
 
             next_page = page_number + 1
             if not self._has_page_link(next_page):
@@ -197,8 +272,7 @@ class Discoverer:
                 return DiscoverResult("failed", pages_done, ids_seen, ids_new,
                                       "антибот", reported_total)
 
-            current = re.search(r"/page/(\d+)", self.page.url)
-            current_n = int(current.group(1)) if current else 1
+            current_n = self._current_page()
             if current_n != next_page:
                 logger.info("[%s/%s] после клика оказались на странице %d вместо %d - стоп",
                             region, source, current_n, next_page)

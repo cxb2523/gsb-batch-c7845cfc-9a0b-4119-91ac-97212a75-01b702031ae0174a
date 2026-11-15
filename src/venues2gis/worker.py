@@ -103,7 +103,13 @@ def run_worker(cfg: Config, worker_id: int = 0, max_seconds: Optional[float] = N
             task = store.next_task(cfg.collect.max_attempts)
             if task is not None:
                 try:
-                    res = discoverer.run_task(task["region"], task["domain"], task["query"])
+                    # Позиция продолжения едет вместе с атомарно захваченной задачей:
+                    # пока задача в running, никто другой её не возьмёт и не начнёт
+                    # листать ту же выдачу с той же страницы.
+                    res = discoverer.run_task(task["region"], task["domain"], task["query"],
+                                              task_id=task["id"],
+                                              resume_page=task["resume_page"] or 0,
+                                              resume_seen=task["resume_seen"] or 0)
                 except DiscoverAntibot as e:
                     store.finish_task(task["id"], "failed", error=str(e))
                     logger.error("[w%d] %s", worker_id, e)

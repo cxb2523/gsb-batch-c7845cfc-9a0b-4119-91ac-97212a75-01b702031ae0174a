@@ -29,6 +29,10 @@ CREATE TABLE IF NOT EXISTS tasks (
     attempts     INTEGER NOT NULL DEFAULT 0,
     error        TEXT,
     reported_total INTEGER,
+    -- Точка продолжения обхода: последняя полностью прочитанная страница и
+    -- сколько карточек было просмотрено до неё включительно. NULL - листаем сначала.
+    resume_page  INTEGER,
+    resume_seen  INTEGER NOT NULL DEFAULT 0,
     updated_at   TEXT,
     UNIQUE (region, query)
 );
@@ -103,6 +107,12 @@ class Store:
         if "kind" not in existing:
             # rubric | query - чтобы в отчётах было видно, чем именно нашли.
             self._conn.execute("ALTER TABLE tasks ADD COLUMN kind TEXT DEFAULT 'query'")
+        if "resume_page" not in existing:
+            # Последняя подтверждённая страница - отсюда продолжим после прерывания.
+            self._conn.execute("ALTER TABLE tasks ADD COLUMN resume_page INTEGER")
+        if "resume_seen" not in existing:
+            self._conn.execute(
+                "ALTER TABLE tasks ADD COLUMN resume_seen INTEGER NOT NULL DEFAULT 0")
 
     def close(self) -> None:
         with self._lock:
@@ -172,6 +182,19 @@ class Store:
             )
             return row
 
+    def save_resume(self, task_id: int, page: int, ids_seen: int) -> None:
+        """Фиксирует страницу как полностью прочитанную.
+
+        Вызывается после каждой успешно разобранной страницы: если прогон
+        оборвётся (Ctrl+C, лимит времени, падение браузера), задача вернётся
+        в очередь и продолжится со следующей страницы, а не с первой.
+        """
+        with self._tx() as conn:
+            conn.execute(
+                "UPDATE tasks SET resume_page=?, resume_seen=?, updated_at=? WHERE id=?",
+                (page, ids_seen, utcnow(), task_id),
+            )
+
     def finish_task(
         self,
         task_id: int,
@@ -182,10 +205,14 @@ class Store:
         error: Optional[str] = None,
         reported_total: Optional[int] = None,
     ) -> None:
+        # Точку продолжения храним только у прерванной задачи (pending). При любом
+        # итоговом статусе (done|empty|failed) она сбрасывается, иначе следующий
+        # прогон ошибочно пропустит начало выдачи.
+        clear = "" if status == "pending" else ", resume_page=NULL, resume_seen=0"
         with self._tx() as conn:
             conn.execute(
                 "UPDATE tasks SET status=?, pages_done=?, cards_seen=?, cards_new=?, "
-                "error=?, reported_total=?, updated_at=? WHERE id=?",
+                "error=?, reported_total=?, updated_at=?" + clear + " WHERE id=?",
                 (status, pages_done, cards_seen, cards_new, error, reported_total,
                  utcnow(), task_id),
             )
