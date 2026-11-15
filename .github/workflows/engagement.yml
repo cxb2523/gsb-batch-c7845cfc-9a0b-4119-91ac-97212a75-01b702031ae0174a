@@ -1,0 +1,209 @@
+name: engagement
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Mon-Fri 14:30 UTC: between the 13:00 and 16:00 posting windows so
+    # engagement never races the posting workflow for the X refresh token.
+    - cron: "30 14 * * 1-5"
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: x-bot-engagement
+  cancel-in-progress: true
+
+jobs:
+  engagement:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      OPENAI_API_URL: ${{ vars.OPENAI_API_URL || 'https://api.deepseek.com/chat/completions' }}
+      OPENAI_MODEL_ID: ${{ vars.OPENAI_MODEL_ID || 'deepseek-v4-flash' }}
+      OPENAI_THINKING_ENABLED: ${{ vars.OPENAI_THINKING_ENABLED || 'false' }}
+      OPENAI_USAGE_TRACKING_ENABLED: ${{ vars.OPENAI_USAGE_TRACKING_ENABLED || 'true' }}
+      OPENAI_USAGE_FILE: .github/runtime/openai-usage.json
+      OPENAI_MONTHLY_BUDGET_USD: ${{ vars.OPENAI_MONTHLY_BUDGET_USD || '1' }}
+      OPENAI_BUDGET_SAFETY_RATIO: ${{ vars.OPENAI_BUDGET_SAFETY_RATIO || '0.9' }}
+      OPENAI_COST_INPUT_1K_USD: ${{ vars.OPENAI_COST_INPUT_1K_USD || '0' }}
+      OPENAI_COST_OUTPUT_1K_USD: ${{ vars.OPENAI_COST_OUTPUT_1K_USD || '0' }}
+      OPENAI_COST_REQUEST_USD: ${{ vars.OPENAI_COST_REQUEST_USD || '0' }}
+      TWEET_MAINTENANCE_MODE: engagement
+      TWEET_AUTO_REPLY_ENABLED: ${{ vars.TWEET_AUTO_REPLY_ENABLED || 'true' }}
+      TWEET_AUTO_REPLY_MODE: ${{ vars.TWEET_AUTO_REPLY_MODE || 'whitelist' }}
+      TWEET_AUTO_REPLY_WHITELIST: ${{ vars.TWEET_AUTO_REPLY_WHITELIST || 'karpathy,sama,paulg,levelsio,gregisenberg,rauchg,amasad,dabit3,svpino,nearcyan' }}
+      TWEET_AUTO_REPLY_WHITELIST_ACTION: ${{ vars.TWEET_AUTO_REPLY_WHITELIST_ACTION || 'quote' }}
+      TWEET_AUTO_REPLY_MAX_QUERIES: ${{ vars.TWEET_AUTO_REPLY_MAX_QUERIES || '3' }}
+      TWEET_AUTO_REPLY_MAX_PER_DAY: ${{ vars.TWEET_AUTO_REPLY_MAX_PER_DAY || '1' }}
+      TWEET_AUTO_REPLY_MAX_PER_RUN: ${{ vars.TWEET_AUTO_REPLY_MAX_PER_RUN || '1' }}
+      TWEET_AUTO_REPLY_CANDIDATES_PER_RUN: ${{ vars.TWEET_AUTO_REPLY_CANDIDATES_PER_RUN || '10' }}
+      TWEET_AUTO_REPLY_SEARCH_RESULTS: ${{ vars.TWEET_AUTO_REPLY_SEARCH_RESULTS || '30' }}
+      TWEET_AUTO_REPLY_MAX_AGE_HOURS: ${{ vars.TWEET_AUTO_REPLY_MAX_AGE_HOURS || '72' }}
+      X_API_USAGE_TRACKING_ENABLED: ${{ vars.X_API_USAGE_TRACKING_ENABLED || 'true' }}
+      X_API_USAGE_FILE: .github/runtime/x-api-usage.json
+      X_API_MONTHLY_BUDGET_USD: ${{ vars.X_API_MONTHLY_BUDGET_USD || '5' }}
+      X_API_BUDGET_SAFETY_RATIO: ${{ vars.X_API_BUDGET_SAFETY_RATIO || '0.85' }}
+      X_API_BUDGET_FILE: .github/runtime/x-api-budget.json
+      X_API_COST_READ: ${{ vars.X_API_COST_READ || '0.05' }}
+      X_API_COST_TWEET_CREATE: ${{ vars.X_API_COST_TWEET_CREATE || '0.015' }}
+      X_API_CREDITS_CIRCUIT_BREAKER_ENABLED: ${{ vars.X_API_CREDITS_CIRCUIT_BREAKER_ENABLED || 'true' }}
+      X_API_CREDITS_CIRCUIT_TTL_HOURS: ${{ vars.X_API_CREDITS_CIRCUIT_TTL_HOURS || '24' }}
+      X_ACCESS_TOKEN_CACHE_FILE: .github/runtime/x-access-token.json
+      X_CLIENT_ID: ${{ secrets.X_CLIENT_ID }}
+      X_CLIENT_SECRET: ${{ secrets.X_CLIENT_SECRET }}
+      X_OAUTH2_REFRESH_TOKEN: ${{ secrets.X_OAUTH2_REFRESH_TOKEN }}
+      X_OAUTH2_REFRESH_TOKEN_REPO: ${{ secrets.X_OAUTH2_REFRESH_TOKEN }}
+      X_REFRESH_TOKEN_OUT_FILE: .github/runtime/x-refresh-token.txt
+      TWEET_ANALYTICS_ENABLED: ${{ vars.TWEET_ANALYTICS_ENABLED || 'true' }}
+      TWEET_ACCOUNT_SNAPSHOT_MAX_AGE_HOURS: ${{ vars.TWEET_ACCOUNT_SNAPSHOT_MAX_AGE_HOURS || '24' }}
+      TWEET_ANALYTICS_FILE: .github/runtime/tweet-analytics.json
+      TWEET_ARCHIVE_FILE: archive/tweets.jsonl
+      TWEET_BUILD_IN_PUBLIC_FILE: .github/content/build-in-public.jsonl
+      GITHUB_TOKEN: ${{ github.token }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Restore learning cache
+        id: restore-learning
+        uses: actions/cache/restore@v5
+        with:
+          path: .github/runtime
+          key: x-bot-learning-engagement-${{ github.run_id }}
+          restore-keys: |
+            x-bot-learning-
+            x-bot-runtime-
+
+      - name: Restore token cache
+        id: restore-tokens
+        uses: actions/cache/restore@v5
+        with:
+          path: |
+            .github/runtime/x-refresh-token.txt
+            .github/runtime/x-access-token.json
+          key: x-bot-tokens-engagement-${{ github.run_id }}
+          restore-keys: |
+            x-bot-tokens-
+
+      - name: Ensure runtime directory exists
+        run: mkdir -p .github/runtime
+
+      - name: Load cached x refresh token
+        shell: bash
+        run: |
+          if [ -f .github/runtime/x-refresh-token.invalid.json ]; then
+            echo "Detected invalid refresh-token marker; ignoring cached token."
+            rm -f .github/runtime/x-refresh-token.txt
+          fi
+
+          if [ -s .github/runtime/x-refresh-token.txt ]; then
+            token="$(tr -d '\r\n\t ' < .github/runtime/x-refresh-token.txt)"
+            if [ -n "$token" ]; then
+              echo "::add-mask::$token"
+              echo "X_OAUTH2_REFRESH_TOKEN_CACHE=$token" >> "$GITHUB_ENV"
+              echo "Injected cached X refresh token."
+            fi
+          fi
+
+      - name: Purge invalidated OAuth runtime cache
+        if: hashFiles('.github/runtime/x-refresh-token.invalid.json') != ''
+        run: |
+          bash .github/scripts/purge-actions-cache.sh
+          rm -f .github/runtime/x-refresh-token.txt \
+                .github/runtime/x-access-token.json \
+                .github/runtime/x-refresh-token.invalid.json
+          echo "Cleared invalidated OAuth runtime files."
+
+      - name: Setup bun
+        uses: oven-sh/setup-bun@v2.2.0
+        with:
+          bun-version: 1.4.2
+
+      - name: Run whitelist engagement
+        id: engagement
+        run: bun .github/scripts/post-tweet.mjs
+
+      - name: Purge stale runtime cache after OAuth failure
+        if: always() && steps.engagement.outputs.purge_runtime_cache == 'true'
+        env:
+          ENGAGEMENT_OUTCOME: ${{ steps.engagement.outcome }}
+        run: |
+          bash .github/scripts/purge-actions-cache.sh
+          if [ "$ENGAGEMENT_OUTCOME" = "success" ]; then
+            rm -f .github/runtime/x-refresh-token.invalid.json
+            echo "Purged stale remote runtime caches; keeping any fresh local runtime token files."
+          else
+            rm -f .github/runtime/x-refresh-token.txt \
+                  .github/runtime/x-access-token.json \
+                  .github/runtime/x-refresh-token.invalid.json
+          fi
+
+      - name: Commit new build-in-public notes
+        shell: bash
+        run: |
+          branch="${GITHUB_REF_NAME:-main}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin "$branch"
+          git rebase --autostash "origin/$branch"
+          git add .github/content/build-in-public.jsonl
+          if git diff --staged --quiet; then
+            echo "No new build-in-public notes to commit."
+            exit 0
+          fi
+          git commit -m "chore: sync github events into build-in-public notes"
+          for attempt in 1 2 3; do
+            if git push origin "HEAD:$branch"; then
+              exit 0
+            fi
+            echo "Push failed; rebasing and retrying ($attempt/3)."
+            git fetch origin "$branch"
+            git rebase --autostash "origin/$branch"
+          done
+          echo "Failed to push build-in-public notes after retries."
+          exit 1
+
+      - name: Check token cache worth saving
+        id: token-cache
+        if: always()
+        run: |
+          if [ -f .github/runtime/x-refresh-token.txt ] || [ -f .github/runtime/x-access-token.json ]; then
+            echo "save=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "save=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Save token cache
+        if: always() && steps.token-cache.outputs.save == 'true'
+        continue-on-error: true
+        uses: actions/cache/save@v5
+        with:
+          path: |
+            .github/runtime/x-refresh-token.txt
+            .github/runtime/x-access-token.json
+          key: x-bot-tokens-engagement-${{ github.run_id }}
+
+      - name: Check learning cache worth saving
+        id: learning-cache
+        if: always()
+        run: |
+          if [ -f .github/runtime/github-events-sync.json ] || \
+             [ -f .github/runtime/x-api-usage.json ] || \
+             [ -f .github/runtime/tweet-analytics.json ] || \
+             [ -f .github/runtime/openai-usage.json ]; then
+            echo "save=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "save=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Save learning cache
+        if: always() && steps.learning-cache.outputs.save == 'true'
+        continue-on-error: true
+        uses: actions/cache/save@v5
+        with:
+          path: .github/runtime
+          key: x-bot-learning-engagement-${{ github.run_id }}

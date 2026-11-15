@@ -1,0 +1,28 @@
+# Line endings
+*.mjs text eol=lf
+*.md text eol=lf
+*.sh text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+
+# GitHub Linguist vendors ALL of `.github/` by default (vendor.yml),
+# which hides this repo's real languages because the code lives there.
+# Un-vendor scripts/workflows so the language bar can show JS + Shell + YAML.
+.github/scripts/** -linguist-vendored linguist-detectable
+.github/workflows/** -linguist-vendored linguist-detectable
+
+# Explicit language classification
+*.mjs linguist-language=JavaScript linguist-detectable
+*.sh linguist-language=Shell linguist-detectable
+*.yml linguist-language=YAML linguist-detectable
+*.yaml linguist-language=YAML linguist-detectable
+
+# Keep non-code artifacts out of the language bar
+*.md linguist-documentation
+docs/** linguist-documentation
+reports/** linguist-documentation
+examples/** linguist-documentation
+archive/** linguist-documentation
+*.json linguist-documentation
+*.jsonl linguist-documentation
+docs/images/** linguist-vendored
