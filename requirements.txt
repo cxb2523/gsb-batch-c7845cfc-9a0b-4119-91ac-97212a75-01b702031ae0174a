@@ -1,0 +1,6 @@
+click
+python-dotenv
+redis
+requests
+selenium
+webdriver-manager
