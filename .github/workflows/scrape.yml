@@ -1,0 +1,45 @@
+name: scrape
+
+on:
+  push:
+    branches:
+      - main
+  schedule:
+    - cron: "0 4 * * *"
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install Python dependencies
+        run: python -m pip install -r requirements.txt
+
+      # For some reason the 'overwrite' option for the Scrapy feed exporters
+      # doesn't work reliably for me ¯\_(ツ)_/¯
+      - name: Clear data file
+        run: rm items.json
+
+      - name: Scrape
+        run: scrapy crawl czech-political-parties
+
+      - name: Check that data got exported
+        run: jq -e 'type == "array" and length > 0' items.json
+
+      - name: Save to Git
+        uses: EndBug/add-and-commit@v11
+        with:
+          add: items.json
+          author_name: "scraper"
+          author_email: "scraper@honzajavorek.cz"
+          message: "update items 📥"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
