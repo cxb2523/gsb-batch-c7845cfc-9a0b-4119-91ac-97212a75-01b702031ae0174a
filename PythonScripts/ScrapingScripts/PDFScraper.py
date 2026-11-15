@@ -3,7 +3,8 @@ import os
 import pandas as pd
 
 from dataclasses import dataclass, field
-from typing import List, Dict, Callable, Any
+from enum import Enum
+from typing import List, Dict, Callable, Any, Optional
 
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
@@ -56,6 +57,91 @@ def _read_pdf(pdf_name: str) -> Dict[int, str]:
             extracted_pages[page_number.number + 1] = text_lines
 
     return extracted_pages
+
+
+# Replaceable read seam: swap_statement resolves the reader through this module global at
+# call time, so tests (or alternative storage backends) can substitute a stub without
+# touching fitz or the statement directory.
+pdf_text_reader: Callable[[str], Dict[int, str]] = _read_pdf
+
+
+class MonthlyReadStatus(str, Enum):
+    """
+    Outcome of processing a single monthly statement.
+
+    SUCCESS: the statement was read and the extraction function returned a value.
+    MISSING: no statement file exists for the month (FileNotFoundError while reading).
+    PARSE_ERROR: the statement could not be read or the extraction function failed.
+    """
+
+    SUCCESS = "success"
+    MISSING = "missing"
+    PARSE_ERROR = "parse_error"
+
+
+@dataclass
+class MonthlyPeriodResult:
+    """
+    Per-period outcome of a monthly read-back.
+
+    :ivar month: The month label used as the table index, formatted as "%Y-%B".
+    :ivar file_name: The statement file name that was attempted ("%Y-%B.pdf").
+    :ivar status: Outcome of the attempt (see MonthlyReadStatus).
+    :ivar error_message: String form of the exception for MISSING/PARSE_ERROR, else None.
+    """
+
+    month: str
+    file_name: str
+    status: MonthlyReadStatus
+    error_message: Optional[str] = None
+
+    @property
+    def successful(self) -> bool:
+        return self.status == MonthlyReadStatus.SUCCESS
+
+
+@dataclass
+class MonthlyReadResult:
+    """
+    Result of a fault-tolerant monthly read-back.
+
+    ``data`` only contains columns/rows for successful months; ``period_results`` keeps the
+    outcome of *every* attempted month (including missing and failed ones), in iteration
+    order. The two collections are intentionally separate so a failed period can never
+    shift the positional alignment of the successful values.
+
+    :ivar data: DataFrame indexed by the successful month labels.
+    :ivar period_results: One MonthlyPeriodResult per attempted month.
+    :ivar restoration_error: If swapping back to the originally opened statement failed,
+                             its string form; otherwise None.
+    """
+
+    data: pd.DataFrame
+    period_results: List[MonthlyPeriodResult] = field(default_factory=list)
+    restoration_error: Optional[str] = None
+
+    @property
+    def successful_periods(self) -> List[MonthlyPeriodResult]:
+        return [result for result in self.period_results if result.status == MonthlyReadStatus.SUCCESS]
+
+    @property
+    def missing_periods(self) -> List[MonthlyPeriodResult]:
+        return [result for result in self.period_results if result.status == MonthlyReadStatus.MISSING]
+
+    @property
+    def parse_error_periods(self) -> List[MonthlyPeriodResult]:
+        return [result for result in self.period_results if result.status == MonthlyReadStatus.PARSE_ERROR]
+
+    @property
+    def failed_periods(self) -> List[MonthlyPeriodResult]:
+        return [
+            result for result in self.period_results
+            if result.status != MonthlyReadStatus.SUCCESS
+        ]
+
+    @property
+    def all_periods_failed(self) -> bool:
+        return bool(self.period_results) and not self.successful_periods
 
 
 @dataclass
@@ -292,34 +378,86 @@ class PDFScraper(PDFTextAnalyst):
         self.revert_to_original_pdf_file()
         return wrapper()
 
-    def monthly_iterator(self, func: Callable[..., Any], add_additional_month: bool):
-        # Convert the input string to a datetime object
-        start_date = datetime.strptime(
-            self._currently_opened_statement.split(".")[0],
-            "%Y-%B"
+    def monthly_iterator(self, func: Callable[..., Any], add_additional_month: bool) -> MonthlyReadResult:
+        """
+        Iterate through the last five years of monthly statements, one month per column.
+
+        A single missing or unparseable statement no longer aborts the whole read-back:
+        the month is recorded in the result's ``period_results`` and skipped, while all
+        remaining months are still processed. The returned frame only contains successful
+        months, each labelled with the month the values were extracted from, so columns can
+        never be shifted by a skipped month.
+
+        :param func: Zero-argument extraction function evaluated against the swapped
+                     statement (e.g. a closure reading ``self.account_value``).
+        :param add_additional_month: When True, include one extra month beyond five years.
+        :return: A MonthlyReadResult holding the month-indexed DataFrame and the per-period
+                 outcomes (success / missing / parse error). If every month fails,
+                 ``data`` is an empty DataFrame and ``period_results`` still covers all
+                 attempted months. No exception is raised for per-period failures.
+        """
+
+        statements = self._monthly_statement_paths(add_additional_month)
+
+        dataframe = pd.DataFrame()
+
+        def extract_month() -> Any:
+            return func()
+
+        def store_success(month: str, extracted_value: Any) -> None:
+            # Assigning by explicit month label keeps each value bound to its own month;
+            # skipped months simply never create a column.
+            dataframe[month] = extracted_value
+
+        return self._iterate_monthly_statements(
+            statements=statements,
+            extraction_func=extract_month,
+            store_success=store_success,
+            build_data=lambda: dataframe,
         )
-
-        schwab_statements = {}
-        additional_months = 2 if add_additional_month else 1
-
-        for months in range((12 * 5) + additional_months):
-            statement_date = (start_date - relativedelta(months=months)).strftime("%Y-%B")
-            statement_path = f"{statement_date}.pdf"
-
-            schwab_statements[statement_path] = statement_date
-
-        def wrapper():
-            dataframe = pd.DataFrame()
-            for path, month in schwab_statements.items():
-                self.swap_statement(path)
-                dataframe[month] = func()
-
-            return dataframe
-
-        return wrapper()
 
     def monthly_iterator_multi_column_frame(
-            self, func: Callable[..., Any], add_additional_month: bool, columns: List[str]):
+            self, func: Callable[..., Any], add_additional_month: bool, columns: List[str]) -> MonthlyReadResult:
+        """
+        Iterate through the last five years of monthly statements, one row per month.
+
+        Behaves like :meth:`monthly_iterator` but ``func`` is expected to return a row of
+        values aligned with ``columns``. Successful rows are stored together with their
+        month label and only assembled into the frame at the end, so a skipped month can
+        never shift a row onto the wrong month index.
+
+        :param func: Zero-argument extraction function returning one row for ``columns``.
+        :param add_additional_month: When True, include one extra month beyond five years.
+        :param columns: Column names for the resulting DataFrame.
+        :return: A MonthlyReadResult. When every month fails, ``data`` is an empty
+                 DataFrame with ``columns`` and no rows rather than an exception.
+        """
+
+        statements = self._monthly_statement_paths(add_additional_month)
+
+        successful_rows: List[Any] = []
+        successful_months: List[str] = []
+
+        def store_success(month: str, extracted_value: Any) -> None:
+            successful_months.append(month)
+            successful_rows.append(extracted_value)
+
+        def build_data() -> pd.DataFrame:
+            return pd.DataFrame(successful_rows, columns=columns, index=successful_months)
+
+        return self._iterate_monthly_statements(
+            statements=statements,
+            extraction_func=func,
+            store_success=store_success,
+            build_data=build_data,
+        )
+
+    # _________________________Monthly Iteration Helpers_________________________
+    def _monthly_statement_paths(self, add_additional_month: bool) -> Dict[str, str]:
+        """
+        Build the ordered mapping of statement file name to month label for the monthly
+        read-back, starting at the currently opened statement and walking backwards.
+        """
 
         # Convert the input string to a datetime object
         start_date = datetime.strptime(
@@ -328,7 +466,7 @@ class PDFScraper(PDFTextAnalyst):
         )
 
         additional_months = 2 if add_additional_month else 1
-        schwab_statements = {}
+        schwab_statements: Dict[str, str] = {}
 
         for months in range((12 * 5) + additional_months):
             statement_date = (start_date - relativedelta(months=months)).strftime("%Y-%B")
@@ -336,18 +474,72 @@ class PDFScraper(PDFTextAnalyst):
 
             schwab_statements[statement_path] = statement_date
 
-        def wrapper():
-            retrieved_data = []
+        return schwab_statements
 
-            for path, month in schwab_statements.items():
+    def _iterate_monthly_statements(
+            self,
+            statements: Dict[str, str],
+            extraction_func: Callable[[], Any],
+            store_success: Callable[[str, Any], None],
+            build_data: Callable[[], pd.DataFrame]) -> MonthlyReadResult:
+        """
+        Shared fault-tolerant loop backing both monthly iterators.
+
+        Each period is isolated: a missing file or any exception raised while reading the
+        statement or running ``extraction_func`` is captured as a MonthlyPeriodResult and
+        the loop continues with the next month. At the end the scraper always swaps back to
+        the statement that was opened when the iteration started, even when every period
+        failed or a restoration error occurs.
+        """
+
+        original_statement = self._currently_opened_statement
+        period_results: List[MonthlyPeriodResult] = []
+
+        for path, month in statements.items():
+            try:
                 self.swap_statement(path)
-                retrieved_data.append(func())
+                extracted_value = extraction_func()
+            except FileNotFoundError as error:
+                period_results.append(
+                    MonthlyPeriodResult(
+                        month=month,
+                        file_name=path,
+                        status=MonthlyReadStatus.MISSING,
+                        error_message=str(error),
+                    )
+                )
+                continue
+            except Exception as error:  # noqa: BLE001 - any parse/extraction failure must be isolated
+                period_results.append(
+                    MonthlyPeriodResult(
+                        month=month,
+                        file_name=path,
+                        status=MonthlyReadStatus.PARSE_ERROR,
+                        error_message=f"{type(error).__name__}: {error}",
+                    )
+                )
+                continue
 
-            dataframe = pd.DataFrame(retrieved_data, columns=columns, index=schwab_statements.values())
+            period_results.append(
+                MonthlyPeriodResult(
+                    month=month,
+                    file_name=path,
+                    status=MonthlyReadStatus.SUCCESS,
+                )
+            )
+            store_success(month, extracted_value)
 
-            return dataframe
+        restoration_error: Optional[str] = None
+        try:
+            self.swap_statement(original_statement)
+        except Exception as error:  # noqa: BLE001 - surface restoration failure without masking results
+            restoration_error = f"{type(error).__name__}: {error}"
 
-        return wrapper()
+        return MonthlyReadResult(
+            data=build_data(),
+            period_results=period_results,
+            restoration_error=restoration_error,
+        )
 
     # _________________________Class Methods_________________________
     def revert_to_original_pdf_file(self):
@@ -359,11 +551,14 @@ class PDFScraper(PDFTextAnalyst):
 
         This method replaces the current PDF content with the content of a new PDF file.
         It reads and extracts the text content from each page of the new PDF and updates the internal PDF dictionary.
+        The actual reading is delegated to the module-level ``pdf_text_reader`` seam so it
+        can be replaced with a stub for testing or alternative storage.
 
         :param new_file_name: The name of the new PDF file.
+        :raises FileNotFoundError: If the new statement file does not exist.
         """
         # Read and extract text content from each page of the new PDF
-        new_pdf_content = _read_pdf(new_file_name)
+        new_pdf_content = pdf_text_reader(new_file_name)
 
         # Update the internal PDF dictionary with the new PDF content
         self._pdf_file = new_pdf_content

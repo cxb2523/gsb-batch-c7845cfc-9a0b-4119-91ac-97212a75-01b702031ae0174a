@@ -89,7 +89,56 @@ The `PDFScraper` class provides various methods to extract and process data rela
 
 - `treasuries_dataframe()` - Retrieves investment details for U.S. Treasuries from the PDF statement and returns them as a DataFrame.
 
-- `swap_statement(new_file_name: str)` - Swaps the PDF content with a new PDF file, updating the internal PDF dictionary.
+- `swap_statement(new_file_name: str)` - Swaps the PDF content with a new PDF file, updating the internal PDF dictionary. Reading is performed through the replaceable module-level `pdf_text_reader` callable (defaults to `_read_pdf`), which can be substituted with a stub for testing or an alternative storage backend.
+
+## Fault-Tolerant Monthly Read-Back
+
+`monthly_iterator(func, add_additional_month)` and
+`monthly_iterator_multi_column_frame(func, add_additional_month, columns)` walk the
+statements from the currently opened month backwards across five years (60 or 61 monthly
+periods). A single missing or unparseable statement no longer aborts the whole read-back.
+
+### Per-period isolation
+
+For every attempted month, one of three outcomes is recorded:
+
+- `MonthlyReadStatus.SUCCESS` (`"success"`) — statement read and `func` returned a value.
+- `MonthlyReadStatus.MISSING` (`"missing"`) — no statement file for the month
+  (`FileNotFoundError` while reading).
+- `MonthlyReadStatus.PARSE_ERROR` (`"parse_error"`) — the file could not be parsed, or
+  `func` raised any other exception. The exception type and message are retained.
+
+Failed months are skipped and the loop continues with the next month. Successful values
+are bound to their explicit month labels, not to a positional slot, so skipping a month
+can never shift columns or rows onto the wrong month.
+
+### Return value: `MonthlyReadResult`
+
+Both iterators return a `MonthlyReadResult` dataclass instead of raising:
+
+- `data: pd.DataFrame` — contains only successful months. `monthly_iterator` uses month
+  labels as columns; `monthly_iterator_multi_column_frame` uses them as the row index with
+  the supplied `columns`.
+- `period_results: List[MonthlyPeriodResult]` — one entry per attempted month (all of
+  them, in iteration order), each holding `month`, `file_name`, `status` and, on failure,
+  `error_message`.
+- Convenience views: `successful_periods`, `missing_periods`, `parse_error_periods`,
+  `failed_periods`, and `all_periods_failed`.
+- `restoration_error` — string form of the error if swapping back to the originally
+  opened statement failed at the end; otherwise `None`. The restoration is always
+  attempted and never masks the collected data.
+
+If every month fails, `data` is an empty `DataFrame` (with the requested columns for the
+multi-column variant), no exception is raised, and `period_results` still covers every
+attempted month.
+
+### Statement restoration
+
+Before iterating, the currently opened statement file name is captured. After the loop the
+scraper always swaps back to that file, regardless of how many periods failed. Note that
+`swap_statement` only updates the opened file after a successful read, so if the original
+statement is itself missing or unparseable the scraper remains on the last successfully
+opened statement and the failure is reported through `restoration_error`.
 
 **Note:** The above methods return Pandas DataFrames containing the extracted data, making it easy to analyze and work with the financial data.
 
