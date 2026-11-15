@@ -1,0 +1,429 @@
+"""
+Sofascore service module
+"""
+
+from __future__ import annotations
+
+from ..exceptions import SourceBlocked
+from ..logger import get_logger
+from ..utils import (
+    BrowserSession,
+    TTLCache,
+    fetch_many,
+    get_api_json,
+    get_json_playwright,
+    get_today,
+)
+from .endpoints import SofascoreEndpoints
+from .types import (
+    Bracket,
+    Category,
+    Comment,
+    EntityType,
+    Event,
+    Incident,
+    Lineups,
+    MatchStats,
+    Player,
+    PlayerAttributes,
+    Season,
+    Shot,
+    Standing,
+    Team,
+    TopPlayersMatch,
+    TopTournamentPlayers,
+    TopTournamentTeams,
+    Tournament,
+    TransferHistory,
+    parse_brackets,
+    parse_comments,
+    parse_event,
+    parse_events,
+    parse_incidents,
+    parse_lineups,
+    parse_match_stats,
+    parse_player,
+    parse_player_attributes,
+    parse_seasons,
+    parse_shots,
+    parse_standings,
+    parse_team,
+    parse_top_players_match,
+    parse_top_tournament_players,
+    parse_top_tournament_teams,
+    parse_tournament,
+    parse_tournaments,
+    parse_transfer_history,
+)
+
+_logger = get_logger("sofascore.service")
+
+_CACHE_TTL = 30.0
+
+
+class SofascoreService:
+    """
+    A class to represent the SofaScore service.
+    """
+
+    def __init__(
+        self,
+        proxies: dict = None,
+        use_playwright: bool = False,
+        chrome_path: str = None,
+        headless: bool = False,
+    ) -> None:
+        self.proxies = proxies
+        self.use_playwright = use_playwright
+        self.chrome_path = chrome_path
+        self.headless = headless
+        self.endpoints = SofascoreEndpoints()
+        self._cache = TTLCache(ttl=_CACHE_TTL, maxsize=256)
+        self._browser = (
+            BrowserSession(chrome_path, proxies, headless) if use_playwright else None
+        )
+
+    def __enter__(self) -> SofascoreService:
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        self.close()
+
+    def close(self) -> None:
+        """Close the reused browser, if any."""
+        if self._browser is not None:
+            self._browser.close()
+            self._browser = None
+
+    def _get_json(self, url: str) -> dict:
+        """Fetch JSON from a Sofascore endpoint, falling back to Playwright."""
+        cached = self._cache.get(url)
+        if cached is not None:
+            return cached
+        try:
+            data = get_api_json(url, proxies=self.proxies)
+        except SourceBlocked:
+            if not self.use_playwright:
+                raise
+            data = get_json_playwright(
+                url,
+                self.chrome_path,
+                self.proxies,
+                headless=self.headless,
+                session=self._browser,
+            )
+        if data:
+            self._cache.set(url, data)
+        return data
+
+    def get_event(self, event_id: int) -> Event:
+        _logger.debug("get_event(event_id=%s)", event_id)
+        try:
+            url = self.endpoints.event_endpoint(event_id)
+            data = self._get_json(url).get("event", {})
+            return parse_event(data) if data else Event()
+        except Exception as exc:
+            raise exc
+
+    def get_events(self, date: str = "today") -> list[Event]:
+        _logger.debug("get_events(date=%s)", date)
+        if date == "today":
+            date = get_today()
+        try:
+            url = self.endpoints.events_endpoint.format(date=date)
+            return parse_events(self._get_json(url).get("events", []))
+        except Exception as exc:
+            raise exc
+
+    def get_live_events(self) -> list[Event]:
+        _logger.debug("get_live_events()")
+        try:
+            url = self.endpoints.live_events_endpoint
+            return parse_events(self._get_json(url).get("events", []))
+        except Exception as exc:
+            raise exc
+
+    def get_player(self, player_id: int) -> Player:
+        _logger.debug("get_player(player_id=%s)", player_id)
+        try:
+            url = self.endpoints.player_endpoint(player_id)
+            if not self.use_playwright:
+                data, attrs, transfers = fetch_many(
+                    [
+                        lambda: self._get_json(url),
+                        lambda: self.get_player_attributes(player_id),
+                        lambda: self.get_player_transfer_history(player_id),
+                    ],
+                    max_workers=3,
+                )
+                if "player" in data:
+                    player = parse_player(data["player"])
+                    player.attributes = attrs
+                    player.transfer_history = transfers
+                    return player
+                return Player()
+            data = self._get_json(url)
+            if "player" in data:
+                player = parse_player(data["player"])
+                player.attributes = self.get_player_attributes(player_id)
+                player.transfer_history = self.get_player_transfer_history(player_id)
+                return player
+            return Player()
+        except Exception as exc:
+            raise exc
+
+    def get_player_attributes(self, player_id: int) -> PlayerAttributes:
+        try:
+            url = self.endpoints.player_attributes_endpoint(player_id)
+            data = self._get_json(url)
+            if "playerAttributes" in data:
+                return parse_player_attributes(data["playerAttributes"])
+            return PlayerAttributes()
+        except Exception as exc:
+            raise exc
+
+    def get_player_transfer_history(self, player_id: int) -> TransferHistory:
+        try:
+            url = self.endpoints.player_transfer_history_endpoint(player_id)
+            data = self._get_json(url)
+            if data is not None:
+                return parse_transfer_history(data)
+            return TransferHistory()
+        except Exception as exc:
+            raise exc
+
+    def get_player_stats(self, player_id: int) -> dict:
+        try:
+            url = self.endpoints.player_stats_endpoint(player_id)
+            return self._get_json(url)
+        except Exception as exc:
+            raise exc
+
+    def get_match_lineups(self, event_id: int) -> Lineups:
+        try:
+            url = self.endpoints.match_lineups_endpoint(event_id)
+            return parse_lineups(self._get_json(url))
+        except Exception as exc:
+            raise exc
+
+    def get_match_incidents(self, event_id: int) -> list[Incident]:
+        try:
+            url = self.endpoints.match_events_endpoint(event_id)
+            data = self._get_json(url).get("incidents", [])
+            return parse_incidents(data)
+        except Exception as exc:
+            raise exc
+
+    def get_match_top_players(self, event_id: int) -> TopPlayersMatch:
+        try:
+            url = self.endpoints.match_top_players_endpoint(event_id)
+            return parse_top_players_match(self._get_json(url))
+        except Exception as exc:
+            raise exc
+
+    def get_match_comments(self, event_id: int) -> list[Comment]:
+        try:
+            url = self.endpoints.match_comments_endpoint(event_id)
+            data = self._get_json(url).get("comments", [])
+            return parse_comments(data)
+        except Exception as exc:
+            raise exc
+
+    def get_match_stats(self, event_id: int) -> MatchStats:
+        try:
+            stats_url = self.endpoints.match_stats_endpoint(event_id)
+            prob_url = self.endpoints.match_probabilities_endpoint(event_id)
+            if not self.use_playwright:
+                stats_res, prob_res = fetch_many(
+                    [
+                        lambda: self._get_json(stats_url),
+                        lambda: self._get_json(prob_url),
+                    ],
+                    max_workers=2,
+                )
+            else:
+                stats_res = self._get_json(stats_url)
+                prob_res = self._get_json(prob_url)
+            data = stats_res.get("statistics", {})
+            win_probabilities = prob_res.get("winProbability", {})
+            return parse_match_stats(data, win_probabilities)
+        except Exception as exc:
+            raise exc
+
+    def get_match_shots(self, event_id: int) -> list[Shot]:
+        try:
+            url = self.endpoints.match_shots_endpoint(event_id)
+            data = self._get_json(url)
+            if "shotmap" in data:
+                return parse_shots(data["shotmap"])
+            return []
+        except Exception as exc:
+            raise exc
+
+    def get_team(self, team_id: int) -> Team:
+        _logger.debug("get_team(team_id=%s)", team_id)
+        try:
+            url = self.endpoints.team_endpoint(team_id)
+            data = self._get_json(url).get("team", {})
+            return parse_team(data) if data else Team()
+        except Exception as exc:
+            raise exc
+
+    def get_team_players(self, team_id: int) -> list[Player]:
+        try:
+            url = self.endpoints.team_players_endpoint(team_id)
+            return [
+                parse_player(player["player"])
+                for player in self._get_json(url).get("players", [])
+                if "player" in player
+            ]
+        except Exception as exc:
+            raise exc
+
+    def get_team_events(self, team_id: int, upcoming: bool, page: int) -> list[Event]:
+        try:
+            url = self.endpoints.team_events_endpoint(team_id, upcoming, page)
+            data = self._get_json(url)
+            if "events" in data:
+                return parse_events(data["events"])
+            return []
+        except Exception as exc:
+            raise exc
+
+    def get_tournaments_by_category(self, category_id: Category) -> list[Tournament]:
+        if not isinstance(category_id, Category):
+            raise ValueError("category_id must be an instance of Category Enum")
+        try:
+            url = self.endpoints.tournaments_endpoint(category_id.value)
+            groups = self._get_json(url).get("groups", [])
+            data = groups[0].get("uniqueTournaments", []) if groups else []
+            return parse_tournaments(data)
+        except Exception as exc:
+            raise exc
+
+    def get_tournament_seasons(self, tournament_id: int) -> list[Season]:
+        try:
+            url = self.endpoints.tournament_seasons_endpoint(tournament_id)
+            data = self._get_json(url).get("seasons", [])
+            return parse_seasons(data)
+        except Exception as exc:
+            raise exc
+
+    def get_tournament_bracket(
+        self, tournament_id: int | Tournament, season_id: int | Season
+    ) -> list[Bracket]:
+        try:
+            if isinstance(tournament_id, Tournament):
+                tournament_id = tournament_id.id
+            if isinstance(season_id, Season):
+                season_id = season_id.id
+            url = self.endpoints.tournament_bracket_endpoint(tournament_id, season_id)
+            data = self._get_json(url).get("cupTrees", [])
+            return parse_brackets(data)
+        except Exception as exc:
+            raise exc
+
+    def get_tournament_standings(
+        self, tournament_id: int | Tournament, season_id: int | Season
+    ) -> list[Standing]:
+        try:
+            if isinstance(tournament_id, Tournament):
+                tournament_id = tournament_id.id
+            if isinstance(season_id, Season):
+                season_id = season_id.id
+            url = self.endpoints.tournament_standings_endpoint(tournament_id, season_id)
+            data = self._get_json(url).get("standings", [])
+            return parse_standings(data)
+        except Exception as exc:
+            raise exc
+
+    def get_tournament_top_teams(
+        self, tournament_id: int | Tournament, season_id: int | Season
+    ) -> TopTournamentTeams:
+        try:
+            if isinstance(tournament_id, Tournament):
+                tournament_id = tournament_id.id
+            if isinstance(season_id, Season):
+                season_id = season_id.id
+            url = self.endpoints.tournament_topteams_endpoint(tournament_id, season_id)
+            response = self._get_json(url)
+            if "topTeams" in response:
+                return parse_top_tournament_teams(response["topTeams"])
+            return TopTournamentTeams()
+        except Exception as exc:
+            raise exc
+
+    def get_tournament_top_players(
+        self, tournament_id: int | Tournament, season_id: int | Season
+    ) -> TopTournamentPlayers:
+        try:
+            if isinstance(tournament_id, Tournament):
+                tournament_id = tournament_id.id
+            if isinstance(season_id, Season):
+                season_id = season_id.id
+            url = self.endpoints.tournament_topplayers_endpoint(
+                tournament_id, season_id
+            )
+            data = self._get_json(url)
+            if "topPlayers" in data:
+                return parse_top_tournament_players(data["topPlayers"])
+            return TopTournamentPlayers()
+        except Exception as exc:
+            raise exc
+
+    def get_tournament_events(
+        self,
+        tournament_id: int | Tournament,
+        season_id: int | Season,
+        upcoming: bool,
+        page: int,
+    ) -> list[Event]:
+        try:
+            if isinstance(tournament_id, Tournament):
+                tournament_id = tournament_id.id
+            if isinstance(season_id, Season):
+                season_id = season_id.id
+            url = self.endpoints.tournament_events_endpoint(
+                tournament_id, season_id, upcoming, page
+            )
+            data = self._get_json(url)
+            if "events" in data:
+                return parse_events(data["events"])
+            return []
+        except Exception as exc:
+            raise exc
+
+    def search(
+        self, query: str, entity: EntityType = EntityType.ALL
+    ) -> list[Event | Team | Player | Tournament]:
+        _logger.debug("search(query=%s, entity=%s)", query, entity)
+        try:
+            entity_type = entity.value
+            url = self.endpoints.search_endpoint(query=query, entity_type=entity_type)
+            results = self._get_json(url).get("results", [])
+
+            specific_parsers = {
+                EntityType.TEAM: parse_team,
+                EntityType.PLAYER: parse_player,
+                EntityType.EVENT: parse_event,
+                EntityType.TOURNAMENT: parse_tournament,
+            }
+
+            if entity == EntityType.ALL:
+                type_parsers = {
+                    "team": parse_team,
+                    "player": parse_player,
+                    "event": parse_event,
+                    "uniqueTournament": parse_tournament,
+                }
+                entities = []
+                for result in results:
+                    result_type = result.get("type")
+                    entity_data = result.get("entity")
+                    parser = type_parsers.get(result_type, lambda x: x)
+                    entities.append(parser(entity_data))
+                return entities
+            parser = specific_parsers.get(entity, lambda x: x)
+            return [parser(result.get("entity")) for result in results]
+        except Exception as exc:
+            raise exc
