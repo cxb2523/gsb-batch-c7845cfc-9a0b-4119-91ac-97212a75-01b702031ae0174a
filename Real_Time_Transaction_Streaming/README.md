@@ -84,6 +84,31 @@ curl -s -X POST http://localhost:5000/webhook/c2b/confirmation \
   -d '{"TransID":"TXN123","TransAmount":"500","MSISDN":"254712345678","AccountReference":"ACC001","TransTime":"20260514120000"}'
 ```
 
+### Callback backlog (persist first, then deliver)
+
+C2B confirmation and B2C result callbacks are acknowledged with `200` as soon
+as the payload is valid. If Kafka publishing fails (exception, `False` return,
+or producer init error) the raw callback is written to the Postgres table
+`webhook_callback_backlog` instead, so every callback is either in Kafka or in
+the backlog — never lost to a `500`. Successful deliveries never create a row.
+
+Rows record `callback_type`, the raw `payload` JSON, `failure_reason`,
+`received_at`, `retry_count` and `status` (`pending`/`delivered`/`failed`).
+The backlog API requires `UI_TOKEN` (via `X-UI-Token` header or `?token=`); it
+returns `401` when the token is missing or wrong, and fails closed if
+`UI_TOKEN` is not configured.
+
+```bash
+# List pending backlog rows
+curl -s -H "X-UI-Token: $UI_TOKEN" 'http://localhost:5000/admin/backlog?status=pending'
+
+# Replay one row (marks delivered on success, keeps pending and bumps retry_count on failure)
+curl -s -X POST -H "X-UI-Token: $UI_TOKEN" http://localhost:5000/admin/backlog/1/retry
+```
+
+Replaying an already-`delivered` row returns `409 already_delivered` and does
+not publish again; an unknown id returns `404`.
+
 ## DBT
 This project ships a local dbt config under `dbt/`:
 ```bash

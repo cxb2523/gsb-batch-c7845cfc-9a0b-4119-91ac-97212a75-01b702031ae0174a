@@ -5,16 +5,19 @@ Receives and processes C2B validation/confirmation and B2C result callbacks
 from Safaricom Daraja API.
 """
 
+import hmac
+import json
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from time import time
-from typing import Any, Dict, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
 
 import psycopg2
 from flask import Flask, jsonify, redirect, request, send_from_directory
 from pythonjsonlogger import jsonlogger
 
+from ingestion.callback_backlog import CallbackBacklogStore
 from schemas.transaction_schema import C2BConfirmationRequest, C2BValidationRequest
 
 logger = logging.getLogger(__name__)
@@ -133,11 +136,15 @@ def _configure_logging() -> None:
         handler.setFormatter(formatter)
 
 
-def create_app() -> Flask:
+def create_app(backlog_store: Optional[CallbackBacklogStore] = None) -> Flask:
     """Create and configure Flask application for webhook receiver.
 
     Sets up routes for C2B validation/confirmation and B2C result callbacks.
     Initializes Kafka producer if brokers are configured.
+
+    Args:
+        backlog_store: Optional pre-built backlog store (used by tests). When
+            omitted, a Postgres-backed store is created lazily on first use.
 
     Returns:
         Flask application instance
@@ -191,13 +198,26 @@ def create_app() -> Flask:
     processor = WebhookProcessor()
 
     def _require_ui_token() -> bool:
+        """Legacy UI guard: open when UI_TOKEN is unset."""
         if not ui_token:
             return True
-        provided = (
+        return _provided_ui_token() == ui_token
+
+    def _provided_ui_token() -> str:
+        return (
             request.headers.get("X-UI-Token", "").strip()
             or request.args.get("token", "").strip()
         )
-        return provided == ui_token
+
+    def _require_admin_token() -> bool:
+        """Guard for the backlog API: always requires a matching UI_TOKEN.
+
+        Fails closed when ``UI_TOKEN`` is not configured, so the retry
+        endpoints can never be invoked unauthenticated by accident.
+        """
+        if not ui_token:
+            return False
+        return hmac.compare_digest(_provided_ui_token(), ui_token)
 
     def _pg_connect():
         return psycopg2.connect(
@@ -208,6 +228,113 @@ def create_app() -> Flask:
             password=os.getenv("POSTGRES_PASSWORD", ""),
             connect_timeout=3,
         )
+
+    _backlog = backlog_store
+
+    def get_backlog_store() -> CallbackBacklogStore:
+        nonlocal _backlog
+        if _backlog is None:
+            _backlog = CallbackBacklogStore(_pg_connect)
+        return _backlog
+
+    def _publish_c2b_confirmation(producer, payload: Dict[str, Any]) -> bool:
+        return producer.publish_transaction(
+            payload,
+            key=payload.get("MSISDN"),
+            event_type="c2b_confirmation",
+        )
+
+    def _publish_b2c_result(producer, payload: Dict[str, Any]) -> bool:
+        return producer.publish_event(
+            event={
+                "event_type": "b2c_result",
+                "received_at": datetime.now(timezone.utc).isoformat(),
+                "data": payload,
+            }
+        )
+
+    _PUBLISHERS: Dict[str, Callable[[Any, Dict[str, Any]], bool]] = {
+        "c2b_confirmation": _publish_c2b_confirmation,
+        "b2c_result": _publish_b2c_result,
+    }
+
+    def _capture_to_backlog(
+        callback_type: str, payload: Dict[str, Any], failure_reason: str
+    ) -> Optional[int]:
+        """Write a failed callback to the backlog; never raises."""
+        try:
+            record_id = get_backlog_store().record(
+                callback_type=callback_type,
+                payload=payload,
+                failure_reason=failure_reason,
+                received_at=datetime.now(timezone.utc),
+            )
+            logger.error(
+                "Callback %s could not be delivered to Kafka; stored in backlog id=%s: %s",
+                callback_type,
+                record_id,
+                failure_reason,
+            )
+            return record_id
+        except Exception as exc:
+            # Both Kafka and Postgres are unavailable. Keep the callback
+            # acknowledged to avoid a Safaricom retry storm, but make the loss
+            # loud in the logs so it can be recovered from the request log.
+            logger.critical(
+                "Callback %s lost: Kafka delivery failed (%s) and backlog write failed (%s). "
+                "payload=%s",
+                callback_type,
+                failure_reason,
+                exc,
+                json.dumps(payload, default=str),
+            )
+            return None
+
+    def _attempt_publish(
+        callback_type: str, payload: Dict[str, Any]
+    ) -> Tuple[bool, str]:
+        """Try to publish a callback exactly once.
+
+        Returns:
+            ``(delivered, failure_reason)``. ``delivered`` is True only when
+            the publisher reported success; a missing producer counts as a
+            failure so callers do not silently drop callbacks.
+        """
+        publish = _PUBLISHERS[callback_type]
+        try:
+            producer = get_producer()
+        except Exception as exc:
+            return False, f"producer init failed: {exc}"
+        if producer is None:
+            return False, "kafka producer unavailable"
+        try:
+            delivered = publish(producer, payload)
+            if delivered is None:
+                delivered = True
+        except Exception as exc:
+            return False, f"kafka publish failed: {exc}"
+        if not delivered:
+            return False, "kafka publish reported failure"
+        return True, ""
+
+    def _deliver_callback(callback_type: str, payload: Dict[str, Any]) -> bool:
+        """Publish a callback, persisting it to the backlog on any failure.
+
+        Returns:
+            True when the callback reached Kafka (or Kafka is not configured at
+            all), False when it was parked in the backlog or could not be
+            persisted.
+        """
+        if not kafka_brokers:
+            # No producer configured means nothing is expected in Kafka; the
+            # receiver intentionally does not queue every callback in that mode.
+            return True
+
+        delivered, failure_reason = _attempt_publish(callback_type, payload)
+        if delivered:
+            return True
+        _capture_to_backlog(callback_type, payload, failure_reason)
+        return False
 
     def _rate_limited(route_key: str) -> bool:
         if rate_limit_per_min <= 0:
@@ -327,6 +454,10 @@ def create_app() -> Flask:
 
         Processes completed customer-to-business transactions with full
         transaction details and account balance information.
+
+        Always acknowledges with 200 once the payload is valid: when Kafka
+        delivery fails the raw callback is parked in the Postgres backlog so
+        Safaricom does not retry and the transaction is not lost.
         """
         try:
             if _rate_limited("c2b_confirmation"):
@@ -337,13 +468,7 @@ def create_app() -> Flask:
             payload = processor._validate_payload(payload)
             logger.debug("Received C2B confirmation callback")
             processor.process_c2b_confirmation(payload)
-            producer = get_producer()
-            if producer:
-                producer.publish_transaction(
-                    payload,
-                    key=payload.get("MSISDN"),
-                    event_type="c2b_confirmation",
-                )
+            _deliver_callback("c2b_confirmation", payload)
             return jsonify({"status": "received"}), 200
         except Exception as e:
             logger.error("Webhook confirmation error: %s", str(e))
@@ -351,7 +476,11 @@ def create_app() -> Flask:
 
     @app.route("/webhook/b2c/result", methods=["POST"])
     def b2c_result():
-        """Handle B2C result callback from Safaricom (payout completion)."""
+        """Handle B2C result callback from Safaricom (payout completion).
+
+        Same acknowledgement contract as the C2B confirmation route: delivery
+        failures are persisted to the backlog instead of failing the request.
+        """
         try:
             if _rate_limited("b2c_result"):
                 return jsonify({"status": "error", "error": "rate_limited"}), 429
@@ -361,19 +490,187 @@ def create_app() -> Flask:
             payload = processor._validate_payload(payload)
             logger.debug("Received B2C result callback")
             processor.process_b2c_result(payload)
-            producer = get_producer()
-            if producer:
-                producer.publish_event(
-                    event={
-                        "event_type": "b2c_result",
-                        "received_at": datetime.now().isoformat(),
-                        "data": payload,
-                    }
-                )
+            _deliver_callback("b2c_result", payload)
             return jsonify({"status": "received"}), 200
         except Exception as e:
             logger.error("Webhook B2C error: %s", str(e))
             return jsonify({"status": "error"}), 500
+
+    def _serialize_backlog_record(record: Dict[str, Any]) -> Dict[str, Any]:
+        def _iso(value: Any) -> Optional[str]:
+            return value.isoformat() if hasattr(value, "isoformat") else value
+
+        return {
+            "id": record.get("id"),
+            "callback_type": record.get("callback_type"),
+            "payload": record.get("payload"),
+            "failure_reason": record.get("failure_reason"),
+            "received_at": _iso(record.get("received_at")),
+            "retry_count": record.get("retry_count"),
+            "status": record.get("status"),
+            "last_attempt_at": _iso(record.get("last_attempt_at")),
+            "delivered_at": _iso(record.get("delivered_at")),
+        }
+
+    def _decode_payload(raw: Any) -> Optional[Dict[str, Any]]:
+        """Decode a stored JSONB payload into a dict (strings tolerated)."""
+        if isinstance(raw, dict):
+            return raw
+        if isinstance(raw, (str, bytes, bytearray)):
+            try:
+                decoded = json.loads(raw)
+            except (TypeError, ValueError):
+                return None
+            return decoded if isinstance(decoded, dict) else None
+        return None
+
+    @app.route("/admin/backlog", methods=["GET"])
+    def list_backlog():
+        """List pending/delivered/failed callbacks awaiting re-delivery.
+
+        Protected by ``UI_TOKEN``; requires a matching ``X-UI-Token`` header or
+        ``?token=`` query parameter and fails closed when unset.
+        """
+        if not _require_admin_token():
+            return jsonify({"error": "unauthorized"}), 401
+        status = (request.args.get("status") or "").strip() or None
+        if status is not None and status not in ("pending", "delivered", "failed"):
+            return jsonify({"error": "invalid_status"}), 400
+        raw_limit = (request.args.get("limit") or "100").strip()
+        try:
+            limit = int(raw_limit)
+        except ValueError:
+            return jsonify({"error": "invalid_limit"}), 400
+        try:
+            records = get_backlog_store().list_records(status=status, limit=limit)
+        except ValueError:
+            return jsonify({"error": "invalid_request"}), 400
+        except Exception as e:
+            logger.error("Backlog list error: %s", str(e))
+            return jsonify({"error": "backlog_unavailable"}), 500
+        return (
+            jsonify(
+                {
+                    "status": status or "all",
+                    "count": len(records),
+                    "records": [_serialize_backlog_record(r) for r in records],
+                }
+            ),
+            200,
+        )
+
+    @app.route("/admin/backlog/<int:record_id>/retry", methods=["POST"])
+    def retry_backlog(record_id: int):
+        """Re-publish a single backlog record to Kafka.
+
+        - 401 when ``UI_TOKEN`` is missing or does not match.
+        - 404 when the record id does not exist.
+        - 409 when the record was already delivered (no second send).
+        - On success the record becomes ``delivered`` and ``retry_count`` grows.
+        - On delivery failure the record stays ``pending`` and ``retry_count``
+          grows.
+        """
+        if not _require_admin_token():
+            return jsonify({"error": "unauthorized"}), 401
+
+        store = get_backlog_store()
+        try:
+            record = store.get_record(record_id)
+        except Exception as e:
+            logger.error("Backlog lookup error: %s", str(e))
+            return jsonify({"error": "backlog_unavailable"}), 500
+        if record is None:
+            return jsonify({"error": "not_found", "id": record_id}), 404
+        if record.get("status") == "delivered":
+            return (
+                jsonify(
+                    {
+                        "error": "already_delivered",
+                        "id": record_id,
+                        "status": "delivered",
+                        "retry_count": record.get("retry_count"),
+                    }
+                ),
+                409,
+            )
+
+        callback_type = record.get("callback_type")
+        payload = _decode_payload(record.get("payload"))
+        if callback_type not in _PUBLISHERS or payload is None:
+            return jsonify({"error": "unsupported_record", "id": record_id}), 422
+
+        delivered, failure_reason = _attempt_publish(callback_type, payload)
+
+        if delivered:
+            updated = store.mark_delivered(record_id)
+            if updated is None:
+                # Lost a race with another worker: already delivered.
+                current = store.get_record(record_id) or {}
+                return (
+                    jsonify(
+                        {
+                            "error": "already_delivered",
+                            "id": record_id,
+                            "status": current.get("status", "delivered"),
+                            "retry_count": current.get("retry_count"),
+                        }
+                    ),
+                    409,
+                )
+            logger.info(
+                "Backlog record %s (%s) re-delivered after %s retries",
+                record_id,
+                callback_type,
+                updated["retry_count"],
+            )
+            return (
+                jsonify(
+                    {
+                        "id": record_id,
+                        "status": updated["status"],
+                        "retry_count": updated["retry_count"],
+                        "delivered_at": (
+                            updated["delivered_at"].isoformat()
+                            if hasattr(updated["delivered_at"], "isoformat")
+                            else updated["delivered_at"]
+                        ),
+                    }
+                ),
+                200,
+            )
+
+        updated = store.mark_retry_failed(record_id, failure_reason)
+        if updated is None:
+            current = store.get_record(record_id) or {}
+            return (
+                jsonify(
+                    {
+                        "error": "already_delivered",
+                        "id": record_id,
+                        "status": current.get("status", "delivered"),
+                        "retry_count": current.get("retry_count"),
+                    }
+                ),
+                409,
+            )
+        logger.warning(
+            "Backlog record %s (%s) retry failed: %s",
+            record_id,
+            callback_type,
+            failure_reason,
+        )
+        return (
+            jsonify(
+                {
+                    "error": "delivery_failed",
+                    "id": record_id,
+                    "status": updated["status"],
+                    "retry_count": updated["retry_count"],
+                    "failure_reason": failure_reason,
+                }
+            ),
+            502,
+        )
 
     @app.route("/health", methods=["GET"])
     def health_check():
