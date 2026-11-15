@@ -3,22 +3,27 @@ import json
 import logging
 from bs4 import BeautifulSoup
 from src import session
+from src.outcomes import SourceFetchError, VersionNotFoundError
 
 base_url = "https://www.apkmirror.com"
 
-def get_download_link(version: str, app_name: str, config: dict, arch: str = None) -> str: 
+def get_download_link(version: str, app_name: str, config: dict, arch: str = None) -> str:
     target_arch = arch if arch else config.get('arch', 'universal')
-    
+
     criteria = [config['type'], target_arch, config['dpi']]
-    
+
     # --- UNIVERSAL URL FINDER WITH VALIDATION ---
     version_parts = version.split('.')
     found_soup = None
     correct_version_page = False
-    
+
     # Use release_prefix if available, otherwise use app name
     release_name = config.get('release_prefix', config['name'])
-    
+
+    # Probe failures are distinct from "this URL has no such release": only the
+    # former should be reported as an error outcome for the source.
+    probe_errors = []
+
     # Loop backwards: Try full version, then strip parts
     for i in range(len(version_parts), 0, -1):
         current_ver_str = "-".join(version_parts[:i])
@@ -112,23 +117,36 @@ def get_download_link(version: str, app_name: str, config: dict, arch: str = Non
                 elif response.status_code == 404:
                     continue
                 else:
+                    # 403/429/5xx mean the source failed, not that the release
+                    # is absent — keep it distinguishable from "not found".
                     logging.warning(f"URL {url} returned status {response.status_code}")
+                    probe_errors.append(f"{url}: HTTP {response.status_code}")
                     continue
                     
             except Exception as e:
                 logging.warning(f"Error checking {url}: {str(e)[:50]}")
+                probe_errors.append(f"{url}: {e}")
                 continue
-        
+
         if correct_version_page:
             break  # Found correct page for this version part
-    
+
     # If we didn't find the exact version page but found a fallback
     if not correct_version_page and found_soup:
         logging.warning(f"Using fallback page for {app_name} {version} (may contain multiple versions)")
-    
+
     if not found_soup:
-        logging.error(f"Could not find any release page for {app_name} {version}")
-        return None
+        if probe_errors:
+            raise SourceFetchError(
+                f"APKMirror release pages could not be fetched/parsed for "
+                f"{app_name} {version}: {probe_errors[0]} "
+                f"({len(probe_errors)} failing probe(s))",
+                stage="download_link",
+            )
+        raise VersionNotFoundError(
+            f"APKMirror has no release page for {app_name} {version}",
+            stage="download_link",
+        )
     
     # --- VARIANT FINDER (works with both exact pages and fallback pages) ---
     rows = found_soup.find_all('div', class_='table-row headerFont')
@@ -170,7 +188,10 @@ def get_download_link(version: str, app_name: str, config: dict, arch: str = Non
         logging.debug(f"Found {len(rows)} rows total")
         for idx, row in enumerate(rows[:5]):  # First 5 rows
             logging.debug(f"Row {idx}: {row.get_text()[:100]}...")
-        return None
+        raise VersionNotFoundError(
+            f"APKMirror has no variant for {app_name} {version} matching {criteria}",
+            stage="download_link",
+        )
     
     # --- STANDARD DOWNLOAD FLOW ---
     try:
@@ -193,31 +214,17 @@ def get_download_link(version: str, app_name: str, config: dict, arch: str = Non
             if button:
                 return base_url + button['href']
     except Exception as e:
-        logging.error(f"Error in download flow: {e}")
-    
-    return None
+        raise SourceFetchError(
+            f"APKMirror variant/download page failed for {app_name} {version}: {e}",
+            stage="download_link",
+        ) from e
 
-    # --- STANDARD DOWNLOAD FLOW (Page 2 -> Page 3 -> Link) ---
-    response = session.get(download_page_url)
-    response.raise_for_status()
-    content_size = len(response.content)
-    logging.info(f"URL:{response.url} [{content_size}/{content_size}] -> Variant Page")
-    soup = BeautifulSoup(response.content, "html.parser")
-
-    sub_url = soup.find('a', class_='downloadButton')
-    if sub_url:
-        final_download_page_url = base_url + sub_url['href']
-        response = session.get(final_download_page_url)
-        response.raise_for_status()
-        content_size = len(response.content)
-        logging.info(f"URL:{response.url} [{content_size}/{content_size}] -> Download Page")
-        soup = BeautifulSoup(response.content, "html.parser")
-
-        button = soup.find('a', id='download-link')
-        if button:
-            return base_url + button['href']
-
-    return None
+    # Pages were reachable but the download button markup could not be parsed;
+    # that is a scrape failure, not proof the version is absent.
+    raise SourceFetchError(
+        f"APKMirror download button not found for {app_name} {version}",
+        stage="download_link",
+    )
 
 def get_architecture_criteria(arch: str) -> dict:
     """Map architecture names to APKMirror criteria"""
@@ -229,7 +236,8 @@ def get_architecture_criteria(arch: str) -> dict:
     return arch_mapping.get(arch, "universal")
     
 def get_latest_version(app_name: str, config: dict) -> str:
-    # First try: get from main app page
+    # First try: get from main app page (best-effort; the uploads listing below
+    # is the authoritative path, so a bad probe here is not a source failure).
     try:
         main_url = f"{base_url}/apk/{config['org']}/{config['name']}/"
         response = session.get(main_url)
@@ -242,35 +250,53 @@ def get_latest_version(app_name: str, config: dict) -> str:
                 match = re.search(r'(\d+(\.\d+)+)', version_text)
                 if match:
                     return match.group(1)
-    except:
-        pass  # If fails, continue to original method
-    
+        elif response.status_code >= 500:
+            logging.debug(f"APKMirror app page returned {response.status_code}")
+    except Exception as e:
+        logging.debug(f"APKMirror app page probe failed: {e}")
+
     # Original method (keep exactly as you had it)
     url = f"{base_url}/uploads/?appcategory={config['name']}"
-    
-    response = session.get(url)
-    response.raise_for_status()
+
+    try:
+        response = session.get(url)
+        response.raise_for_status()
+    except Exception as e:
+        raise SourceFetchError(
+            f"APKMirror uploads listing fetch failed for {app_name}: {e}",
+            stage="latest_version",
+        ) from e
+
     content_size = len(response.content)
     logging.info(f"URL:{response.url} [{content_size}/{content_size}] -> \"-\" [1]")
     soup = BeautifulSoup(response.content, "html.parser")
 
-    app_rows = soup.find_all("div", class_="appRow")
-    version_pattern = re.compile(r'\d+(\.\d+)*(-[a-zA-Z0-9]+(\.\d+)*)*')
+    try:
+        app_rows = soup.find_all("div", class_="appRow")
+        version_pattern = re.compile(r'\d+(\.\d+)*(-[a-zA-Z0-9]+(\.\d+)*)*')
 
-    for row in app_rows:
-        version_text = row.find("h5", class_="appRowTitle").a.text.strip()
-        if "alpha" not in version_text.lower() and "beta" not in version_text.lower():
-            match = version_pattern.search(version_text)
-            if match:
-                version = match.group()
-                version_parts = version.split('.')
-                base_version_parts = []
-                for part in version_parts:
-                    if part.isdigit():
-                        base_version_parts.append(part)
-                    else:
-                        break
-                if base_version_parts:
-                    return '.'.join(base_version_parts)
+        for row in app_rows:
+            title = row.find("h5", class_="appRowTitle")
+            if not title or not title.a:
+                continue
+            version_text = title.a.text.strip()
+            if "alpha" not in version_text.lower() and "beta" not in version_text.lower():
+                match = version_pattern.search(version_text)
+                if match:
+                    version = match.group()
+                    version_parts = version.split('.')
+                    base_version_parts = []
+                    for part in version_parts:
+                        if part.isdigit():
+                            base_version_parts.append(part)
+                        else:
+                            break
+                    if base_version_parts:
+                        return '.'.join(base_version_parts)
+    except Exception as e:
+        raise SourceFetchError(
+            f"APKMirror uploads listing parse failed for {app_name}: {e}",
+            stage="latest_version",
+        ) from e
 
     return None

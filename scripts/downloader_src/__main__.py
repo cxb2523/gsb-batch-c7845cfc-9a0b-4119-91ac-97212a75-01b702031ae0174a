@@ -11,8 +11,12 @@ from src import (
     downloader
 )
 
-def run_build(app_name: str, source: str, arch: str = "universal") -> str:
-    """Build APK for specific architecture"""
+def run_build(app_name: str, source: str, arch: str = "universal", reports: list | None = None) -> str:
+    """Build APK for specific architecture
+
+    ``reports`` optionally collects the per-source download report so callers
+    can fold the outcomes into a build summary after the run.
+    """
     download_files, name = downloader.download_required(source)
 
     # Log downloaded files for debugging
@@ -84,23 +88,20 @@ def run_build(app_name: str, source: str, arch: str = "universal") -> str:
     logging.info(f"✅ Using CLI: {cli.name}")
     logging.info(f"✅ Using patches: {patches.name}")
 
-    download_methods = [
-        downloader.download_apkmirror,
-        downloader.download_apkpure,
-        downloader.download_uptodown,
-        downloader.download_aptoide
-    ]
+    # Each source leaves an outcome; a failing source never aborts the round and
+    # the first success supplies the APK and version used for patching.
+    report = downloader.download_app(app_name, str(cli), str(patches))
+    if reports is not None:
+        reports.append(report)
+    input_apk = report.apk
+    version = report.version
 
-    input_apk = None
-    version = None
-    for method in download_methods:
-        input_apk, version = method(app_name, str(cli), str(patches))
-        if input_apk:
-            break
-            
     if input_apk is None:
+        # download_app() already logged each source's outcome; keep the summary
+        # in the build log so a failed app is diagnosable without the debug log.
         logging.error(f"❌ Failed to download APK for {app_name}")
-        logging.error("All download sources failed. Skipping this app.")
+        logging.error(f"Per-source outcomes: {report.format_summary()}")
+        logging.error("Skipping this app.")
         return None
 
     if input_apk.suffix != ".apk":
@@ -273,24 +274,30 @@ def main():
         
         # Build for each architecture
         built_apks = []
+        reports = []
         for arch in arches:
             logging.info(f"🔨 Building {app_name} for {arch} architecture...")
-            apk_path = run_build(app_name, source, arch)
+            apk_path = run_build(app_name, source, arch, reports=reports)
             if apk_path:
                 built_apks.append(apk_path)
                 print(f"✅ Built {arch} version: {Path(apk_path).name}")
-        
-        # Summary
+
+        # Summary, including the per-source outcome of each download round
         print(f"\n🎯 Built {len(built_apks)} APK(s) for {app_name}:")
         for apk in built_apks:
             print(f"  📱 {Path(apk).name}")
-        
+        for report in reports:
+            print(f"  🔎 download sources: {report.format_summary()}")
+
     else:
         # Fallback to single universal build
         logging.warning("arch-config.json not found, building universal only")
-        apk_path = run_build(app_name, source, "universal")
+        reports = []
+        apk_path = run_build(app_name, source, "universal", reports=reports)
         if apk_path:
             print(f"🎯 Final APK path: {apk_path}")
+        for report in reports:
+            print(f"🔎 download sources: {report.format_summary()}")
 
 if __name__ == "__main__":
     main()

@@ -1,28 +1,35 @@
-import logging 
-from src import session 
+import logging
+from src import session
+from src.outcomes import SourceFetchError, VersionNotFoundError
 from bs4 import BeautifulSoup
 
 def get_latest_version(app_name: str, config: dict) -> str:
     # Generate all possible Uptodown names
     possible_names = generate_possible_uptodown_names(config)
-    
+
     logging.info(f"Trying {len(possible_names)} possible Uptodown names for {app_name}")
-    
+
+    transport_errors = []
+    reached_any = False
     for uptodown_name in possible_names:
         url = f"https://{uptodown_name}.en.uptodown.com/android/versions"
         try:
             response = session.get(url)
             if response.status_code == 200:
+                reached_any = True
                 content_size = len(response.content)
                 logging.info(f"✓ Found: {response.url}")
                 soup = BeautifulSoup(response.content, "html.parser")
                 version_spans = soup.select('#versions-items-list .version')
                 versions = [span.text for span in version_spans]
-                
+
                 if versions:
                     highest_version = max(versions)
                     logging.info(f"Found version {highest_version} for {app_name}")
                     return highest_version
+                # Page exists but yielded no version list: remember it as a
+                # parse-level problem, but keep probing the other slugs.
+                transport_errors.append(f"{url}: no versions parsed from page")
             elif response.status_code == 404:
                 logging.debug(f"✗ Not found: {url}")
                 continue
@@ -30,23 +37,35 @@ def get_latest_version(app_name: str, config: dict) -> str:
                 response.raise_for_status()
         except Exception as e:
             logging.debug(f"Failed for {url}: {str(e)[:50]}...")
+            transport_errors.append(f"{url}: {e}")
             continue
-    
-    raise Exception(f"Could not find Uptodown page for {app_name}")
+
+    if transport_errors and not reached_any:
+        raise SourceFetchError(
+            f"Uptodown version list fetch/parse failed for {app_name}: {transport_errors[0]}"
+            f" ({len(transport_errors)} failing slug(s))",
+            stage="latest_version",
+        )
+    raise VersionNotFoundError(
+        f"Could not find Uptodown version list for {app_name}", stage="latest_version"
+    )
 
 def get_download_link(version: str, app_name: str, config: dict) -> str:
     # Generate all possible Uptodown names
     possible_names = generate_possible_uptodown_names(config)
-    
+
     logging.info(f"Searching {len(possible_names)} possible Uptodown names for {app_name} v{version}")
-    
+
+    transport_errors = []
     for uptodown_name in possible_names:
         base_url = f"https://{uptodown_name}.en.uptodown.com/android"
         try:
             response = session.get(f"{base_url}/versions")
             if response.status_code != 200:
+                if response.status_code != 404:
+                    transport_errors.append(f"{uptodown_name}: HTTP {response.status_code}")
                 continue
-                
+
             soup = BeautifulSoup(response.content, "html.parser")
             data_code = soup.find('h1', id='detail-app-name')['data-code']
 
@@ -55,10 +74,10 @@ def get_download_link(version: str, app_name: str, config: dict) -> str:
                 response = session.get(f"{base_url}/apps/{data_code}/versions/{page}")
                 response.raise_for_status()
                 version_data = response.json().get('data', [])
-                
+
                 if not version_data:
                     break
-                    
+
                 for entry in version_data:
                     if entry["version"] == version:
                         version_url_parts = entry["versionURL"]
@@ -66,11 +85,11 @@ def get_download_link(version: str, app_name: str, config: dict) -> str:
                         version_page = session.get(version_url)
                         version_page.raise_for_status()
                         soup = BeautifulSoup(version_page.content, "html.parser")
-                        
+
                         button = soup.find('button', id='detail-download-button')
                         if not button:
                             continue
-                            
+
                         onclick = button.get('onclick', '')
                         if onclick and "download-link-deeplink" in onclick:
                             version_url += '-x'
@@ -78,20 +97,28 @@ def get_download_link(version: str, app_name: str, config: dict) -> str:
                             version_page.raise_for_status()
                             soup = BeautifulSoup(version_page.content, "html.parser")
                             button = soup.find('button', id='detail-download-button')
-                        
+
                         if button and 'data-url' in button.attrs:
                             download_url = button['data-url']
                             return f"https://dw.uptodown.com/dwn/{download_url}"
-                
+
                 if all(entry["version"] < version for entry in version_data):
                     break
                 page += 1
         except Exception as e:
             logging.debug(f"Pattern {uptodown_name} failed: {str(e)[:50]}...")
+            transport_errors.append(f"{uptodown_name}: {e}")
             continue
-    
-    logging.error(f"Version {version} not found for {app_name}")
-    return None
+
+    if transport_errors:
+        raise SourceFetchError(
+            f"Uptodown version pagination/query failed for {app_name} v{version}: "
+            f"{transport_errors[0]} ({len(transport_errors)} failing slug(s))",
+            stage="download_link",
+        )
+    raise VersionNotFoundError(
+        f"Version {version} not found for {app_name}", stage="download_link"
+    )
 
 def generate_possible_uptodown_names(config: dict) -> list:
     """Generate all possible Uptodown URL patterns from config data"""

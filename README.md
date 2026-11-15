@@ -153,6 +153,13 @@ _Last checked: 2026-11-15_
 
 Runs every 48 hours. When a patch bundle updates, the pipeline downloads the affected APKs from APKMirror, Uptodown, or APKPure, in that order. If none of them have the exact version indexed, it falls back to a version-free pull from APKPure. Before anything gets patched, every APK goes through `apksigner` and SHA-256 cert pinning against [.github/cert_pins.json](.github/cert_pins.json). Fail either check and it gets dropped. Unchanged apps carry over from the last release so you always get all 53.
 
+The multi-source download chain (`scripts/downloader_src/downloader.py`) records one outcome per source — `success`, `not_found` (the source has no such app/version) or `error` (fetch/parse failure, with the failing stage) — and keeps trying later sources after a failure. When every source fails, the per-source outcomes are returned and logged instead of a bare `None`. Local branch tests for that chain use fake source configs and an injected fetcher:
+
+```bash
+python -m unittest discover -s scripts/downloader_src/tests -t scripts/downloader_src/tests -v
+```
+
+
 ```mermaid
 graph TD
     A[Cron / 48 hrs] --> B[Check patch bundle versions]
