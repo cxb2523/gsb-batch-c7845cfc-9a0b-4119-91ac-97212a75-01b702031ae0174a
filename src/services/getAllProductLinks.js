@@ -1,10 +1,12 @@
 const cheerio = require('cheerio');
 
-const { en_api } = require('../services/axios-config');
+const axiosConfig = require('../services/axios-config');
+const logger = require('../config/logger.config');
 
-async function getProductLinksFromPage(pageUrl) {
+async function getProductLinksFromPage(pageUrl, deps = {}) {
+  const api = deps.en_api || axiosConfig.en_api;
   try {
-    const response = await en_api.get(pageUrl);
+    const response = await api.get(pageUrl);
     const html = response.data;
     const $ = cheerio.load(html);
 
@@ -20,28 +22,43 @@ async function getProductLinksFromPage(pageUrl) {
   }
 }
 
-async function getAllProductLinks(categoryLink) {
-  try {
-    let page = 1;
-    let allProductLinks = [];
-    while (true) {
-      process.stdout.write(`${page}\r`);
+async function getAllProductLinks(categoryLink, deps = {}) {
+  const fetchPage = deps.getProductLinksFromPage || getProductLinksFromPage;
+  const pageDeps = deps.en_api ? { en_api: deps.en_api } : {};
 
-      const pageUrl = `${categoryLink}?PAGEN_1=${page}`;
-      const productLinks = await getProductLinksFromPage(pageUrl);
+  let page = 1;
+  let allProductLinks = [];
 
-      if (productLinks[0] === allProductLinks[0] || productLinks.length === 0) {
-        break; // No more pages, exit loop
-      }
+  while (true) {
+    process.stdout.write(`${page}\r`);
 
-      allProductLinks = allProductLinks.concat(productLinks);
-      page++;
+    const pageUrl = `${categoryLink}?PAGEN_1=${page}`;
+    let productLinks;
+
+    try {
+      productLinks = await fetchPage(pageUrl, pageDeps);
+    } catch (error) {
+      // Keep the links collected so far instead of dropping the whole
+      // subcategory: a page failure only stops paging for this subcategory.
+      logger.warn(
+        `Stopping pagination for ${categoryLink} at page ${page}: ${
+          error?.message || error
+        }`
+      );
+      break;
     }
 
-    return allProductLinks;
-  } catch (error) {
-    throw new Error('Error fetching all product links: ' + error.message);
+    if (productLinks[0] === allProductLinks[0] || productLinks.length === 0) {
+      break; // No more pages, exit loop
+    }
+
+    allProductLinks = allProductLinks.concat(productLinks);
+    page++;
   }
+
+  return allProductLinks;
 }
+
+getAllProductLinks.getProductLinksFromPage = getProductLinksFromPage;
 
 module.exports = getAllProductLinks;
