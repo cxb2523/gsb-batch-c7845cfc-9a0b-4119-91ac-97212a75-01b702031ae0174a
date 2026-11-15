@@ -1,0 +1,291 @@
+version: 1.1
+
+source: restaurant_chain_db.marts.agg_customer_360
+
+comment: "Customer lifecycle and segmentation metrics. One row per customer in the\
+  \ source — measures aggregate across customers for any dimensional slice. Serves\
+  \ CRM, marketing, retention, and customer success teams. Recency is computed live\
+  \ from last_order_date (not stored) to enable incremental refresh on source."
+
+dimensions:
+  - name: customer_city
+    expr: source.customer_city
+    comment: City where the customer is located
+    display_name: City
+    synonyms:
+      - city
+      - location
+  - name: favorite_order_type
+    expr: source.favorite_order_type
+    comment: "Most frequent order channel (dine_in, takeaway, delivery)"
+    display_name: Preferred Channel
+    synonyms:
+      - order type
+      - channel preference
+  - name: favorite_payment_method
+    expr: source.favorite_payment_method
+    comment: "Most frequent payment method (card, cash, wallet)"
+    display_name: Preferred Payment
+    synonyms:
+      - payment preference
+      - payment method
+  - name: latest_sentiment
+    expr: source.latest_sentiment
+    comment: "Most recent review sentiment (positive, neutral, negative)"
+    display_name: Latest Sentiment
+    synonyms:
+      - sentiment
+      - satisfaction
+  - name: churn_risk_segment
+    expr: |-
+      CASE
+        WHEN DATEDIFF(CURRENT_DATE(), source.last_order_date) > 60 THEN 'Churned'
+        WHEN DATEDIFF(CURRENT_DATE(), source.last_order_date) > 30 THEN 'At Risk'
+        WHEN DATEDIFF(CURRENT_DATE(), source.last_order_date) > 14 THEN 'Cooling'
+        ELSE 'Active'
+      END
+    comment: "Customer churn risk based on live recency (days since last order, computed\
+      \ from last_order_date)"
+    display_name: Churn Risk
+    synonyms:
+      - risk segment
+      - churn status
+      - activity status
+  - name: value_segment
+    expr: |-
+      CASE
+        WHEN source.total_spend >= 10000 THEN 'Platinum'
+        WHEN source.total_spend >= 7000 THEN 'Gold'
+        WHEN source.total_spend >= 4000 THEN 'Silver'
+        ELSE 'Bronze'
+      END
+    comment: Customer value tier based on lifetime spend (AED)
+    display_name: Value Tier
+    synonyms:
+      - customer tier
+      - spend segment
+      - loyalty tier
+  - name: engagement_segment
+    expr: |-
+      CASE
+        WHEN source.total_orders >= 50 THEN 'Champion'
+        WHEN source.total_orders >= 25 THEN 'Regular'
+        WHEN source.total_orders >= 10 THEN 'Occasional'
+        ELSE 'New'
+      END
+    comment: Customer engagement level based on total order count
+    display_name: Engagement Level
+    synonyms:
+      - frequency segment
+      - order frequency tier
+
+measures:
+  - name: total_customers
+    expr: COUNT(1)
+    comment: Total number of customers
+    display_name: Total Customers
+    format:
+      type: number
+      decimal_places:
+        type: exact
+        places: 0
+    synonyms:
+      - customers
+      - customer count
+      - headcount
+  - name: total_lifetime_orders
+    expr: SUM(source.total_orders)
+    comment: Total orders across all customers
+    display_name: Lifetime Orders
+    format:
+      type: number
+      decimal_places:
+        type: exact
+        places: 0
+  - name: total_lifetime_spend
+    expr: SUM(source.total_spend)
+    comment: Total lifetime spend across all customers (AED)
+    display_name: Lifetime Spend
+    format:
+      type: currency
+      currency_code: AED
+      decimal_places:
+        type: exact
+        places: 2
+    synonyms:
+      - total spend
+      - lifetime revenue
+  - name: avg_lifetime_value
+    expr: MEASURE(total_lifetime_spend) / MEASURE(total_customers)
+    comment: Average lifetime value per customer
+    display_name: Avg Customer LTV
+    format:
+      type: currency
+      currency_code: AED
+      decimal_places:
+        type: exact
+        places: 2
+    synonyms:
+      - CLV
+      - customer lifetime value
+      - LTV
+  - name: avg_order_value
+    expr: MEASURE(total_lifetime_spend) / MEASURE(total_lifetime_orders)
+    comment: Average order value across all customers
+    display_name: Avg Order Value
+    format:
+      type: currency
+      currency_code: AED
+      decimal_places:
+        type: exact
+        places: 2
+    synonyms:
+      - AOV
+  - name: avg_orders_per_customer
+    expr: MEASURE(total_lifetime_orders) / MEASURE(total_customers)
+    comment: Average number of orders per customer
+    display_name: Avg Orders Per Customer
+    format:
+      type: number
+      decimal_places:
+        type: exact
+        places: 1
+    synonyms:
+      - order frequency
+  - name: avg_recency_days
+    expr: "AVG(DATEDIFF(CURRENT_DATE(), source.last_order_date))"
+    comment: Average days since last order across customers. Computed live from last_order_date.
+      Lower is better.
+    display_name: Avg Recency (Days)
+    format:
+      type: number
+      decimal_places:
+        type: exact
+        places: 0
+    synonyms:
+      - recency
+      - days since last order
+  - name: avg_tenure_days
+    expr: AVG(source.customer_tenure_days)
+    comment: Average customer tenure in days (first order to last order)
+    display_name: Avg Tenure (Days)
+    format:
+      type: number
+      decimal_places:
+        type: exact
+        places: 0
+    synonyms:
+      - tenure
+      - customer age
+  - name: avg_restaurants_visited
+    expr: AVG(source.distinct_restaurants_visited)
+    comment: Average number of distinct restaurants visited per customer
+    display_name: Avg Restaurants Visited
+    format:
+      type: number
+      decimal_places:
+        type: exact
+        places: 1
+  - name: avg_items_tried
+    expr: AVG(source.distinct_items_tried)
+    comment: Average number of distinct menu items tried per customer
+    display_name: Avg Items Tried
+    format:
+      type: number
+      decimal_places:
+        type: exact
+        places: 1
+    synonyms:
+      - menu diversity
+  - name: total_reviews
+    expr: SUM(source.review_count)
+    comment: Total reviews submitted across all customers
+    display_name: Total Reviews
+    format:
+      type: number
+      decimal_places:
+        type: exact
+        places: 0
+  - name: reviewing_customers
+    expr: COUNT(CASE WHEN source.review_count > 0 THEN 1 END)
+    comment: Number of customers who have submitted at least one review
+    display_name: Reviewing Customers
+    format:
+      type: number
+      decimal_places:
+        type: exact
+        places: 0
+  - name: review_participation_rate
+    expr: MEASURE(reviewing_customers) * 100.0 / MEASURE(total_customers)
+    comment: Percentage of customers who have left at least one review
+    display_name: Review Participation %
+    format:
+      type: number
+      decimal_places:
+        type: exact
+        places: 1
+  - name: active_customers
+    expr: COUNT(1) FILTER (WHERE churn_risk_segment = 'Active')
+    comment: Customers who have ordered within the last 14 days
+    display_name: Active Customers
+    format:
+      type: number
+      decimal_places:
+        type: exact
+        places: 0
+  - name: at_risk_customers
+    expr: COUNT(1) FILTER (WHERE churn_risk_segment = 'At Risk')
+    comment: Customers inactive for 30-60 days
+    display_name: At Risk Customers
+    format:
+      type: number
+      decimal_places:
+        type: exact
+        places: 0
+  - name: churned_customers
+    expr: COUNT(1) FILTER (WHERE churn_risk_segment = 'Churned')
+    comment: Customers inactive for 60+ days
+    display_name: Churned Customers
+    format:
+      type: number
+      decimal_places:
+        type: exact
+        places: 0
+  - name: retention_rate
+    expr: MEASURE(active_customers) * 100.0 / MEASURE(total_customers)
+    comment: Percentage of customers classified as active
+    display_name: Retention Rate %
+    format:
+      type: number
+      decimal_places:
+        type: exact
+        places: 1
+  - name: churn_rate
+    expr: MEASURE(churned_customers) * 100.0 / MEASURE(total_customers)
+    comment: Percentage of customers classified as churned (60+ days inactive)
+    display_name: Churn Rate %
+    format:
+      type: number
+      decimal_places:
+        type: exact
+        places: 1
+    synonyms:
+      - churn percentage
+  - name: avg_weekend_order_pct
+    expr: AVG(source.weekend_order_pct)
+    comment: Average percentage of weekend orders per customer
+    display_name: Avg Weekend Order %
+    format:
+      type: number
+      decimal_places:
+        type: exact
+        places: 1
+  - name: avg_peak_hours_pct
+    expr: AVG(source.peak_hours_order_pct)
+    comment: Average percentage of peak-hours orders (10-15) per customer
+    display_name: Avg Peak Hours %
+    format:
+      type: number
+      decimal_places:
+        type: exact
+        places: 1

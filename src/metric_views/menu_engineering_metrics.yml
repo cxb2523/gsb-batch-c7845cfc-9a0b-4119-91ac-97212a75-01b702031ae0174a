@@ -1,0 +1,201 @@
+version: 1.1
+
+source: restaurant_chain_db.marts.agg_menu_item_performance_monthly
+
+comment: "Menu engineering and item performance metrics. Source is pre-aggregated\
+  \ at restaurant x item x month grain. Enables menu optimization, pricing analysis,\
+  \ and veg/non-veg segmentation across restaurants and time periods."
+
+dimensions:
+  - name: restaurant_id
+    expr: source.restaurant_id
+    comment: Restaurant identifier
+    display_name: Restaurant Id
+  - name: restaurant_name
+    expr: source.restaurant_name
+    comment: Restaurant branch name
+    display_name: Restaurant
+    synonyms:
+      - branch
+      - location
+  - name: restaurant_city
+    expr: source.restaurant_city
+    comment: City where the restaurant is located
+    display_name: City
+    synonyms:
+      - city
+  - name: item_id
+    expr: source.item_id
+    comment: Menu item identifier
+    display_name: Item Id
+  - name: item_name
+    expr: source.item_name
+    comment: Menu item name
+    display_name: Item
+    synonyms:
+      - dish
+      - menu item
+      - product
+  - name: item_category
+    expr: source.item_category
+    comment: "Menu category (e.g. Appetizer, Main Course, Dessert, Beverage)"
+    display_name: Category
+    synonyms:
+      - food category
+      - menu category
+      - type
+  - name: is_vegetarian
+    expr: source.is_vegetarian
+    comment: Whether the item is vegetarian
+    display_name: Vegetarian
+    synonyms:
+      - veg
+  - name: spice_level
+    expr: source.spice_level
+    comment: "Spice level (Mild, Medium, Hot)"
+    display_name: Spice Level
+    synonyms:
+      - spice
+      - heat level
+  - name: order_year
+    expr: source.order_year
+    comment: Year of the orders
+    display_name: Year
+    synonyms:
+      - year
+  - name: order_month
+    expr: source.order_month
+    comment: Month of the orders
+    display_name: Month
+    synonyms:
+      - month
+
+measures:
+  - name: total_qty_sold
+    expr: SUM(source.total_qty_sold)
+    comment: Total quantity of items sold
+    display_name: Total Qty Sold
+    format:
+      type: number
+      decimal_places:
+        type: exact
+        places: 0
+    synonyms:
+      - quantity
+      - units sold
+  - name: total_revenue
+    expr: SUM(source.total_revenue)
+    comment: Total revenue from item sales (AED)
+    display_name: Total Revenue
+    format:
+      type: currency
+      currency_code: AED
+      decimal_places:
+        type: exact
+        places: 2
+    synonyms:
+      - revenue
+      - sales
+  - name: total_orders
+    expr: SUM(source.unique_orders)
+    comment: Total number of unique orders containing items
+    display_name: Total Orders
+    format:
+      type: number
+      decimal_places:
+        type: exact
+        places: 0
+    synonyms:
+      - orders
+      - order count
+  - name: unique_items
+    expr: COUNT(DISTINCT source.item_id)
+    comment: Number of distinct menu items sold
+    display_name: Unique Items
+    format:
+      type: number
+      decimal_places:
+        type: exact
+        places: 0
+    synonyms:
+      - menu breadth
+      - item count
+  - name: avg_revenue_per_unit
+    expr: MEASURE(total_revenue) / MEASURE(total_qty_sold)
+    comment: Average revenue per unit sold. Effective price realization.
+    display_name: Avg Revenue Per Unit
+    format:
+      type: currency
+      currency_code: AED
+      decimal_places:
+        type: exact
+        places: 2
+    synonyms:
+      - unit price
+      - price realization
+  - name: avg_qty_per_order
+    expr: MEASURE(total_qty_sold) / MEASURE(total_orders)
+    comment: Average quantity of items per order
+    display_name: Avg Qty Per Order
+    format:
+      type: number
+      decimal_places:
+        type: exact
+        places: 1
+  - name: revenue_per_item
+    expr: MEASURE(total_revenue) / MEASURE(unique_items)
+    comment: Average revenue per distinct menu item. Measures menu concentration.
+    display_name: Revenue Per Item
+    format:
+      type: currency
+      currency_code: AED
+      decimal_places:
+        type: exact
+        places: 2
+  - name: veg_revenue
+    expr: SUM(source.total_revenue) FILTER (WHERE is_vegetarian = true)
+    comment: Revenue from vegetarian items
+    display_name: Veg Revenue
+    format:
+      type: currency
+      currency_code: AED
+      decimal_places:
+        type: exact
+        places: 2
+  - name: non_veg_revenue
+    expr: SUM(source.total_revenue) FILTER (WHERE is_vegetarian = false)
+    comment: Revenue from non-vegetarian items
+    display_name: Non-Veg Revenue
+    format:
+      type: currency
+      currency_code: AED
+      decimal_places:
+        type: exact
+        places: 2
+  - name: veg_revenue_share
+    expr: MEASURE(veg_revenue) * 100.0 / MEASURE(total_revenue)
+    comment: Percentage of revenue from vegetarian items
+    display_name: Veg Revenue Share %
+    format:
+      type: number
+      decimal_places:
+        type: exact
+        places: 1
+  - name: veg_qty_sold
+    expr: SUM(source.total_qty_sold) FILTER (WHERE is_vegetarian = true)
+    comment: Total quantity of vegetarian items sold
+    display_name: Veg Qty Sold
+    format:
+      type: number
+      decimal_places:
+        type: exact
+        places: 0
+  - name: non_veg_qty_sold
+    expr: SUM(source.total_qty_sold) FILTER (WHERE is_vegetarian = false)
+    comment: Total quantity of non-vegetarian items sold
+    display_name: Non-Veg Qty Sold
+    format:
+      type: number
+      decimal_places:
+        type: exact
+        places: 0

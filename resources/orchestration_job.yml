@@ -1,0 +1,54 @@
+# Pipeline Orchestration Job
+# Chain: bronze → staging → raw_vault → business_vault → marts → permissions
+# Schedule: Daily 6:00 AM Dubai time (Asia/Dubai)
+# Notification: on_failure email alerts
+
+resources:
+  jobs:
+    orchestration_job:
+      name: datavault_full_pipeline
+      schedule:
+        quartz_cron_expression: "0 0 6 * * ?"
+        timezone_id: Asia/Dubai
+      email_notifications:
+        on_failure:
+          - ${var.notification_email}
+      tasks:
+        - task_key: 00_bronze_ingestion
+          description: "Ingest Event Hub + SQL Server → 01_bronze"
+          pipeline_task:
+            pipeline_id: ${resources.pipelines.bronze_pipeline.id}
+            full_refresh: false
+
+        - task_key: 01_staging
+          description: "Bronze → staging with DV hash keys and metadata"
+          depends_on:
+            - task_key: 00_bronze_ingestion
+          pipeline_task:
+            pipeline_id: ${resources.pipelines.staging_pipeline.id}
+            full_refresh: false
+
+        - task_key: 02_raw_vault
+          description: "Staging → raw vault hubs, links, satellites"
+          depends_on:
+            - task_key: 01_staging
+          pipeline_task:
+            pipeline_id: ${resources.pipelines.raw_vault_pipeline.id}
+            full_refresh: false
+
+        - task_key: 03_business_vault
+          description: "Raw vault → PITs, bridges, computed satellites"
+          depends_on:
+            - task_key: 02_raw_vault
+          pipeline_task:
+            pipeline_id: ${resources.pipelines.business_vault_pipeline.id}
+            full_refresh: false
+
+        - task_key: 04_marts
+          description: "Business vault → dims, facts, aggregates, features"
+          depends_on:
+            - task_key: 03_business_vault
+          pipeline_task:
+            pipeline_id: ${resources.pipelines.marts_pipeline.id}
+            full_refresh: false
+

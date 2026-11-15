@@ -1,0 +1,1727 @@
+{
+  "datasets": [
+    {
+      "name": "row_counts",
+      "displayName": "Table Row Counts",
+      "queryLines": [
+        "SELECT\n",
+        "  '1-Staging' as layer,\n",
+        "  'stg_customers' as table_name,\n",
+        "  'Staging Table' as entity_type,\n",
+        "  (\n",
+        "    SELECT\n",
+        "      COUNT(*)\n",
+        "    FROM\n",
+        "      restaurant_chain_db.staging.stg_customers\n",
+        "  ) as row_count\n",
+        "UNION ALL\n",
+        "SELECT\n",
+        "  '1-Staging',\n",
+        "  'stg_menu_items',\n",
+        "  'Staging Table',\n",
+        "  (\n",
+        "    SELECT\n",
+        "      COUNT(*)\n",
+        "    FROM\n",
+        "      restaurant_chain_db.staging.stg_menu_items\n",
+        "  )\n",
+        "UNION ALL\n",
+        "SELECT\n",
+        "  '1-Staging',\n",
+        "  'stg_order_items',\n",
+        "  'Staging Table',\n",
+        "  (\n",
+        "    SELECT\n",
+        "      COUNT(*)\n",
+        "    FROM\n",
+        "      restaurant_chain_db.staging.stg_order_items\n",
+        "  )\n",
+        "UNION ALL\n",
+        "SELECT\n",
+        "  '1-Staging',\n",
+        "  'stg_orders',\n",
+        "  'Staging Table',\n",
+        "  (\n",
+        "    SELECT\n",
+        "      COUNT(*)\n",
+        "    FROM\n",
+        "      restaurant_chain_db.staging.stg_orders\n",
+        "  )\n",
+        "UNION ALL\n",
+        "SELECT\n",
+        "  '1-Staging',\n",
+        "  'stg_restaurants',\n",
+        "  'Staging Table',\n",
+        "  (\n",
+        "    SELECT\n",
+        "      COUNT(*)\n",
+        "    FROM\n",
+        "      restaurant_chain_db.staging.stg_restaurants\n",
+        "  )\n",
+        "UNION ALL\n",
+        "SELECT\n",
+        "  '1-Staging',\n",
+        "  'stg_reviews',\n",
+        "  'Staging Table',\n",
+        "  (\n",
+        "    SELECT\n",
+        "      COUNT(*)\n",
+        "    FROM\n",
+        "      restaurant_chain_db.staging.stg_reviews\n",
+        "  )\n",
+        "UNION ALL\n",
+        "SELECT\n",
+        "  '2-Raw Vault',\n",
+        "  'hub_customer',\n",
+        "  'Hub',\n",
+        "  (\n",
+        "    SELECT\n",
+        "      COUNT(*)\n",
+        "    FROM\n",
+        "      restaurant_chain_db.raw_vault.hub_customer\n",
+        "  )\n",
+        "UNION ALL\n",
+        "SELECT\n",
+        "  '2-Raw Vault',\n",
+        "  'hub_menu_item',\n",
+        "  'Hub',\n",
+        "  (\n",
+        "    SELECT\n",
+        "      COUNT(*)\n",
+        "    FROM\n",
+        "      restaurant_chain_db.raw_vault.hub_menu_item\n",
+        "  )\n",
+        "UNION ALL\n",
+        "SELECT\n",
+        "  '2-Raw Vault',\n",
+        "  'hub_order',\n",
+        "  'Hub',\n",
+        "  (\n",
+        "    SELECT\n",
+        "      COUNT(*)\n",
+        "    FROM\n",
+        "      restaurant_chain_db.raw_vault.hub_order\n",
+        "  )\n",
+        "UNION ALL\n",
+        "SELECT\n",
+        "  '2-Raw Vault',\n",
+        "  'hub_restaurant',\n",
+        "  'Hub',\n",
+        "  (\n",
+        "    SELECT\n",
+        "      COUNT(*)\n",
+        "    FROM\n",
+        "      restaurant_chain_db.raw_vault.hub_restaurant\n",
+        "  )\n",
+        "UNION ALL\n",
+        "SELECT\n",
+        "  '2-Raw Vault',\n",
+        "  'hub_review',\n",
+        "  'Hub',\n",
+        "  (\n",
+        "    SELECT\n",
+        "      COUNT(*)\n",
+        "    FROM\n",
+        "      restaurant_chain_db.raw_vault.hub_review\n",
+        "  )\n",
+        "UNION ALL\n",
+        "SELECT\n",
+        "  '2-Raw Vault',\n",
+        "  'lnk_order',\n",
+        "  'Link',\n",
+        "  (\n",
+        "    SELECT\n",
+        "      COUNT(*)\n",
+        "    FROM\n",
+        "      restaurant_chain_db.raw_vault.lnk_order\n",
+        "  )\n",
+        "UNION ALL\n",
+        "SELECT\n",
+        "  '2-Raw Vault',\n",
+        "  'lnk_order_item',\n",
+        "  'Link',\n",
+        "  (\n",
+        "    SELECT\n",
+        "      COUNT(*)\n",
+        "    FROM\n",
+        "      restaurant_chain_db.raw_vault.lnk_order_item\n",
+        "  )\n",
+        "UNION ALL\n",
+        "SELECT\n",
+        "  '2-Raw Vault',\n",
+        "  'lnk_review_order',\n",
+        "  'Link',\n",
+        "  (\n",
+        "    SELECT\n",
+        "      COUNT(*)\n",
+        "    FROM\n",
+        "      restaurant_chain_db.raw_vault.lnk_review_order\n",
+        "  )\n",
+        "UNION ALL\n",
+        "SELECT\n",
+        "  '2-Raw Vault',\n",
+        "  'sat_customer',\n",
+        "  'Satellite',\n",
+        "  (\n",
+        "    SELECT\n",
+        "      COUNT(*)\n",
+        "    FROM\n",
+        "      restaurant_chain_db.raw_vault.sat_customer\n",
+        "  )\n",
+        "UNION ALL\n",
+        "SELECT\n",
+        "  '2-Raw Vault',\n",
+        "  'sat_menu_item',\n",
+        "  'Satellite',\n",
+        "  (\n",
+        "    SELECT\n",
+        "      COUNT(*)\n",
+        "    FROM\n",
+        "      restaurant_chain_db.raw_vault.sat_menu_item\n",
+        "  )\n",
+        "UNION ALL\n",
+        "SELECT\n",
+        "  '2-Raw Vault',\n",
+        "  'sat_order_header',\n",
+        "  'Satellite',\n",
+        "  (\n",
+        "    SELECT\n",
+        "      COUNT(*)\n",
+        "    FROM\n",
+        "      restaurant_chain_db.raw_vault.sat_order_header\n",
+        "  )\n",
+        "UNION ALL\n",
+        "SELECT\n",
+        "  '2-Raw Vault',\n",
+        "  'sat_order_item',\n",
+        "  'Satellite',\n",
+        "  (\n",
+        "    SELECT\n",
+        "      COUNT(*)\n",
+        "    FROM\n",
+        "      restaurant_chain_db.raw_vault.sat_order_item\n",
+        "  )\n",
+        "UNION ALL\n",
+        "SELECT\n",
+        "  '2-Raw Vault',\n",
+        "  'sat_restaurant',\n",
+        "  'Satellite',\n",
+        "  (\n",
+        "    SELECT\n",
+        "      COUNT(*)\n",
+        "    FROM\n",
+        "      restaurant_chain_db.raw_vault.sat_restaurant\n",
+        "  )\n",
+        "UNION ALL\n",
+        "SELECT\n",
+        "  '2-Raw Vault',\n",
+        "  'sat_review',\n",
+        "  'Satellite',\n",
+        "  (\n",
+        "    SELECT\n",
+        "      COUNT(*)\n",
+        "    FROM\n",
+        "      restaurant_chain_db.raw_vault.sat_review\n",
+        "  )\n",
+        "UNION ALL\n",
+        "SELECT\n",
+        "  '3-Business Vault',\n",
+        "  'pit_customer',\n",
+        "  'PIT',\n",
+        "  (\n",
+        "    SELECT\n",
+        "      COUNT(*)\n",
+        "    FROM\n",
+        "      restaurant_chain_db.business_vault.pit_customer\n",
+        "  )\n",
+        "UNION ALL\n",
+        "SELECT\n",
+        "  '3-Business Vault',\n",
+        "  'pit_menu_item',\n",
+        "  'PIT',\n",
+        "  (\n",
+        "    SELECT\n",
+        "      COUNT(*)\n",
+        "    FROM\n",
+        "      restaurant_chain_db.business_vault.pit_menu_item\n",
+        "  )\n",
+        "UNION ALL\n",
+        "SELECT\n",
+        "  '3-Business Vault',\n",
+        "  'pit_order',\n",
+        "  'PIT',\n",
+        "  (\n",
+        "    SELECT\n",
+        "      COUNT(*)\n",
+        "    FROM\n",
+        "      restaurant_chain_db.business_vault.pit_order\n",
+        "  )\n",
+        "UNION ALL\n",
+        "SELECT\n",
+        "  '3-Business Vault',\n",
+        "  'pit_order_item',\n",
+        "  'PIT',\n",
+        "  (\n",
+        "    SELECT\n",
+        "      COUNT(*)\n",
+        "    FROM\n",
+        "      restaurant_chain_db.business_vault.pit_order_item\n",
+        "  )\n",
+        "UNION ALL\n",
+        "SELECT\n",
+        "  '3-Business Vault',\n",
+        "  'pit_restaurant',\n",
+        "  'PIT',\n",
+        "  (\n",
+        "    SELECT\n",
+        "      COUNT(*)\n",
+        "    FROM\n",
+        "      restaurant_chain_db.business_vault.pit_restaurant\n",
+        "  )\n",
+        "UNION ALL\n",
+        "SELECT\n",
+        "  '3-Business Vault',\n",
+        "  'pit_review',\n",
+        "  'PIT',\n",
+        "  (\n",
+        "    SELECT\n",
+        "      COUNT(*)\n",
+        "    FROM\n",
+        "      restaurant_chain_db.business_vault.pit_review\n",
+        "  )\n",
+        "UNION ALL\n",
+        "SELECT\n",
+        "  '3-Business Vault',\n",
+        "  'ref_date_dim',\n",
+        "  'Reference',\n",
+        "  (\n",
+        "    SELECT\n",
+        "      COUNT(*)\n",
+        "    FROM\n",
+        "      restaurant_chain_db.business_vault.ref_date_dim\n",
+        "  )\n",
+        "UNION ALL\n",
+        "SELECT\n",
+        "  '3-Business Vault',\n",
+        "  'bridge_order',\n",
+        "  'Bridge',\n",
+        "  (\n",
+        "    SELECT\n",
+        "      COUNT(*)\n",
+        "    FROM\n",
+        "      restaurant_chain_db.business_vault.bridge_order\n",
+        "  )\n",
+        "UNION ALL\n",
+        "SELECT\n",
+        "  '3-Business Vault',\n",
+        "  'bridge_order_item',\n",
+        "  'Bridge',\n",
+        "  (\n",
+        "    SELECT\n",
+        "      COUNT(*)\n",
+        "    FROM\n",
+        "      restaurant_chain_db.business_vault.bridge_order_item\n",
+        "  )\n",
+        "UNION ALL\n",
+        "SELECT\n",
+        "  '3-Business Vault',\n",
+        "  'sat_review_sentiment',\n",
+        "  'Satellite',\n",
+        "  (\n",
+        "    SELECT\n",
+        "      COUNT(*)\n",
+        "    FROM\n",
+        "      restaurant_chain_db.business_vault.sat_review_sentiment\n",
+        "  )\n",
+        "UNION ALL\n",
+        "SELECT\n",
+        "  '3-Business Vault',\n",
+        "  'reviews_tracked_dv',\n",
+        "  'CDC Tracking',\n",
+        "  (\n",
+        "    SELECT\n",
+        "      COUNT(*)\n",
+        "    FROM\n",
+        "      restaurant_chain_db.business_vault.reviews_tracked_dv\n",
+        "  )\n",
+        "UNION ALL\n",
+        "SELECT\n",
+        "  '4-Marts',\n",
+        "  'dim_customer',\n",
+        "  'Dimension',\n",
+        "  (\n",
+        "    SELECT\n",
+        "      COUNT(*)\n",
+        "    FROM\n",
+        "      restaurant_chain_db.marts.dim_customer\n",
+        "  )\n",
+        "UNION ALL\n",
+        "SELECT\n",
+        "  '4-Marts',\n",
+        "  'dim_date',\n",
+        "  'Dimension',\n",
+        "  (\n",
+        "    SELECT\n",
+        "      COUNT(*)\n",
+        "    FROM\n",
+        "      restaurant_chain_db.marts.dim_date\n",
+        "  )\n",
+        "UNION ALL\n",
+        "SELECT\n",
+        "  '4-Marts',\n",
+        "  'dim_menu_item',\n",
+        "  'Dimension',\n",
+        "  (\n",
+        "    SELECT\n",
+        "      COUNT(*)\n",
+        "    FROM\n",
+        "      restaurant_chain_db.marts.dim_menu_item\n",
+        "  )\n",
+        "UNION ALL\n",
+        "SELECT\n",
+        "  '4-Marts',\n",
+        "  'dim_restaurant',\n",
+        "  'Dimension',\n",
+        "  (\n",
+        "    SELECT\n",
+        "      COUNT(*)\n",
+        "    FROM\n",
+        "      restaurant_chain_db.marts.dim_restaurant\n",
+        "  )\n",
+        "UNION ALL\n",
+        "SELECT\n",
+        "  '4-Marts',\n",
+        "  'fact_order',\n",
+        "  'Fact',\n",
+        "  (\n",
+        "    SELECT\n",
+        "      COUNT(*)\n",
+        "    FROM\n",
+        "      restaurant_chain_db.marts.fact_order\n",
+        "  )\n",
+        "UNION ALL\n",
+        "SELECT\n",
+        "  '4-Marts',\n",
+        "  'fact_order_item',\n",
+        "  'Fact',\n",
+        "  (\n",
+        "    SELECT\n",
+        "      COUNT(*)\n",
+        "    FROM\n",
+        "      restaurant_chain_db.marts.fact_order_item\n",
+        "  )\n",
+        "UNION ALL\n",
+        "SELECT\n",
+        "  '4-Marts',\n",
+        "  'fact_review',\n",
+        "  'Fact',\n",
+        "  (\n",
+        "    SELECT\n",
+        "      COUNT(*)\n",
+        "    FROM\n",
+        "      restaurant_chain_db.marts.fact_review\n",
+        "  )\n",
+        "UNION ALL\n",
+        "SELECT\n",
+        "  '4-Marts',\n",
+        "  'agg_customer_360',\n",
+        "  'Aggregate',\n",
+        "  (\n",
+        "    SELECT\n",
+        "      COUNT(*)\n",
+        "    FROM\n",
+        "      restaurant_chain_db.marts.agg_customer_360\n",
+        "  )\n",
+        "UNION ALL\n",
+        "SELECT\n",
+        "  '4-Marts',\n",
+        "  'agg_restaurant_performance_daily',\n",
+        "  'Aggregate',\n",
+        "  (\n",
+        "    SELECT\n",
+        "      COUNT(*)\n",
+        "    FROM\n",
+        "      restaurant_chain_db.marts.agg_restaurant_performance_daily\n",
+        "  )\n",
+        "UNION ALL\n",
+        "SELECT\n",
+        "  '4-Marts',\n",
+        "  'agg_menu_item_performance_monthly',\n",
+        "  'Aggregate',\n",
+        "  (\n",
+        "    SELECT\n",
+        "      COUNT(*)\n",
+        "    FROM\n",
+        "      restaurant_chain_db.marts.agg_menu_item_performance_monthly\n",
+        "  )\n",
+        "UNION ALL\n",
+        "SELECT\n",
+        "  '4-Marts',\n",
+        "  'agg_review_insights_monthly',\n",
+        "  'Aggregate',\n",
+        "  (\n",
+        "    SELECT\n",
+        "      COUNT(*)\n",
+        "    FROM\n",
+        "      restaurant_chain_db.marts.agg_review_insights_monthly\n",
+        "  )\n",
+        "UNION ALL\n",
+        "SELECT\n",
+        "  '4-Marts',\n",
+        "  'agg_business_monthly_base',\n",
+        "  'Aggregate',\n",
+        "  (\n",
+        "    SELECT\n",
+        "      COUNT(*)\n",
+        "    FROM\n",
+        "      restaurant_chain_db.marts.agg_business_monthly_base\n",
+        "  )\n",
+        "UNION ALL\n",
+        "SELECT\n",
+        "  '4-Marts',\n",
+        "  'agg_business_performance_trends',\n",
+        "  'Aggregate',\n",
+        "  (\n",
+        "    SELECT\n",
+        "      COUNT(*)\n",
+        "    FROM\n",
+        "      restaurant_chain_db.marts.agg_business_performance_trends\n",
+        "  )\n",
+        "UNION ALL\n",
+        "SELECT\n",
+        "  '4-Marts',\n",
+        "  'agg_menu_item_ranked_monthly',\n",
+        "  'Aggregate',\n",
+        "  (\n",
+        "    SELECT\n",
+        "      COUNT(*)\n",
+        "    FROM\n",
+        "      restaurant_chain_db.marts.agg_menu_item_ranked_monthly\n",
+        "  )\n",
+        "UNION ALL\n",
+        "SELECT\n",
+        "  '4-Marts',\n",
+        "  'feat_customer_features',\n",
+        "  'Feature',\n",
+        "  (\n",
+        "    SELECT\n",
+        "      COUNT(*)\n",
+        "    FROM\n",
+        "      restaurant_chain_db.marts.feat_customer_features\n",
+        "  )\n",
+        "UNION ALL\n",
+        "SELECT\n",
+        "  '4-Marts',\n",
+        "  'feat_restaurant_demand_features',\n",
+        "  'Feature',\n",
+        "  (\n",
+        "    SELECT\n",
+        "      COUNT(*)\n",
+        "    FROM\n",
+        "      restaurant_chain_db.marts.feat_restaurant_demand_features\n",
+        "  )"
+      ]
+    },
+    {
+      "name": "table_inventory",
+      "displayName": "DV Table Inventory",
+      "queryLines": [
+        "SELECT\n",
+        "  table_schema,\n",
+        "  table_name,\n",
+        "  table_type,\n",
+        "  CASE\n",
+        "    WHEN table_schema = 'staging' THEN '1-Staging'\n",
+        "    WHEN table_schema = 'raw_vault' THEN '2-Raw Vault'\n",
+        "    WHEN table_schema = 'business_vault' THEN '3-Business Vault'\n",
+        "    WHEN table_schema = 'marts' THEN '4-Marts'\n",
+        "  END as layer,\n",
+        "  CASE\n",
+        "    WHEN table_name LIKE 'stg_%' THEN 'Staging Table'\n",
+        "    WHEN table_name LIKE 'hub_%' THEN 'Hub'\n",
+        "    WHEN table_name LIKE 'lnk_%' THEN 'Link'\n",
+        "    WHEN table_name LIKE 'sat_%' THEN 'Satellite'\n",
+        "    WHEN table_name LIKE 'pit_%' THEN 'PIT'\n",
+        "    WHEN table_name LIKE 'bridge_%' THEN 'Bridge'\n",
+        "    WHEN table_name LIKE 'ref_%' THEN 'Reference'\n",
+        "    WHEN table_name LIKE 'dim_%' THEN 'Dimension'\n",
+        "    WHEN table_name LIKE 'fact_%' THEN 'Fact'\n",
+        "    WHEN table_name LIKE 'agg_%' THEN 'Aggregate'\n",
+        "    WHEN table_name LIKE 'feat_%' THEN 'Feature'\n",
+        "    WHEN table_name LIKE '%_metrics' THEN 'Metric View'\n",
+        "    WHEN table_name = 'reviews_tracked_dv' THEN 'CDC Tracking'\n",
+        "    ELSE 'Other'\n",
+        "  END as entity_type\n",
+        "FROM\n",
+        "  restaurant_chain_db.information_schema.tables\n",
+        "WHERE\n",
+        "  table_schema IN ('staging', 'raw_vault', 'business_vault', 'marts')\n",
+        "  AND table_name NOT LIKE '__materialization%'\n",
+        "  AND table_name NOT LIKE 'event_log%'\n",
+        "ORDER BY\n",
+        "  layer,\n",
+        "  entity_type,\n",
+        "  table_name"
+      ]
+    },
+    {
+      "name": "pipeline_info",
+      "displayName": "Pipeline Configuration",
+      "queryLines": [
+        "SELECT\n",
+        "  '1' as execution_order,\n",
+        "  'Staging' as pipeline_name,\n",
+        "  'staging' as target_schema,\n",
+        "  '52d2a9a9-f95d-47db-ba40-f9f93773c614' as pipeline_id,\n",
+        "  'Ingests raw CSVs, applies schema + data types' as description,\n",
+        "  6 as table_count\n",
+        "UNION ALL\n",
+        "SELECT\n",
+        "  '2',\n",
+        "  'Raw Vault',\n",
+        "  'raw_vault',\n",
+        "  '424fbe62-268e-482a-bf6a-2f2e1a9ad745',\n",
+        "  'Hubs, Links, Satellites with hash keys + load dates',\n",
+        "  14\n",
+        "UNION ALL\n",
+        "SELECT\n",
+        "  '3',\n",
+        "  'Business Vault',\n",
+        "  'business_vault',\n",
+        "  '3c668f9c-e3eb-4a89-9314-c600638a6d11',\n",
+        "  'PITs, Bridges, AI Sentiment, CDC tracking',\n",
+        "  11\n",
+        "UNION ALL\n",
+        "SELECT\n",
+        "  '4',\n",
+        "  'Marts',\n",
+        "  'marts',\n",
+        "  '17760f0e-7304-45df-aa23-ae495f1a836e',\n",
+        "  'Dims, Facts, Aggregates, Features, Metric Views',\n",
+        "  20"
+      ]
+    },
+    {
+      "name": "entity_breakdown",
+      "displayName": "DV Entity Type Breakdown",
+      "queryLines": [
+        "SELECT\n",
+        "  CASE\n",
+        "    WHEN table_name LIKE 'stg_%' THEN 'Staging Table'\n",
+        "    WHEN table_name LIKE 'hub_%' THEN 'Hub'\n",
+        "    WHEN table_name LIKE 'lnk_%' THEN 'Link'\n",
+        "    WHEN table_name LIKE 'sat_%' THEN 'Satellite'\n",
+        "    WHEN table_name LIKE 'pit_%' THEN 'PIT'\n",
+        "    WHEN table_name LIKE 'bridge_%' THEN 'Bridge'\n",
+        "    WHEN table_name LIKE 'ref_%' THEN 'Reference'\n",
+        "    WHEN table_name LIKE 'dim_%' THEN 'Dimension'\n",
+        "    WHEN table_name LIKE 'fact_%' THEN 'Fact'\n",
+        "    WHEN table_name LIKE 'agg_%' THEN 'Aggregate'\n",
+        "    WHEN table_name LIKE 'feat_%' THEN 'Feature'\n",
+        "    WHEN table_name LIKE '%_metrics' THEN 'Metric View'\n",
+        "    WHEN table_name = 'reviews_tracked_dv' THEN 'CDC Tracking'\n",
+        "    ELSE 'Other'\n",
+        "  END as entity_type,\n",
+        "  COUNT(*) as table_count\n",
+        "FROM\n",
+        "  restaurant_chain_db.information_schema.tables\n",
+        "WHERE\n",
+        "  table_schema IN ('staging', 'raw_vault', 'business_vault', 'marts')\n",
+        "  AND table_name NOT LIKE '__materialization%'\n",
+        "  AND table_name NOT LIKE 'event_log%'\n",
+        "GROUP BY\n",
+        "  1\n",
+        "ORDER BY\n",
+        "  table_count DESC"
+      ]
+    },
+    {
+      "name": "layer_summary",
+      "displayName": "DV Layer Summary",
+      "queryLines": [
+        "SELECT\n",
+        "  CASE\n",
+        "    WHEN table_schema = 'staging' THEN '1-Staging'\n",
+        "    WHEN table_schema = 'raw_vault' THEN '2-Raw Vault'\n",
+        "    WHEN table_schema = 'business_vault' THEN '3-Business Vault'\n",
+        "    WHEN table_schema = 'marts' THEN '4-Marts'\n",
+        "  END as layer,\n",
+        "  COUNT(*) as table_count,\n",
+        "  SUM(\n",
+        "    CASE\n",
+        "      WHEN table_type = 'MATERIALIZED_VIEW' THEN 1\n",
+        "      ELSE 0\n",
+        "    END\n",
+        "  ) as materialized_views,\n",
+        "  SUM(\n",
+        "    CASE\n",
+        "      WHEN table_type = 'STREAMING_TABLE' THEN 1\n",
+        "      ELSE 0\n",
+        "    END\n",
+        "  ) as streaming_tables,\n",
+        "  SUM(\n",
+        "    CASE\n",
+        "      WHEN table_type = 'METRIC_VIEW' THEN 1\n",
+        "      ELSE 0\n",
+        "    END\n",
+        "  ) as metric_views\n",
+        "FROM\n",
+        "  restaurant_chain_db.information_schema.tables\n",
+        "WHERE\n",
+        "  table_schema IN ('staging', 'raw_vault', 'business_vault', 'marts')\n",
+        "  AND table_name NOT LIKE '__materialization%'\n",
+        "  AND table_name NOT LIKE 'event_log%'\n",
+        "GROUP BY\n",
+        "  table_schema\n",
+        "ORDER BY\n",
+        "  layer"
+      ]
+    },
+    {
+      "name": "dq_checks",
+      "displayName": "Data Quality Checks",
+      "queryLines": [
+        "SELECT\n",
+        "  'Ghost Records — dim_customer' as check_name,\n",
+        "  'Marts' as layer,\n",
+        "  'dim_customer has 505 rows (504 real + 1 UNKNOWN ghost record for referential integrity)' as description,\n",
+        "  'Expected' as status\n",
+        "UNION ALL\n",
+        "SELECT\n",
+        "  'Ghost Records — dim_restaurant',\n",
+        "  'Marts',\n",
+        "  'dim_restaurant has 7 rows (6 real + 1 UNKNOWN ghost record for referential integrity)',\n",
+        "  'Expected'\n",
+        "UNION ALL\n",
+        "SELECT\n",
+        "  'Orphan Reviews Dropped',\n",
+        "  'Marts',\n",
+        "  'fact_review has 82 rows vs 84 raw reviews — 2 reviews reference non-existent orders, dropped by INNER JOIN',\n",
+        "  'Expected'\n",
+        "UNION ALL\n",
+        "SELECT\n",
+        "  'Duplicate Orders in Staging',\n",
+        "  'Raw Vault',\n",
+        "  'hub_order has 36,726 unique keys vs 36,961 staging rows — 235 duplicate order_ids deduplicated by hub',\n",
+        "  'Expected'\n",
+        "UNION ALL\n",
+        "SELECT\n",
+        "  'Order Item Count Variance',\n",
+        "  'Raw Vault',\n",
+        "  'lnk_order_item (110,789) vs sat_order_item (110,801) — 12 row difference due to link dedup vs satellite history',\n",
+        "  'Monitor'\n",
+        "UNION ALL\n",
+        "SELECT\n",
+        "  'AI Sentiment Coverage',\n",
+        "  'Business Vault',\n",
+        "  'sat_review_sentiment has 84 rows = full coverage of all 84 raw reviews processed by AI',\n",
+        "  'Healthy'"
+      ]
+    }
+  ],
+  "pages": [
+    {
+      "name": "2cc37ff6",
+      "displayName": "Pipeline Architecture Overview",
+      "layout": [
+        {
+          "widget": {
+            "name": "title",
+            "multilineTextboxSpec": {
+              "lines": [
+                "## Data Vault 2.1 — Pipeline Architecture & Health Monitor"
+              ]
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 0,
+            "width": 12,
+            "height": 1
+          }
+        },
+        {
+          "widget": {
+            "name": "kpi_total",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "table_inventory",
+                  "fields": [
+                    {
+                      "name": "count(table_name)",
+                      "expression": "COUNT(`table_name`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "frame": {
+                "title": "Total DV Objects",
+                "showTitle": true
+              },
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "count(table_name)",
+                  "format": {
+                    "type": "number-plain",
+                    "decimalPlaces": {
+                      "type": "exact",
+                      "places": 0
+                    },
+                    "abbreviation": "none"
+                  },
+                  "displayName": "Total Objects"
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 1,
+            "width": 2,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "kpi_staging",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "table_inventory",
+                  "fields": [
+                    {
+                      "name": "count(table_name)",
+                      "expression": "COUNT(`table_name`)"
+                    }
+                  ],
+                  "filters": [
+                    {
+                      "expression": "`layer` IN ('1-Staging')"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "frame": {
+                "title": "Staging Tables",
+                "showTitle": true
+              },
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "count(table_name)",
+                  "format": {
+                    "type": "number-plain",
+                    "decimalPlaces": {
+                      "type": "exact",
+                      "places": 0
+                    },
+                    "abbreviation": "none"
+                  },
+                  "displayName": "Staging Count"
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 2,
+            "y": 1,
+            "width": 2,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "kpi_raw",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "table_inventory",
+                  "fields": [
+                    {
+                      "name": "count(table_name)",
+                      "expression": "COUNT(`table_name`)"
+                    }
+                  ],
+                  "filters": [
+                    {
+                      "expression": "`layer` IN ('2-Raw Vault')"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "frame": {
+                "title": "Raw Vault Tables",
+                "showTitle": true
+              },
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "count(table_name)",
+                  "format": {
+                    "type": "number-plain",
+                    "decimalPlaces": {
+                      "type": "exact",
+                      "places": 0
+                    },
+                    "abbreviation": "none"
+                  },
+                  "displayName": "Raw Vault Count"
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 4,
+            "y": 1,
+            "width": 3,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "kpi_bv",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "table_inventory",
+                  "fields": [
+                    {
+                      "name": "count(table_name)",
+                      "expression": "COUNT(`table_name`)"
+                    }
+                  ],
+                  "filters": [
+                    {
+                      "expression": "`layer` IN ('3-Business Vault')"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "frame": {
+                "title": "Business Vault Tables",
+                "showTitle": true
+              },
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "count(table_name)",
+                  "format": {
+                    "type": "number-plain",
+                    "decimalPlaces": {
+                      "type": "exact",
+                      "places": 0
+                    },
+                    "abbreviation": "none"
+                  },
+                  "displayName": "BV Count"
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 7,
+            "y": 1,
+            "width": 3,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "kpi_marts",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "table_inventory",
+                  "fields": [
+                    {
+                      "name": "count(table_name)",
+                      "expression": "COUNT(`table_name`)"
+                    }
+                  ],
+                  "filters": [
+                    {
+                      "expression": "`layer` IN ('4-Marts')"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "frame": {
+                "title": "Marts Objects",
+                "showTitle": true
+              },
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "count(table_name)",
+                  "format": {
+                    "type": "number-plain",
+                    "decimalPlaces": {
+                      "type": "exact",
+                      "places": 0
+                    },
+                    "abbreviation": "none"
+                  },
+                  "displayName": "Marts Count"
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 10,
+            "y": 1,
+            "width": 2,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "bar_by_layer",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "layer_summary",
+                  "fields": [
+                    {
+                      "name": "layer",
+                      "expression": "`layer`"
+                    },
+                    {
+                      "name": "sum(table_count)",
+                      "expression": "SUM(`table_count`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "frame": {
+                "title": "Tables by Data Vault Layer",
+                "showTitle": true
+              },
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "layer",
+                  "displayName": "Layer",
+                  "scale": {
+                    "type": "categorical",
+                    "sort": {
+                      "by": "natural-order"
+                    }
+                  }
+                },
+                "y": {
+                  "fieldName": "sum(table_count)",
+                  "axis": {
+                    "hideTitle": true
+                  },
+                  "displayName": "Table Count",
+                  "scale": {
+                    "type": "quantitative"
+                  }
+                },
+                "color": {
+                  "fieldName": "layer",
+                  "displayName": "Layer",
+                  "scale": {
+                    "type": "categorical"
+                  }
+                },
+                "label": {
+                  "show": true
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 3,
+            "width": 6,
+            "height": 5
+          }
+        },
+        {
+          "widget": {
+            "name": "bar_entity_types",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "entity_breakdown",
+                  "fields": [
+                    {
+                      "name": "entity_type",
+                      "expression": "`entity_type`"
+                    },
+                    {
+                      "name": "sum(table_count)",
+                      "expression": "SUM(`table_count`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "frame": {
+                "title": "DV Entity Type Distribution",
+                "showTitle": true
+              },
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "entity_type",
+                  "displayName": "Entity Type",
+                  "scale": {
+                    "type": "categorical",
+                    "sort": {
+                      "by": "y-reversed"
+                    }
+                  }
+                },
+                "y": {
+                  "fieldName": "sum(table_count)",
+                  "axis": {
+                    "hideTitle": true
+                  },
+                  "displayName": "Table Count",
+                  "scale": {
+                    "type": "quantitative"
+                  }
+                },
+                "color": {
+                  "fieldName": "entity_type",
+                  "displayName": "Entity Type",
+                  "scale": {
+                    "type": "categorical"
+                  }
+                },
+                "label": {
+                  "show": true
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 6,
+            "y": 3,
+            "width": 6,
+            "height": 5
+          }
+        },
+        {
+          "widget": {
+            "name": "tbl_pipelines",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "pipeline_info",
+                  "fields": [
+                    {
+                      "name": "execution_order",
+                      "expression": "`execution_order`"
+                    },
+                    {
+                      "name": "pipeline_name",
+                      "expression": "`pipeline_name`"
+                    },
+                    {
+                      "name": "target_schema",
+                      "expression": "`target_schema`"
+                    },
+                    {
+                      "name": "description",
+                      "expression": "`description`"
+                    },
+                    {
+                      "name": "table_count",
+                      "expression": "`table_count`"
+                    },
+                    {
+                      "name": "pipeline_id",
+                      "expression": "`pipeline_id`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "frame": {
+                "title": "Pipeline Configuration — 4-Stage Orchestration",
+                "showTitle": true
+              },
+              "rowsPerPage": 25,
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "execution_order",
+                    "displayName": "Order"
+                  },
+                  {
+                    "fieldName": "pipeline_name",
+                    "displayName": "Pipeline"
+                  },
+                  {
+                    "fieldName": "target_schema",
+                    "displayName": "Target Schema"
+                  },
+                  {
+                    "fieldName": "description",
+                    "displayName": "Description"
+                  },
+                  {
+                    "fieldName": "table_count",
+                    "displayName": "Tables"
+                  },
+                  {
+                    "fieldName": "pipeline_id",
+                    "displayName": "Pipeline ID"
+                  }
+                ]
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 8,
+            "width": 12,
+            "height": 4
+          }
+        },
+        {
+          "widget": {
+            "name": "tbl_inventory",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "table_inventory",
+                  "fields": [
+                    {
+                      "name": "layer",
+                      "expression": "`layer`"
+                    },
+                    {
+                      "name": "entity_type",
+                      "expression": "`entity_type`"
+                    },
+                    {
+                      "name": "table_name",
+                      "expression": "`table_name`"
+                    },
+                    {
+                      "name": "table_type",
+                      "expression": "`table_type`"
+                    },
+                    {
+                      "name": "table_schema",
+                      "expression": "`table_schema`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "frame": {
+                "title": "Full Table Inventory — All DV Layers",
+                "showTitle": true
+              },
+              "rowsPerPage": 25,
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "layer",
+                    "displayName": "Layer"
+                  },
+                  {
+                    "fieldName": "entity_type",
+                    "displayName": "Entity Type"
+                  },
+                  {
+                    "fieldName": "table_name",
+                    "displayName": "Table Name"
+                  },
+                  {
+                    "fieldName": "table_type",
+                    "displayName": "Table Type"
+                  },
+                  {
+                    "fieldName": "table_schema",
+                    "displayName": "Schema"
+                  }
+                ]
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 12,
+            "width": 12,
+            "height": 7
+          }
+        }
+      ],
+      "pageType": "PAGE_TYPE_CANVAS",
+      "layoutVersion": "GRID_V1"
+    },
+    {
+      "name": "data_volume",
+      "displayName": "Data Volume & Quality",
+      "layout": [
+        {
+          "widget": {
+            "name": "title2",
+            "multilineTextboxSpec": {
+              "lines": [
+                "## Data Volume & Quality Monitoring"
+              ]
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 0,
+            "width": 12,
+            "height": 1
+          }
+        },
+        {
+          "widget": {
+            "name": "kpi_total_rows",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "row_counts",
+                  "fields": [
+                    {
+                      "name": "sum(row_count)",
+                      "expression": "SUM(`row_count`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "frame": {
+                "title": "Total Data Rows (All Tables)",
+                "showTitle": true
+              },
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "sum(row_count)",
+                  "format": {
+                    "type": "number-plain",
+                    "decimalPlaces": {
+                      "type": "exact",
+                      "places": 1
+                    },
+                    "abbreviation": "compact"
+                  },
+                  "displayName": "Total Rows"
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 1,
+            "width": 4,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "kpi_tables_monitored",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "row_counts",
+                  "fields": [
+                    {
+                      "name": "count(table_name)",
+                      "expression": "COUNT(`table_name`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "frame": {
+                "title": "Tables Monitored",
+                "showTitle": true
+              },
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "count(table_name)",
+                  "format": {
+                    "type": "number-plain",
+                    "decimalPlaces": {
+                      "type": "exact",
+                      "places": 0
+                    },
+                    "abbreviation": "none"
+                  },
+                  "displayName": "Table Count"
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 4,
+            "y": 1,
+            "width": 4,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "kpi_dq_status",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "dq_checks",
+                  "fields": [
+                    {
+                      "name": "count(check_name)",
+                      "expression": "COUNT(`check_name`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "frame": {
+                "title": "Data Quality Checks",
+                "showTitle": true
+              },
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "count(check_name)",
+                  "format": {
+                    "type": "number-plain",
+                    "decimalPlaces": {
+                      "type": "exact",
+                      "places": 0
+                    },
+                    "abbreviation": "none"
+                  },
+                  "displayName": "Total Checks"
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 8,
+            "y": 1,
+            "width": 4,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "bar_row_counts",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "row_counts",
+                  "fields": [
+                    {
+                      "name": "layer",
+                      "expression": "`layer`"
+                    },
+                    {
+                      "name": "table_name",
+                      "expression": "`table_name`"
+                    },
+                    {
+                      "name": "sum(row_count)",
+                      "expression": "SUM(`row_count`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "frame": {
+                "title": "Row Counts by Table (All Layers)",
+                "showTitle": true
+              },
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "table_name",
+                  "displayName": "Table Name",
+                  "scale": {
+                    "type": "categorical",
+                    "sort": {
+                      "by": "y-reversed"
+                    }
+                  }
+                },
+                "y": {
+                  "fieldName": "sum(row_count)",
+                  "format": {
+                    "type": "number-plain",
+                    "abbreviation": "compact"
+                  },
+                  "axis": {
+                    "hideTitle": true
+                  },
+                  "displayName": "Row Count",
+                  "scale": {
+                    "type": "quantitative"
+                  }
+                },
+                "color": {
+                  "fieldName": "layer",
+                  "displayName": "Layer",
+                  "scale": {
+                    "type": "categorical"
+                  }
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 3,
+            "width": 12,
+            "height": 7
+          }
+        },
+        {
+          "widget": {
+            "name": "tbl_dq_checks",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "dq_checks",
+                  "fields": [
+                    {
+                      "name": "check_name",
+                      "expression": "`check_name`"
+                    },
+                    {
+                      "name": "layer",
+                      "expression": "`layer`"
+                    },
+                    {
+                      "name": "status",
+                      "expression": "`status`"
+                    },
+                    {
+                      "name": "description",
+                      "expression": "`description`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "frame": {
+                "title": "Data Quality Observations & Known Issues",
+                "showTitle": true
+              },
+              "rowsPerPage": 25,
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "check_name",
+                    "displayName": "Check"
+                  },
+                  {
+                    "fieldName": "layer",
+                    "displayName": "Layer"
+                  },
+                  {
+                    "fieldName": "status",
+                    "displayName": "Status",
+                    "style": {
+                      "type": "basic",
+                      "rules": [
+                        {
+                          "condition": {
+                            "operand": {
+                              "type": "data-value",
+                              "value": "Healthy"
+                            },
+                            "operator": "="
+                          },
+                          "backgroundColor": "#C8E6C9",
+                          "foregroundColor": "#1B5E20"
+                        },
+                        {
+                          "condition": {
+                            "operand": {
+                              "type": "data-value",
+                              "value": "Expected"
+                            },
+                            "operator": "="
+                          },
+                          "backgroundColor": "#FFF9C4",
+                          "foregroundColor": "#F57F17"
+                        },
+                        {
+                          "condition": {
+                            "operand": {
+                              "type": "data-value",
+                              "value": "Monitor"
+                            },
+                            "operator": "="
+                          },
+                          "backgroundColor": "#FFCDD2",
+                          "foregroundColor": "#B71C1C"
+                        }
+                      ]
+                    }
+                  },
+                  {
+                    "fieldName": "description",
+                    "displayName": "Description"
+                  }
+                ]
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 10,
+            "width": 12,
+            "height": 5
+          }
+        },
+        {
+          "widget": {
+            "name": "tbl_row_detail",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "row_counts",
+                  "fields": [
+                    {
+                      "name": "layer",
+                      "expression": "`layer`"
+                    },
+                    {
+                      "name": "entity_type",
+                      "expression": "`entity_type`"
+                    },
+                    {
+                      "name": "table_name",
+                      "expression": "`table_name`"
+                    },
+                    {
+                      "name": "row_count",
+                      "expression": "`row_count`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "frame": {
+                "title": "Detailed Row Counts — All 47 User-Facing Tables",
+                "showTitle": true
+              },
+              "rowsPerPage": 25,
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "layer",
+                    "displayName": "Layer"
+                  },
+                  {
+                    "fieldName": "entity_type",
+                    "displayName": "Entity Type"
+                  },
+                  {
+                    "fieldName": "table_name",
+                    "displayName": "Table Name"
+                  },
+                  {
+                    "fieldName": "row_count",
+                    "displayName": "Row Count"
+                  }
+                ]
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 15,
+            "width": 12,
+            "height": 7
+          }
+        }
+      ],
+      "pageType": "PAGE_TYPE_CANVAS",
+      "layoutVersion": "GRID_V1"
+    }
+  ],
+  "uiSettings": {
+    "theme": {
+      "widgetHeaderAlignment": "ALIGNMENT_UNSPECIFIED"
+    },
+    "applyModeEnabled": false
+  }
+}

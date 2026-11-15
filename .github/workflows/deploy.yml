@@ -1,0 +1,150 @@
+
+# GitHub Actions CI/CD for Data Vault 2.1 Pipeline
+# Validates bundle on PRs, deploys on merge to main.
+#
+# ┌─────────────────────────────────────────────────────────────────┐
+# │  AUTH: OAuth M2M (service principal) — Databricks recommended  │
+# │  Uses DATABRICKS_CLIENT_ID + DATABRICKS_CLIENT_SECRET          │
+# │  instead of PATs. The Databricks CLI unified auth handles      │
+# │  token generation and refresh automatically.                   │
+# └─────────────────────────────────────────────────────────────────┘
+#
+# Required GitHub Secrets (Settings → Secrets → Actions):
+#   DATABRICKS_HOST           — Workspace URL (also used as workspace_host bundle var)
+#   DATABRICKS_CLIENT_ID      — Service principal application (client) ID
+#   DATABRICKS_CLIENT_SECRET  — Service principal OAuth secret
+#   NOTIFICATION_EMAIL        — Email for job failure alerts
+#   WAREHOUSE_ID              — SQL warehouse ID for dashboards
+#
+# Required Databricks Secrets Scope (res-chain-pipeline):
+#   eh-conn-str               — Event Hub connection string (used at pipeline RUNTIME)
+#   db_admin_user             — SQL Server username (used at pipeline RUNTIME)
+#   db_admin_password         — SQL Server password (used at pipeline RUNTIME)
+#
+# Service principal setup:
+#   1. Databricks Account Console → Settings → Service Principals → Add
+#   2. Generate an OAuth secret for the service principal
+#   3. Assign the SP to your workspace with CAN_MANAGE permissions
+#   4. Grant the SP access to the secrets scope:
+#      databricks secrets put-acl --scope res-chain-pipeline --principal <sp-id> --permission READ
+#   5. Grant the SP USE CATALOG and USE SCHEMA on restaurant_chain_db
+#   6. Store client_id and secret as GitHub encrypted secrets
+
+name: "Deploy Data Vault Pipeline"
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: pipeline-deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: "Validate Bundle"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Databricks CLI
+        uses: databricks/setup-cli@main
+
+      - name: Validate bundle configuration
+        run: databricks bundle validate --target dev
+        env:
+          # CLI auth — DATABRICKS_HOST also resolves workspace.host
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+          DATABRICKS_CLIENT_ID: ${{ secrets.DATABRICKS_CLIENT_ID }}
+          DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_CLIENT_SECRET }}
+          # Bundle variables (only those without defaults)
+          BUNDLE_VAR_notification_email: ${{ secrets.NOTIFICATION_EMAIL }}
+          BUNDLE_VAR_warehouse_id: ${{ secrets.WAREHOUSE_ID }}
+
+  deploy:
+    name: "Deploy to Databricks Workspace"
+    runs-on: ubuntu-latest
+    needs: validate
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Databricks CLI
+        uses: databricks/setup-cli@main
+
+      - name: Deploy bundle to dev target
+        run: databricks bundle deploy --target dev --force
+        env:
+          # CLI auth — DATABRICKS_HOST also resolves workspace.host
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+          DATABRICKS_CLIENT_ID: ${{ secrets.DATABRICKS_CLIENT_ID }}
+          DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_CLIENT_SECRET }}
+          # Bundle variables (only those without defaults)
+          BUNDLE_VAR_notification_email: ${{ secrets.NOTIFICATION_EMAIL }}
+          BUNDLE_VAR_warehouse_id: ${{ secrets.WAREHOUSE_ID }}
+      # ── Post-Deploy: Apply Unity Catalog permissions ────────────
+      # Schema-level GRANT SELECT persists across table recreation.
+      # Safe to run on every deploy (idempotent). If account-level
+      # groups don't exist yet, individual statements fail gracefully
+      # but the rest continue (set +e / set -e pattern).
+      - name: Apply Unity Catalog permissions
+        run: |
+          echo "Applying post-deploy permissions..."
+          set +e
+          while IFS= read -r stmt; do
+            stmt=$(echo "$stmt" | sed 's/^[[:space:]]*//' | sed 's/[[:space:]]*$//')
+            [ -z "$stmt" ] && continue
+            [[ "$stmt" == --* ]] && continue
+            echo "  → $stmt"
+            databricks sql execute --warehouse-id "$WAREHOUSE_ID" --statement "$stmt" 2>&1 | tail -1
+          done < scripts/apply_grants.sql
+          set -e
+          echo "✅ Permissions applied"
+        env:
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+          DATABRICKS_CLIENT_ID: ${{ secrets.DATABRICKS_CLIENT_ID }}
+          DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_CLIENT_SECRET }}
+          WAREHOUSE_ID: ${{ secrets.WAREHOUSE_ID }}
+
+  run-pipeline:
+    name: "Run orchestrated pipelines"
+    runs-on: ubuntu-latest
+    needs: deploy
+    steps:
+      - uses: actions/checkout@v4
+      - uses: databricks/setup-cli@main
+
+      - name: Run orchestration job
+        run: databricks bundle run orchestration_job --target dev
+        env:
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+          DATABRICKS_CLIENT_ID: ${{ secrets.DATABRICKS_CLIENT_ID }}
+          DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_CLIENT_SECRET }}
+          BUNDLE_VAR_notification_email: ${{ secrets.NOTIFICATION_EMAIL }}
+          BUNDLE_VAR_warehouse_id: ${{ secrets.WAREHOUSE_ID }}  
+  # ── Future: Uncomment for prod deployment ──────────────────────
+  # deploy-prod:
+  #   name: "Deploy to Production"
+  #   runs-on: ubuntu-latest
+  #   needs: deploy
+  #   if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+  #   environment: production
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - uses: databricks/setup-cli@main
+  #     - name: Deploy bundle to prod
+  #       run: databricks bundle deploy --target prod --force
+  #       env:
+  #         # CLI auth — DATABRICKS_HOST also resolves workspace.host
+  #         DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+  #         DATABRICKS_CLIENT_ID: ${{ secrets.DATABRICKS_CLIENT_ID_PROD }}
+  #         DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_CLIENT_SECRET_PROD }}
+  #         # Bundle variables (only those without defaults)
+  #         BUNDLE_VAR_notification_email: ${{ secrets.NOTIFICATION_EMAIL_PROD }}
+  #         BUNDLE_VAR_warehouse_id: ${{ secrets.WAREHOUSE_ID_PROD }}

@@ -1,0 +1,127 @@
+
+# yaml-language-server: $schema=bundle_config_schema.json
+#
+# Data Vault 2.1 Restaurant Chain Analytics — Declarative Automation Bundle
+# Catalog: restaurant_chain_db | Architecture: Data Vault 2.1
+# Layers: Bronze → Staging → Raw Vault → Business Vault → Marts
+#
+# ┌─────────────────────────────────────────────────────────────────────┐
+# │  WORKSPACE TARGETING                                               │
+# │  No workspace.host is set here — the Databricks CLI resolves it    │
+# │  from the DATABRICKS_HOST env var (required for auth anyway).      │
+# │  This is the Databricks-recommended approach for portable bundles. │
+# │  See: https://learn.microsoft.com/azure/databricks/dev-tools/      │
+# │       bundles/authentication/                                      │
+# └─────────────────────────────────────────────────────────────────────┘
+
+bundle:
+  name: restaurant-chain-datavault-analytics
+  engine: direct
+
+include:
+  - resources/*.yml
+
+# Prevent dashboard JSON files from syncing as regular workspace files.
+# They are managed exclusively by the dashboard resource definitions.
+sync:
+  exclude:
+    - src/dashboards/*.lvdash.json
+
+variables:
+  # ── Workspace-Specific (no defaults — must be provided) ──────────
+  #
+  # warehouse_id: Required for AI/BI dashboard resources.
+  #   Find yours at: SQL Warehouses → select warehouse → ID in URL
+  #   Or via CLI:    databricks warehouses list --output JSON
+  warehouse_id:
+    description: "SQL warehouse ID for dashboards and queries"
+
+  notification_email:
+    description: "Email address for job failure notifications"
+    default: ""
+
+  # ── Catalog & Schema ──────────────────────────────────────────
+  catalog:
+    description: "Unity Catalog catalog for all pipeline tables"
+    default: restaurant_chain_db
+
+  bronze_schema:
+    description: "Target schema for bronze layer tables"
+    default: "01_bronze"
+
+  staging_schema:
+    description: "Target schema for staging layer tables"
+    default: staging
+
+  raw_vault_schema:
+    description: "Target schema for raw vault layer tables"
+    default: raw_vault
+
+  business_vault_schema:
+    description: "Target schema for business vault layer tables"
+    default: business_vault
+
+  marts_schema:
+    description: "Target schema for marts layer tables"
+    default: marts
+
+  # ── Event Hub Configuration ───────────────────────────────────
+  eh_namespace:
+    description: "Azure Event Hub namespace"
+    default: res-orders-dev
+
+  eh_name:
+    description: "Azure Event Hub name"
+    default: orders
+
+  eh_starting_offsets:
+    description: "Event Hub consumer starting offsets"
+    default: earliest
+
+  eh_max_offsets_per_trigger:
+    description: "Max offsets per micro-batch trigger"
+    default: "10000"
+
+  # ── Azure SQL Server Configuration ───────────────────────────
+  sql_host_name:
+    description: "Azure SQL Server hostname"
+    default: res-chain-db-server.database.windows.net
+
+  sql_db_name:
+    description: "Azure SQL Database name"
+    default: res-chain-db
+
+  # ── Secrets ───────────────────────────────────────────────────
+  # Runtime credentials are stored in a Databricks secrets scope,
+  # NOT in bundle variables. The scope name is configurable.
+  secrets_scope:
+    description: "Databricks secrets scope name"
+    default: res-chain-pipeline
+
+targets:
+  dev:
+    mode: development
+    default: true
+    # workspace.host is intentionally omitted.
+    # The CLI resolves it from the DATABRICKS_HOST env var,
+    # which is already required for authentication (OAuth M2M or U2M).
+    # This makes the bundle portable across any workspace.
+
+  # ── Future: Production target ─────────────────────────────────
+  # prod:
+  #   mode: production
+  #   # For prod, you may hardcode the host or use a separate
+  #   # DATABRICKS_HOST value in your CI/CD environment.
+  #   workspace:
+  #     root_path: /Workspace/Shared/.bundle/${bundle.name}/${bundle.target}
+  #   variables:
+  #     catalog: restaurant_chain_db
+  #     eh_namespace: res-orders-prod
+  #     eh_starting_offsets: latest
+  #     sql_host_name: res-chain-db-server-prod.database.windows.net
+  #     sql_db_name: res-chain-db-prod
+  #   run_as:
+  #     service_principal_name: datavault-pipeline-sp
+  #   permissions:
+  #     - service_principal_name: datavault-pipeline-sp
+  #       level: IS_OWNER

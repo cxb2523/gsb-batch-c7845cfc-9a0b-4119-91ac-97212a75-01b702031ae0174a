@@ -1,0 +1,445 @@
+version: 1.1
+
+source: restaurant_chain_db.marts.agg_restaurant_performance_daily
+
+comment: "Canonical sales and operations metrics for the restaurant chain. Single\
+  \ source of truth for all BI dashboards, Genie spaces, and stakeholder reporting.\
+  \ Measures are pre-aggregated at the restaurant x date grain — use SUM to roll up\
+  \ correctly."
+
+dimensions:
+  - name: restaurant_id
+    expr: source.restaurant_id
+    comment: Unique restaurant identifier (e.g. REST-DXB-001)
+    display_name: Restaurant Id
+  - name: restaurant_name
+    expr: source.restaurant_name
+    comment: Restaurant branch name
+    display_name: Restaurant
+    synonyms:
+      - branch
+      - location
+      - store
+  - name: restaurant_city
+    expr: source.restaurant_city
+    comment: City where the restaurant is located
+    display_name: City
+    synonyms:
+      - city
+      - region
+  - name: order_date
+    expr: source.order_date
+    comment: Date the orders were placed
+    display_name: Order Date
+    format:
+      type: date
+      date_format: year_month_day
+    synonyms:
+      - date
+      - day
+  - name: order_year
+    expr: source.order_year
+    comment: Year extracted from order date
+    display_name: Year
+    synonyms:
+      - year
+  - name: order_quarter
+    expr: source.order_quarter
+    comment: Quarter of the year (1-4)
+    display_name: Quarter
+    synonyms:
+      - quarter
+      - Q
+  - name: order_month
+    expr: source.order_month
+    comment: Month of the year (1-12)
+    display_name: Month
+    synonyms:
+      - month
+  - name: order_day_of_week
+    expr: source.order_day_of_week
+    comment: "Day of the week (1=Sunday, 7=Saturday)"
+    display_name: Day of Week
+    synonyms:
+      - weekday
+      - day of week
+  - name: is_weekend
+    expr: source.is_weekend
+    comment: Whether the order date falls on Saturday or Sunday
+    display_name: Weekend
+    synonyms:
+      - weekend
+
+measures:
+  - name: total_revenue
+    expr: SUM(source.total_revenue)
+    comment: Total revenue across all orders
+    display_name: Total Revenue
+    format:
+      type: currency
+      currency_code: AED
+      decimal_places:
+        type: exact
+        places: 2
+    synonyms:
+      - revenue
+      - sales
+      - income
+  - name: total_orders
+    expr: SUM(source.total_orders)
+    comment: Total number of orders placed
+    display_name: Total Orders
+    format:
+      type: number
+      decimal_places:
+        type: exact
+        places: 0
+    synonyms:
+      - orders
+      - order count
+      - number of orders
+  - name: unique_customers
+    expr: SUM(source.unique_customers)
+    comment: Count of distinct customers who placed orders
+    display_name: Unique Customers
+    format:
+      type: number
+      decimal_places:
+        type: exact
+        places: 0
+    synonyms:
+      - customers
+      - customer count
+  - name: total_items_sold
+    expr: SUM(source.total_items_sold)
+    comment: Total number of menu items sold across all orders
+    display_name: Total Items Sold
+    format:
+      type: number
+      decimal_places:
+        type: exact
+        places: 0
+    synonyms:
+      - items sold
+      - quantity sold
+  - name: dine_in_orders
+    expr: SUM(source.dine_in_orders)
+    comment: Number of dine-in orders
+    display_name: Dine-In Orders
+    format:
+      type: number
+      decimal_places:
+        type: exact
+        places: 0
+    synonyms:
+      - dine in
+      - in-house orders
+  - name: takeaway_orders
+    expr: SUM(source.takeaway_orders)
+    comment: Number of takeaway orders
+    display_name: Takeaway Orders
+    format:
+      type: number
+      decimal_places:
+        type: exact
+        places: 0
+    synonyms:
+      - takeaway
+      - take out
+  - name: delivery_orders
+    expr: SUM(source.delivery_orders)
+    comment: Number of delivery orders
+    display_name: Delivery Orders
+    format:
+      type: number
+      decimal_places:
+        type: exact
+        places: 0
+    synonyms:
+      - delivery
+      - deliveries
+  - name: card_orders
+    expr: SUM(source.card_orders)
+    comment: Number of orders paid by card
+    display_name: Card Orders
+    format:
+      type: number
+      decimal_places:
+        type: exact
+        places: 0
+  - name: cash_orders
+    expr: SUM(source.cash_orders)
+    comment: Number of orders paid by cash
+    display_name: Cash Orders
+    format:
+      type: number
+      decimal_places:
+        type: exact
+        places: 0
+  - name: wallet_orders
+    expr: SUM(source.wallet_orders)
+    comment: Number of orders paid by digital wallet
+    display_name: Wallet Orders
+    format:
+      type: number
+      decimal_places:
+        type: exact
+        places: 0
+    synonyms:
+      - digital wallet orders
+  - name: avg_order_value
+    expr: MEASURE(total_revenue) / MEASURE(total_orders)
+    comment: Average revenue per order. Composable — correct at any grain.
+    display_name: Avg Order Value
+    format:
+      type: currency
+      currency_code: AED
+      decimal_places:
+        type: exact
+        places: 2
+    synonyms:
+      - AOV
+      - average order value
+      - basket value
+  - name: avg_items_per_order
+    expr: MEASURE(total_items_sold) / MEASURE(total_orders)
+    comment: Average number of menu items per order. Composable — correct at any grain.
+    display_name: Avg Items Per Order
+    format:
+      type: number
+      decimal_places:
+        type: exact
+        places: 1
+    synonyms:
+      - basket size
+      - items per order
+  - name: revenue_per_customer
+    expr: MEASURE(total_revenue) / MEASURE(unique_customers)
+    comment: Average revenue per unique customer. Key customer value metric.
+    display_name: Revenue Per Customer
+    format:
+      type: currency
+      currency_code: AED
+      decimal_places:
+        type: exact
+        places: 2
+    synonyms:
+      - ARPU
+      - spend per customer
+      - customer value
+  - name: dine_in_mix_pct
+    expr: MEASURE(dine_in_orders) * 100.0 / MEASURE(total_orders)
+    comment: Percentage of orders that are dine-in
+    display_name: Dine-In Mix %
+    format:
+      type: number
+      decimal_places:
+        type: exact
+        places: 1
+  - name: takeaway_mix_pct
+    expr: MEASURE(takeaway_orders) * 100.0 / MEASURE(total_orders)
+    comment: Percentage of orders that are takeaway
+    display_name: Takeaway Mix %
+    format:
+      type: number
+      decimal_places:
+        type: exact
+        places: 1
+  - name: delivery_mix_pct
+    expr: MEASURE(delivery_orders) * 100.0 / MEASURE(total_orders)
+    comment: Percentage of orders that are delivery
+    display_name: Delivery Mix %
+    format:
+      type: number
+      decimal_places:
+        type: exact
+        places: 1
+    synonyms:
+      - delivery percentage
+      - delivery share
+  - name: card_mix_pct
+    expr: MEASURE(card_orders) * 100.0 / MEASURE(total_orders)
+    comment: Percentage of orders paid by card
+    display_name: Card Mix %
+    format:
+      type: number
+      decimal_places:
+        type: exact
+        places: 1
+  - name: cash_mix_pct
+    expr: MEASURE(cash_orders) * 100.0 / MEASURE(total_orders)
+    comment: Percentage of orders paid by cash
+    display_name: Cash Mix %
+    format:
+      type: number
+      decimal_places:
+        type: exact
+        places: 1
+  - name: wallet_mix_pct
+    expr: MEASURE(wallet_orders) * 100.0 / MEASURE(total_orders)
+    comment: Percentage of orders paid by digital wallet
+    display_name: Wallet Mix %
+    format:
+      type: number
+      decimal_places:
+        type: exact
+        places: 1
+  - name: digital_payment_pct
+    expr: (MEASURE(card_orders) + MEASURE(wallet_orders)) * 100.0 / MEASURE(total_orders)
+    comment: Percentage of orders paid digitally (card + wallet). Key cashless adoption
+      KPI.
+    display_name: Digital Payment %
+    format:
+      type: number
+      decimal_places:
+        type: exact
+        places: 1
+    synonyms:
+      - cashless percentage
+      - digital adoption
+  - name: weekend_revenue
+    expr: SUM(source.total_revenue) FILTER (WHERE is_weekend = true)
+    comment: Revenue from weekend orders (Saturday and Sunday)
+    display_name: Weekend Revenue
+    format:
+      type: currency
+      currency_code: AED
+      decimal_places:
+        type: exact
+        places: 2
+  - name: weekday_revenue
+    expr: SUM(source.total_revenue) FILTER (WHERE is_weekend = false)
+    comment: Revenue from weekday orders (Monday through Friday)
+    display_name: Weekday Revenue
+    format:
+      type: currency
+      currency_code: AED
+      decimal_places:
+        type: exact
+        places: 2
+  - name: weekend_orders
+    expr: SUM(source.total_orders) FILTER (WHERE is_weekend = true)
+    comment: Number of orders placed on weekends
+    display_name: Weekend Orders
+    format:
+      type: number
+      decimal_places:
+        type: exact
+        places: 0
+  - name: weekday_orders
+    expr: SUM(source.total_orders) FILTER (WHERE is_weekend = false)
+    comment: Number of orders placed on weekdays
+    display_name: Weekday Orders
+    format:
+      type: number
+      decimal_places:
+        type: exact
+        places: 0
+  - name: weekend_revenue_share
+    expr: MEASURE(weekend_revenue) * 100.0 / MEASURE(total_revenue)
+    comment: Weekend contribution to total revenue as a percentage
+    display_name: Weekend Revenue Share %
+    format:
+      type: number
+      decimal_places:
+        type: exact
+        places: 1
+  - name: t7d_revenue
+    expr: SUM(source.total_revenue)
+    window:
+      - order: order_date
+        semiadditive: last
+        range: trailing 7 day
+    comment: Trailing 7-day total revenue. Smooths daily fluctuations for ops dashboards.
+    display_name: Trailing 7d Revenue
+    format:
+      type: currency
+      currency_code: AED
+      decimal_places:
+        type: exact
+        places: 2
+  - name: t7d_orders
+    expr: SUM(source.total_orders)
+    window:
+      - order: order_date
+        semiadditive: last
+        range: trailing 7 day
+    comment: Trailing 7-day total orders
+    display_name: Trailing 7d Orders
+    format:
+      type: number
+      decimal_places:
+        type: exact
+        places: 0
+  - name: t30d_revenue
+    expr: SUM(source.total_revenue)
+    window:
+      - order: order_date
+        semiadditive: last
+        range: trailing 30 day
+    comment: Trailing 30-day total revenue. Monthly rolling performance indicator.
+    display_name: Trailing 30d Revenue
+    format:
+      type: currency
+      currency_code: AED
+      decimal_places:
+        type: exact
+        places: 2
+  - name: ytd_revenue
+    expr: SUM(source.total_revenue)
+    window:
+      - order: order_date
+        semiadditive: last
+        range: cumulative
+      - order: order_year
+        semiadditive: last
+        range: current
+    comment: Year-to-date cumulative revenue. Resets at each calendar year boundary.
+    display_name: YTD Revenue
+    format:
+      type: currency
+      currency_code: AED
+      decimal_places:
+        type: exact
+        places: 2
+  - name: daily_revenue
+    expr: SUM(source.total_revenue)
+    window:
+      - order: order_date
+        semiadditive: last
+        range: current
+    comment: Single-day revenue window measure for day-over-day comparison
+    display_name: Daily Revenue
+    format:
+      type: currency
+      currency_code: AED
+      decimal_places:
+        type: exact
+        places: 2
+  - name: prev_day_revenue
+    expr: SUM(source.total_revenue)
+    window:
+      - order: order_date
+        semiadditive: last
+        range: trailing 1 day
+    comment: Previous day revenue window measure for day-over-day comparison
+    display_name: Previous Day Revenue
+    format:
+      type: currency
+      currency_code: AED
+      decimal_places:
+        type: exact
+        places: 2
+  - name: revenue_dod_pct
+    expr: (MEASURE(daily_revenue) - MEASURE(prev_day_revenue)) / MEASURE(prev_day_revenue)
+      * 100
+    comment: Day-over-day revenue growth percentage
+    display_name: Revenue DoD %
+    format:
+      type: number
+      decimal_places:
+        type: exact
+        places: 1
+    synonyms:
+      - daily growth
+      - day over day

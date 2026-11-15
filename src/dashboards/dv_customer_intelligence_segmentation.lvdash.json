@@ -1,0 +1,1594 @@
+{
+  "datasets": [
+    {
+      "name": "negative_reviews",
+      "displayName": "Recent Negative Reviews",
+      "queryLines": [
+        "SELECT\n",
+        "  review_id,\n",
+        "  restaurant_name,\n",
+        "  rating,\n",
+        "  sentiment,\n",
+        "  review_text,\n",
+        "  review_date,\n",
+        "  issue_delivery,\n",
+        "  issue_delivery_reason,\n",
+        "  issue_food_quality,\n",
+        "  issue_food_quality_reason,\n",
+        "  issue_pricing,\n",
+        "  issue_pricing_reason,\n",
+        "  issue_portion_size,\n",
+        "  issue_portion_size_reason\n",
+        "FROM\n",
+        "  restaurant_chain_db.marts.fact_review\n",
+        "WHERE\n",
+        "  sentiment = 'negative'\n",
+        "ORDER BY\n",
+        "  review_date DESC"
+      ]
+    },
+    {
+      "name": "issue_types",
+      "displayName": "Issue Type Distribution",
+      "queryLines": [
+        "SELECT\n",
+        "  'Delivery' as issue_type,\n",
+        "  SUM(\n",
+        "    CASE\n",
+        "      WHEN issue_delivery = 'true' THEN 1\n",
+        "      ELSE 0\n",
+        "    END\n",
+        "  ) as issue_count\n",
+        "FROM\n",
+        "  restaurant_chain_db.marts.fact_review\n",
+        "UNION ALL\n",
+        "SELECT\n",
+        "  'Food Quality',\n",
+        "  SUM(\n",
+        "    CASE\n",
+        "      WHEN issue_food_quality = 'true' THEN 1\n",
+        "      ELSE 0\n",
+        "    END\n",
+        "  )\n",
+        "FROM\n",
+        "  restaurant_chain_db.marts.fact_review\n",
+        "UNION ALL\n",
+        "SELECT\n",
+        "  'Pricing',\n",
+        "  SUM(\n",
+        "    CASE\n",
+        "      WHEN issue_pricing = 'true' THEN 1\n",
+        "      ELSE 0\n",
+        "    END\n",
+        "  )\n",
+        "FROM\n",
+        "  restaurant_chain_db.marts.fact_review\n",
+        "UNION ALL\n",
+        "SELECT\n",
+        "  'Portion Size',\n",
+        "  SUM(\n",
+        "    CASE\n",
+        "      WHEN issue_portion_size = 'true' THEN 1\n",
+        "      ELSE 0\n",
+        "    END\n",
+        "  )\n",
+        "FROM\n",
+        "  restaurant_chain_db.marts.fact_review"
+      ]
+    },
+    {
+      "name": "issue_tracking",
+      "displayName": "Issue Tracking by Restaurant",
+      "queryLines": [
+        "SELECT\n",
+        "  restaurant_name,\n",
+        "  'Delivery' as issue_type,\n",
+        "  SUM(\n",
+        "    CASE\n",
+        "      WHEN issue_delivery = 'true' THEN 1\n",
+        "      ELSE 0\n",
+        "    END\n",
+        "  ) as issue_count\n",
+        "FROM\n",
+        "  restaurant_chain_db.marts.fact_review\n",
+        "GROUP BY\n",
+        "  restaurant_name\n",
+        "UNION ALL\n",
+        "SELECT\n",
+        "  restaurant_name,\n",
+        "  'Food Quality',\n",
+        "  SUM(\n",
+        "    CASE\n",
+        "      WHEN issue_food_quality = 'true' THEN 1\n",
+        "      ELSE 0\n",
+        "    END\n",
+        "  )\n",
+        "FROM\n",
+        "  restaurant_chain_db.marts.fact_review\n",
+        "GROUP BY\n",
+        "  restaurant_name\n",
+        "UNION ALL\n",
+        "SELECT\n",
+        "  restaurant_name,\n",
+        "  'Pricing',\n",
+        "  SUM(\n",
+        "    CASE\n",
+        "      WHEN issue_pricing = 'true' THEN 1\n",
+        "      ELSE 0\n",
+        "    END\n",
+        "  )\n",
+        "FROM\n",
+        "  restaurant_chain_db.marts.fact_review\n",
+        "GROUP BY\n",
+        "  restaurant_name\n",
+        "UNION ALL\n",
+        "SELECT\n",
+        "  restaurant_name,\n",
+        "  'Portion Size',\n",
+        "  SUM(\n",
+        "    CASE\n",
+        "      WHEN issue_portion_size = 'true' THEN 1\n",
+        "      ELSE 0\n",
+        "    END\n",
+        "  )\n",
+        "FROM\n",
+        "  restaurant_chain_db.marts.fact_review\n",
+        "GROUP BY\n",
+        "  restaurant_name"
+      ]
+    },
+    {
+      "name": "sentiment_mv",
+      "displayName": "sentiment_metrics",
+      "asset_name": "restaurant_chain_db.marts.sentiment_metrics"
+    },
+    {
+      "name": "review_by_rest",
+      "displayName": "Review Detail by Restaurant",
+      "queryLines": [
+        "SELECT\n",
+        "  restaurant_name,\n",
+        "  restaurant_city,\n",
+        "  COUNT(*) as total_reviews,\n",
+        "  ROUND(AVG(rating), 2) as avg_rating,\n",
+        "  ROUND(\n",
+        "    SUM(\n",
+        "      CASE\n",
+        "        WHEN sentiment = 'positive' THEN 1\n",
+        "        ELSE 0\n",
+        "      END\n",
+        "    )\n",
+        "      * 100.0\n",
+        "      / COUNT(*),\n",
+        "    1\n",
+        "  ) as positive_pct,\n",
+        "  ROUND(\n",
+        "    SUM(\n",
+        "      CASE\n",
+        "        WHEN sentiment = 'negative' THEN 1\n",
+        "        ELSE 0\n",
+        "      END\n",
+        "    )\n",
+        "      * 100.0\n",
+        "      / COUNT(*),\n",
+        "    1\n",
+        "  ) as negative_pct,\n",
+        "  ROUND(\n",
+        "    SUM(\n",
+        "      CASE\n",
+        "        WHEN sentiment = 'neutral' THEN 1\n",
+        "        ELSE 0\n",
+        "      END\n",
+        "    )\n",
+        "      * 100.0\n",
+        "      / COUNT(*),\n",
+        "    1\n",
+        "  ) as neutral_pct\n",
+        "FROM\n",
+        "  restaurant_chain_db.marts.fact_review\n",
+        "GROUP BY\n",
+        "  restaurant_name,\n",
+        "  restaurant_city"
+      ]
+    },
+    {
+      "name": "sentiment_dist",
+      "displayName": "Sentiment Distribution",
+      "queryLines": [
+        "SELECT\n",
+        "  sentiment,\n",
+        "  COUNT(*) as review_count\n",
+        "FROM\n",
+        "  restaurant_chain_db.marts.fact_review\n",
+        "WHERE\n",
+        "  sentiment IS NOT NULL\n",
+        "GROUP BY\n",
+        "  sentiment"
+      ]
+    },
+    {
+      "name": "customer_mv",
+      "displayName": "customer_lifecycle_metrics",
+      "asset_name": "restaurant_chain_db.marts.customer_lifecycle_metrics"
+    },
+    {
+      "name": "sentiment_by_rating",
+      "displayName": "Sentiment by Rating",
+      "queryLines": [
+        "SELECT\n",
+        "  rating,\n",
+        "  sentiment,\n",
+        "  COUNT(*) as review_count\n",
+        "FROM\n",
+        "  restaurant_chain_db.marts.fact_review\n",
+        "WHERE\n",
+        "  sentiment IS NOT NULL\n",
+        "GROUP BY\n",
+        "  rating,\n",
+        "  sentiment\n",
+        "ORDER BY\n",
+        "  rating"
+      ]
+    }
+  ],
+  "pages": [
+    {
+      "name": "fdcd4210",
+      "displayName": "Customer Overview",
+      "layout": [
+        {
+          "widget": {
+            "name": "title",
+            "multilineTextboxSpec": {
+              "lines": [
+                "## Customer Intelligence & Segmentation — Data Vault Marts"
+              ]
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 0,
+            "width": 12,
+            "height": 1
+          }
+        },
+        {
+          "widget": {
+            "name": "kpi_total_customers",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "customer_mv",
+                  "fields": [
+                    {
+                      "name": "measure(total_customers)",
+                      "expression": "MEASURE(`total_customers`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "frame": {
+                "title": "Total Customers",
+                "showTitle": true
+              },
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "measure(total_customers)",
+                  "format": {
+                    "type": "number-plain",
+                    "decimalPlaces": {
+                      "type": "exact",
+                      "places": 0
+                    },
+                    "abbreviation": "none"
+                  },
+                  "displayName": "Total Customers"
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 1,
+            "width": 2,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "kpi_avg_ltv",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "customer_mv",
+                  "fields": [
+                    {
+                      "name": "measure(avg_lifetime_value)",
+                      "expression": "MEASURE(`avg_lifetime_value`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "frame": {
+                "title": "Avg Lifetime Value (AED)",
+                "showTitle": true
+              },
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "measure(avg_lifetime_value)",
+                  "format": {
+                    "type": "number-currency",
+                    "currencyCode": "AED",
+                    "decimalPlaces": {
+                      "type": "exact",
+                      "places": 0
+                    },
+                    "abbreviation": "none"
+                  },
+                  "displayName": "Avg Lifetime Value"
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 2,
+            "y": 1,
+            "width": 2,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "kpi_avg_aov",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "customer_mv",
+                  "fields": [
+                    {
+                      "name": "measure(avg_order_value)",
+                      "expression": "MEASURE(`avg_order_value`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "frame": {
+                "title": "Avg Order Value (AED)",
+                "showTitle": true
+              },
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "measure(avg_order_value)",
+                  "format": {
+                    "type": "number-currency",
+                    "currencyCode": "AED",
+                    "decimalPlaces": {
+                      "type": "exact",
+                      "places": 2
+                    },
+                    "abbreviation": "none"
+                  },
+                  "displayName": "Avg Order Value"
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 4,
+            "y": 1,
+            "width": 2,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "kpi_recency",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "customer_mv",
+                  "fields": [
+                    {
+                      "name": "measure(avg_recency_days)",
+                      "expression": "MEASURE(`avg_recency_days`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "frame": {
+                "title": "Avg Recency (Days)",
+                "showTitle": true
+              },
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "measure(avg_recency_days)",
+                  "format": {
+                    "type": "number-plain",
+                    "decimalPlaces": {
+                      "type": "exact",
+                      "places": 0
+                    },
+                    "abbreviation": "none"
+                  },
+                  "displayName": "Avg Recency Days"
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 6,
+            "y": 1,
+            "width": 2,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "kpi_retention",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "customer_mv",
+                  "fields": [
+                    {
+                      "name": "measure(retention_rate)",
+                      "expression": "MEASURE(`retention_rate`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "frame": {
+                "title": "Retention Rate %",
+                "showTitle": true
+              },
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "measure(retention_rate)",
+                  "format": {
+                    "type": "number-plain",
+                    "decimalPlaces": {
+                      "type": "exact",
+                      "places": 1
+                    },
+                    "abbreviation": "none"
+                  },
+                  "displayName": "Retention Rate"
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 8,
+            "y": 1,
+            "width": 2,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "kpi_churn",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "customer_mv",
+                  "fields": [
+                    {
+                      "name": "measure(churn_rate)",
+                      "expression": "MEASURE(`churn_rate`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "frame": {
+                "title": "Churn Rate %",
+                "showTitle": true
+              },
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "measure(churn_rate)",
+                  "format": {
+                    "type": "number-plain",
+                    "decimalPlaces": {
+                      "type": "exact",
+                      "places": 1
+                    },
+                    "abbreviation": "none"
+                  },
+                  "displayName": "Churn Rate"
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 10,
+            "y": 1,
+            "width": 2,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "pie_churn_risk",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "customer_mv",
+                  "fields": [
+                    {
+                      "name": "measure(total_customers)",
+                      "expression": "MEASURE(`total_customers`)"
+                    },
+                    {
+                      "name": "churn_risk_segment",
+                      "expression": "`churn_risk_segment`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "frame": {
+                "title": "Churn Risk Distribution",
+                "showTitle": true
+              },
+              "widgetType": "pie",
+              "encodings": {
+                "angle": {
+                  "fieldName": "measure(total_customers)",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "Total Customers"
+                },
+                "color": {
+                  "fieldName": "churn_risk_segment",
+                  "legend": {
+                    "position": "right"
+                  },
+                  "displayName": "Churn Risk Segment",
+                  "scale": {
+                    "type": "categorical"
+                  }
+                },
+                "label": {
+                  "show": true
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 3,
+            "width": 4,
+            "height": 5
+          }
+        },
+        {
+          "widget": {
+            "name": "bar_value_tiers",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "customer_mv",
+                  "fields": [
+                    {
+                      "name": "value_segment",
+                      "expression": "`value_segment`"
+                    },
+                    {
+                      "name": "measure(total_customers)",
+                      "expression": "MEASURE(`total_customers`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "frame": {
+                "title": "Customer Value Tiers",
+                "showTitle": true
+              },
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "value_segment",
+                  "displayName": "Value Segment",
+                  "scale": {
+                    "type": "categorical",
+                    "sort": {
+                      "by": "custom-order",
+                      "orderedValues": [
+                        "Bronze",
+                        "Silver",
+                        "Gold",
+                        "Platinum"
+                      ]
+                    }
+                  }
+                },
+                "y": {
+                  "fieldName": "measure(total_customers)",
+                  "displayName": "Total Customers",
+                  "scale": {
+                    "type": "quantitative"
+                  }
+                },
+                "color": {
+                  "fieldName": "value_segment",
+                  "legend": {
+                    "hide": true
+                  },
+                  "displayName": "Value Segment",
+                  "scale": {
+                    "type": "categorical"
+                  }
+                },
+                "label": {
+                  "show": true
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 4,
+            "y": 3,
+            "width": 4,
+            "height": 5
+          }
+        },
+        {
+          "widget": {
+            "name": "bar_engagement",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "customer_mv",
+                  "fields": [
+                    {
+                      "name": "engagement_segment",
+                      "expression": "`engagement_segment`"
+                    },
+                    {
+                      "name": "measure(total_customers)",
+                      "expression": "MEASURE(`total_customers`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "frame": {
+                "title": "Engagement Levels",
+                "showTitle": true
+              },
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "engagement_segment",
+                  "displayName": "Engagement Segment",
+                  "scale": {
+                    "type": "categorical",
+                    "sort": {
+                      "by": "custom-order",
+                      "orderedValues": [
+                        "New",
+                        "Occasional",
+                        "Regular",
+                        "Champion"
+                      ]
+                    }
+                  }
+                },
+                "y": {
+                  "fieldName": "measure(total_customers)",
+                  "displayName": "Total Customers",
+                  "scale": {
+                    "type": "quantitative"
+                  }
+                },
+                "color": {
+                  "fieldName": "engagement_segment",
+                  "legend": {
+                    "hide": true
+                  },
+                  "displayName": "Engagement Segment",
+                  "scale": {
+                    "type": "categorical"
+                  }
+                },
+                "label": {
+                  "show": true
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 8,
+            "y": 3,
+            "width": 4,
+            "height": 5
+          }
+        }
+      ],
+      "pageType": "PAGE_TYPE_CANVAS",
+      "layoutVersion": "GRID_V1"
+    },
+    {
+      "name": "review_sentiment",
+      "displayName": "Review Sentiment & Issue Analysis",
+      "layout": [
+        {
+          "widget": {
+            "name": "title",
+            "multilineTextboxSpec": {
+              "lines": [
+                "## Review Sentiment & Customer Issue Analysis"
+              ]
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 0,
+            "width": 12,
+            "height": 1
+          }
+        },
+        {
+          "widget": {
+            "name": "kpi_total_reviews",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "sentiment_mv",
+                  "fields": [
+                    {
+                      "name": "measure(total_reviews)",
+                      "expression": "MEASURE(`total_reviews`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "frame": {
+                "title": "Total Customer Reviews",
+                "showTitle": true
+              },
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "measure(total_reviews)",
+                  "format": {
+                    "type": "number-plain",
+                    "decimalPlaces": {
+                      "type": "exact",
+                      "places": 0
+                    },
+                    "abbreviation": "none"
+                  },
+                  "displayName": "Total Reviews"
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 1,
+            "width": 3,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "kpi_avg_rating",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "sentiment_mv",
+                  "fields": [
+                    {
+                      "name": "measure(avg_rating)",
+                      "expression": "MEASURE(`avg_rating`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "frame": {
+                "title": "Avg Star Rating (1–5)",
+                "showTitle": true
+              },
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "measure(avg_rating)",
+                  "format": {
+                    "type": "number-plain",
+                    "decimalPlaces": {
+                      "type": "exact",
+                      "places": 2
+                    },
+                    "abbreviation": "none"
+                  },
+                  "displayName": "Avg Star Rating"
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 3,
+            "y": 1,
+            "width": 3,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "kpi_positive_pct",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "sentiment_mv",
+                  "fields": [
+                    {
+                      "name": "measure(positive_pct)",
+                      "expression": "MEASURE(`positive_pct`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "frame": {
+                "title": "Positive Sentiment %",
+                "showTitle": true
+              },
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "measure(positive_pct)",
+                  "format": {
+                    "type": "number-plain",
+                    "decimalPlaces": {
+                      "type": "exact",
+                      "places": 1
+                    },
+                    "abbreviation": "none"
+                  },
+                  "displayName": "Positive %"
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 6,
+            "y": 1,
+            "width": 3,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "kpi_nps",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "sentiment_mv",
+                  "fields": [
+                    {
+                      "name": "measure(nps_proxy)",
+                      "expression": "MEASURE(`nps_proxy`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "frame": {
+                "title": "NPS Proxy Score",
+                "showTitle": true
+              },
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "measure(nps_proxy)",
+                  "format": {
+                    "type": "number-plain",
+                    "decimalPlaces": {
+                      "type": "exact",
+                      "places": 1
+                    },
+                    "abbreviation": "none"
+                  },
+                  "displayName": "NPS Proxy"
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 9,
+            "y": 1,
+            "width": 3,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "pie_sentiment",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "sentiment_dist",
+                  "fields": [
+                    {
+                      "name": "sum(review_count)",
+                      "expression": "SUM(`review_count`)"
+                    },
+                    {
+                      "name": "sentiment",
+                      "expression": "`sentiment`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "frame": {
+                "title": "Overall Sentiment Distribution",
+                "showTitle": true
+              },
+              "widgetType": "pie",
+              "encodings": {
+                "angle": {
+                  "fieldName": "sum(review_count)",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "Review Count"
+                },
+                "color": {
+                  "fieldName": "sentiment",
+                  "legend": {
+                    "position": "right"
+                  },
+                  "displayName": "Sentiment",
+                  "scale": {
+                    "type": "categorical",
+                    "mappings": [
+                      {
+                        "value": "positive",
+                        "color": "#2E7D32"
+                      },
+                      {
+                        "value": "neutral",
+                        "color": "#FF8F00"
+                      },
+                      {
+                        "value": "negative",
+                        "color": "#C62828"
+                      }
+                    ]
+                  }
+                },
+                "label": {
+                  "show": true
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 3,
+            "width": 4,
+            "height": 5
+          }
+        },
+        {
+          "widget": {
+            "name": "bar_rating_by_rest",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "sentiment_mv",
+                  "fields": [
+                    {
+                      "name": "restaurant_name",
+                      "expression": "`restaurant_name`"
+                    },
+                    {
+                      "name": "measure(avg_rating)",
+                      "expression": "MEASURE(`avg_rating`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "frame": {
+                "title": "Avg Rating by Restaurant",
+                "showTitle": true
+              },
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "restaurant_name",
+                  "displayName": "Restaurant",
+                  "scale": {
+                    "type": "categorical"
+                  }
+                },
+                "y": {
+                  "fieldName": "measure(avg_rating)",
+                  "displayName": "Avg Rating",
+                  "scale": {
+                    "type": "quantitative"
+                  }
+                },
+                "color": {
+                  "fieldName": "restaurant_name",
+                  "legend": {
+                    "hide": true
+                  },
+                  "displayName": "Restaurant",
+                  "scale": {
+                    "type": "categorical"
+                  }
+                },
+                "label": {
+                  "show": true
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 4,
+            "y": 3,
+            "width": 4,
+            "height": 5
+          }
+        },
+        {
+          "widget": {
+            "name": "bar_issue_types",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "issue_types",
+                  "fields": [
+                    {
+                      "name": "issue_type",
+                      "expression": "`issue_type`"
+                    },
+                    {
+                      "name": "sum(issue_count)",
+                      "expression": "SUM(`issue_count`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "frame": {
+                "title": "Customer Issue Types (Overall)",
+                "showTitle": true
+              },
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "issue_type",
+                  "displayName": "Issue Type",
+                  "scale": {
+                    "type": "categorical",
+                    "sort": {
+                      "by": "y-reversed"
+                    }
+                  }
+                },
+                "y": {
+                  "fieldName": "sum(issue_count)",
+                  "displayName": "Issue Count",
+                  "scale": {
+                    "type": "quantitative"
+                  }
+                },
+                "color": {
+                  "fieldName": "issue_type",
+                  "legend": {
+                    "hide": true
+                  },
+                  "displayName": "Issue Type",
+                  "scale": {
+                    "type": "categorical",
+                    "mappings": [
+                      {
+                        "value": "Delivery",
+                        "color": "#1565C0"
+                      },
+                      {
+                        "value": "Food Quality",
+                        "color": "#C62828"
+                      },
+                      {
+                        "value": "Pricing",
+                        "color": "#FF8F00"
+                      },
+                      {
+                        "value": "Portion Size",
+                        "color": "#6A1B9A"
+                      }
+                    ]
+                  }
+                },
+                "label": {
+                  "show": true
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 8,
+            "y": 3,
+            "width": 4,
+            "height": 5
+          }
+        },
+        {
+          "widget": {
+            "name": "bar_issues_by_rest",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "issue_tracking",
+                  "fields": [
+                    {
+                      "name": "issue_type",
+                      "expression": "`issue_type`"
+                    },
+                    {
+                      "name": "restaurant_name",
+                      "expression": "`restaurant_name`"
+                    },
+                    {
+                      "name": "sum(issue_count)",
+                      "expression": "SUM(`issue_count`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "frame": {
+                "title": "Issues Reported by Restaurant",
+                "showTitle": true
+              },
+              "mark": {
+                "layout": "stack"
+              },
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "restaurant_name",
+                  "displayName": "Restaurant",
+                  "scale": {
+                    "type": "categorical"
+                  }
+                },
+                "y": {
+                  "fieldName": "sum(issue_count)",
+                  "displayName": "Issue Count",
+                  "scale": {
+                    "type": "quantitative"
+                  }
+                },
+                "color": {
+                  "fieldName": "issue_type",
+                  "legend": {
+                    "position": "bottom"
+                  },
+                  "displayName": "Issue Type",
+                  "scale": {
+                    "type": "categorical",
+                    "mappings": [
+                      {
+                        "value": "Delivery",
+                        "color": "#1565C0"
+                      },
+                      {
+                        "value": "Food Quality",
+                        "color": "#C62828"
+                      },
+                      {
+                        "value": "Pricing",
+                        "color": "#FF8F00"
+                      },
+                      {
+                        "value": "Portion Size",
+                        "color": "#6A1B9A"
+                      }
+                    ]
+                  }
+                },
+                "label": {
+                  "show": true
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 8,
+            "width": 6,
+            "height": 5
+          }
+        },
+        {
+          "widget": {
+            "name": "bar_sentiment_rating",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "sentiment_by_rating",
+                  "fields": [
+                    {
+                      "name": "sentiment",
+                      "expression": "`sentiment`"
+                    },
+                    {
+                      "name": "rating",
+                      "expression": "`rating`"
+                    },
+                    {
+                      "name": "sum(review_count)",
+                      "expression": "SUM(`review_count`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "frame": {
+                "title": "Sentiment Breakdown by Star Rating",
+                "showTitle": true
+              },
+              "mark": {
+                "layout": "stack"
+              },
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "rating",
+                  "displayName": "Star Rating",
+                  "scale": {
+                    "type": "quantitative"
+                  }
+                },
+                "y": {
+                  "fieldName": "sum(review_count)",
+                  "displayName": "Review Count",
+                  "scale": {
+                    "type": "quantitative"
+                  }
+                },
+                "color": {
+                  "fieldName": "sentiment",
+                  "legend": {
+                    "position": "bottom"
+                  },
+                  "displayName": "Sentiment",
+                  "scale": {
+                    "type": "categorical",
+                    "mappings": [
+                      {
+                        "value": "positive",
+                        "color": "#2E7D32"
+                      },
+                      {
+                        "value": "neutral",
+                        "color": "#FF8F00"
+                      },
+                      {
+                        "value": "negative",
+                        "color": "#C62828"
+                      }
+                    ]
+                  }
+                },
+                "label": {
+                  "show": true
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 6,
+            "y": 8,
+            "width": 6,
+            "height": 5
+          }
+        },
+        {
+          "widget": {
+            "name": "tbl_negative_reviews",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "negative_reviews",
+                  "fields": [
+                    {
+                      "name": "review_id",
+                      "expression": "`review_id`"
+                    },
+                    {
+                      "name": "restaurant_name",
+                      "expression": "`restaurant_name`"
+                    },
+                    {
+                      "name": "rating",
+                      "expression": "`rating`"
+                    },
+                    {
+                      "name": "review_text",
+                      "expression": "`review_text`"
+                    },
+                    {
+                      "name": "issue_delivery",
+                      "expression": "`issue_delivery`"
+                    },
+                    {
+                      "name": "issue_delivery_reason",
+                      "expression": "`issue_delivery_reason`"
+                    },
+                    {
+                      "name": "issue_food_quality",
+                      "expression": "`issue_food_quality`"
+                    },
+                    {
+                      "name": "issue_food_quality_reason",
+                      "expression": "`issue_food_quality_reason`"
+                    },
+                    {
+                      "name": "issue_pricing",
+                      "expression": "`issue_pricing`"
+                    },
+                    {
+                      "name": "issue_pricing_reason",
+                      "expression": "`issue_pricing_reason`"
+                    },
+                    {
+                      "name": "issue_portion_size",
+                      "expression": "`issue_portion_size`"
+                    },
+                    {
+                      "name": "issue_portion_size_reason",
+                      "expression": "`issue_portion_size_reason`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "frame": {
+                "title": "Negative Review Details — Drill-Down",
+                "showTitle": true
+              },
+              "rowsPerPage": 25,
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "review_id",
+                    "displayName": "Review ID"
+                  },
+                  {
+                    "fieldName": "restaurant_name",
+                    "displayName": "Restaurant"
+                  },
+                  {
+                    "fieldName": "rating",
+                    "displayName": "Rating"
+                  },
+                  {
+                    "fieldName": "review_text",
+                    "displayName": "Review Text"
+                  },
+                  {
+                    "fieldName": "issue_delivery",
+                    "displayName": "Delivery Issue"
+                  },
+                  {
+                    "fieldName": "issue_delivery_reason",
+                    "displayName": "Delivery Reason"
+                  },
+                  {
+                    "fieldName": "issue_food_quality",
+                    "displayName": "Food Quality Issue"
+                  },
+                  {
+                    "fieldName": "issue_food_quality_reason",
+                    "displayName": "Food Quality Reason"
+                  },
+                  {
+                    "fieldName": "issue_pricing",
+                    "displayName": "Pricing Issue"
+                  },
+                  {
+                    "fieldName": "issue_pricing_reason",
+                    "displayName": "Pricing Reason"
+                  },
+                  {
+                    "fieldName": "issue_portion_size",
+                    "displayName": "Portion Issue"
+                  },
+                  {
+                    "fieldName": "issue_portion_size_reason",
+                    "displayName": "Portion Reason"
+                  }
+                ]
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 13,
+            "width": 12,
+            "height": 6
+          }
+        },
+        {
+          "widget": {
+            "name": "bar_review_volume",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "review_by_rest",
+                  "fields": [
+                    {
+                      "name": "restaurant_name",
+                      "expression": "`restaurant_name`"
+                    },
+                    {
+                      "name": "sum(total_reviews)",
+                      "expression": "SUM(`total_reviews`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "frame": {
+                "title": "Review Volume by Restaurant",
+                "showTitle": true
+              },
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "restaurant_name",
+                  "displayName": "Restaurant",
+                  "scale": {
+                    "type": "categorical",
+                    "sort": {
+                      "by": "y-reversed"
+                    }
+                  }
+                },
+                "y": {
+                  "fieldName": "sum(total_reviews)",
+                  "displayName": "Total Reviews",
+                  "scale": {
+                    "type": "quantitative"
+                  }
+                },
+                "color": {
+                  "fieldName": "restaurant_name",
+                  "legend": {
+                    "hide": true
+                  },
+                  "displayName": "Restaurant",
+                  "scale": {
+                    "type": "categorical"
+                  }
+                },
+                "label": {
+                  "show": true
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 19,
+            "width": 12,
+            "height": 5
+          }
+        }
+      ],
+      "pageType": "PAGE_TYPE_CANVAS",
+      "layoutVersion": "GRID_V1"
+    }
+  ],
+  "uiSettings": {
+    "theme": {
+      "widgetHeaderAlignment": "ALIGNMENT_UNSPECIFIED"
+    },
+    "applyModeEnabled": false
+  }
+}

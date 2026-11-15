@@ -1,0 +1,174 @@
+version: 1.1
+
+source: restaurant_chain_db.marts.agg_review_insights_monthly
+
+comment: Customer sentiment and review quality metrics. Source is pre-aggregated at
+  restaurant x month grain. Uses weighted averages (by review volume) to ensure statistical
+  correctness when rolling up across restaurants or time periods.
+
+dimensions:
+  - name: restaurant_id
+    expr: source.restaurant_id
+    comment: Restaurant identifier
+    display_name: Restaurant Id
+  - name: restaurant_name
+    expr: source.restaurant_name
+    comment: Restaurant branch name
+    display_name: Restaurant
+    synonyms:
+      - branch
+      - location
+  - name: restaurant_city
+    expr: source.restaurant_city
+    comment: City where the restaurant is located
+    display_name: City
+    synonyms:
+      - city
+  - name: review_year
+    expr: source.review_year
+    comment: Year the reviews were submitted
+    display_name: Year
+    synonyms:
+      - year
+  - name: review_month
+    expr: source.review_month
+    comment: Month the reviews were submitted
+    display_name: Month
+    synonyms:
+      - month
+
+measures:
+  - name: total_reviews
+    expr: SUM(source.total_reviews)
+    comment: Total number of customer reviews
+    display_name: Total Reviews
+    format:
+      type: number
+      decimal_places:
+        type: exact
+        places: 0
+    synonyms:
+      - reviews
+      - review count
+      - feedback count
+  - name: avg_rating
+    expr: SUM(source.avg_rating * source.total_reviews) / SUM(source.total_reviews)
+    comment: Weighted average star rating (1-5). Correctly accounts for review volume
+      differences across restaurants and months.
+    display_name: Avg Rating
+    format:
+      type: number
+      decimal_places:
+        type: exact
+        places: 2
+    synonyms:
+      - rating
+      - star rating
+      - average score
+  - name: positive_pct
+    expr: SUM(source.positive_pct * source.total_reviews) / SUM(source.total_reviews)
+    comment: Weighted percentage of reviews with positive sentiment
+    display_name: Positive %
+    format:
+      type: number
+      decimal_places:
+        type: exact
+        places: 1
+    synonyms:
+      - positive rate
+      - satisfaction rate
+  - name: neutral_pct
+    expr: SUM(source.neutral_pct * source.total_reviews) / SUM(source.total_reviews)
+    comment: Weighted percentage of reviews with neutral sentiment
+    display_name: Neutral %
+    format:
+      type: number
+      decimal_places:
+        type: exact
+        places: 1
+  - name: negative_pct
+    expr: SUM(source.negative_pct * source.total_reviews) / SUM(source.total_reviews)
+    comment: Weighted percentage of reviews with negative sentiment
+    display_name: Negative %
+    format:
+      type: number
+      decimal_places:
+        type: exact
+        places: 1
+    synonyms:
+      - complaint rate
+      - dissatisfaction rate
+  - name: nps_proxy
+    expr: MEASURE(positive_pct) - MEASURE(negative_pct)
+    comment: Net Promoter Score proxy (Positive % minus Negative %). Ranges from -100
+      to +100. Higher is better.
+    display_name: NPS Proxy
+    format:
+      type: number
+      decimal_places:
+        type: exact
+        places: 1
+    synonyms:
+      - NPS
+      - net promoter score
+      - net sentiment
+  - name: issue_delivery_rate
+    expr: SUM(source.issue_delivery_rate * source.total_reviews) / SUM(source.total_reviews)
+    comment: Weighted rate of reviews mentioning delivery issues
+    display_name: Delivery Issue Rate
+    format:
+      type: number
+      decimal_places:
+        type: exact
+        places: 3
+    synonyms:
+      - delivery complaints
+  - name: issue_food_quality_rate
+    expr: SUM(source.issue_food_quality_rate * source.total_reviews) / SUM(source.total_reviews)
+    comment: Weighted rate of reviews mentioning food quality issues
+    display_name: Food Quality Issue Rate
+    format:
+      type: number
+      decimal_places:
+        type: exact
+        places: 3
+    synonyms:
+      - quality complaints
+  - name: issue_pricing_rate
+    expr: SUM(source.issue_pricing_rate * source.total_reviews) / SUM(source.total_reviews)
+    comment: Weighted rate of reviews mentioning pricing issues
+    display_name: Pricing Issue Rate
+    format:
+      type: number
+      decimal_places:
+        type: exact
+        places: 3
+    synonyms:
+      - pricing complaints
+      - value complaints
+  - name: issue_portion_size_rate
+    expr: SUM(source.issue_portion_size_rate * source.total_reviews) / SUM(source.total_reviews)
+    comment: Weighted rate of reviews mentioning portion size issues
+    display_name: Portion Issue Rate
+    format:
+      type: number
+      decimal_places:
+        type: exact
+        places: 3
+    synonyms:
+      - portion complaints
+  - name: total_issue_rate
+    expr: |-
+      MEASURE(issue_delivery_rate) + MEASURE(issue_food_quality_rate)
+      + MEASURE(issue_pricing_rate) + MEASURE(issue_portion_size_rate)
+    comment: Combined rate of all issue categories. May exceed 1.0 since a single
+      review can mention multiple issues. Useful as an overall quality signal.
+    display_name: Total Issue Rate
+    format:
+      type: number
+      decimal_places:
+        type: exact
+        places: 3
+    synonyms:
+      - complaint rate
+      - issue frequency

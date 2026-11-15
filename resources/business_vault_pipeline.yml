@@ -1,0 +1,51 @@
+
+# Business Vault Pipeline — PITs, Bridges, Computed Satellites, Reference
+# Source: ${var.catalog}.${var.raw_vault_schema}
+# Target: ${var.catalog}.${var.business_vault_schema}
+# Reference (1 MV): ref_date_dim
+# PITs (6 MV): pit_customer, pit_restaurant, pit_menu_item,
+#              pit_order, pit_order_item, pit_review
+# Computed Sats (2 ST): reviews_tracked_dv (CDC), sat_review_sentiment (AI)
+# Bridges (2 MV): bridge_order, bridge_order_item
+# Design: Lean PITs (one row per satellite version, not per calendar date)
+
+resources:
+  pipelines:
+    business_vault_pipeline:
+      name: datavault_business_vault
+      catalog: ${var.catalog}
+      target: ${var.business_vault_schema}
+      photon: true
+      serverless: true
+      channel: CURRENT
+      configuration:
+        pipelines.metrics.flowTimeReporter.enabled: "true"
+      libraries:
+        # Reference tables
+        - file:
+            path: ../src/business_vault/transformations/ref/ref_date_dim.py
+        - file:
+            path: ../src/business_vault/transformations/ref/ref_record_source.py
+        # Point-in-Time tables (lean design)
+        - file:
+            path: ../src/business_vault/transformations/pit/pit_customer.py
+        - file:
+            path: ../src/business_vault/transformations/pit/pit_restaurant.py
+        - file:
+            path: ../src/business_vault/transformations/pit/pit_menu_item.py
+        - file:
+            path: ../src/business_vault/transformations/pit/pit_order.py
+        - file:
+            path: ../src/business_vault/transformations/pit/pit_order_item.py
+        - file:
+            path: ../src/business_vault/transformations/pit/pit_review.py
+        # Computed satellites (streaming tables)
+        - file:
+            path: ../src/business_vault/transformations/computed_sat/_reviews_tracked_dv.py
+        - file:
+            path: ../src/business_vault/transformations/computed_sat/sat_review_sentiment.py
+        # Bridge tables (pre-joined relationships)
+        - file:
+            path: ../src/business_vault/transformations/bridge/bridge_order.py
+        - file:
+            path: ../src/business_vault/transformations/bridge/bridge_order_item.py

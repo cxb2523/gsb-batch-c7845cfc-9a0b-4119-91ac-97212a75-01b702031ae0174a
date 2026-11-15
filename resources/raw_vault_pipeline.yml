@@ -1,0 +1,52 @@
+# Raw Vault Pipeline — Hubs, Links, Satellites (Insert-Only)
+# Source: ${var.catalog}.${var.staging_schema}
+# Target: ${var.catalog}.${var.raw_vault_schema}
+# Hubs (5): hub_customer, hub_restaurant, hub_menu_item, hub_order, hub_review
+# Links (3): lnk_order, lnk_order_item, lnk_review_order
+# Satellites (6): sat_customer, sat_restaurant, sat_menu_item,
+#                 sat_order_header, sat_order_item, sat_review
+# All tables are Materialized Views (insert-only, no deletes)
+
+resources:
+  pipelines:
+    raw_vault_pipeline:
+      name: datavault_raw_vault
+      catalog: ${var.catalog}
+      target: ${var.raw_vault_schema}
+      channel: CURRENT
+      photon: true
+      serverless: true
+      configuration:
+        pipelines.metrics.flowTimeReporter.enabled: "true"
+      libraries:
+        # Hubs — unique business key registries
+        - file:
+            path: ../src/raw_vault/transformations/hub_customer.py
+        - file:
+            path: ../src/raw_vault/transformations/hub_restaurant.py
+        - file:
+            path: ../src/raw_vault/transformations/hub_menu_item.py
+        - file:
+            path: ../src/raw_vault/transformations/hub_order.py
+        - file:
+            path: ../src/raw_vault/transformations/hub_review.py
+        # Links — relationship registries
+        - file:
+            path: ../src/raw_vault/transformations/lnk_order.py
+        - file:
+            path: ../src/raw_vault/transformations/lnk_order_item.py
+        - file:
+            path: ../src/raw_vault/transformations/lnk_review_order.py
+        # Satellites — descriptive attribute stores
+        - file:
+            path: ../src/raw_vault/transformations/sat_customer.py
+        - file:
+            path: ../src/raw_vault/transformations/sat_restaurant.py
+        - file:
+            path: ../src/raw_vault/transformations/sat_menu_item.py
+        - file:
+            path: ../src/raw_vault/transformations/sat_order_header.py
+        - file:
+            path: ../src/raw_vault/transformations/sat_order_item.py
+        - file:
+            path: ../src/raw_vault/transformations/sat_review.py

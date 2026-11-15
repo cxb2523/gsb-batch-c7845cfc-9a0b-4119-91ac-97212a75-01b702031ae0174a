@@ -1,0 +1,62 @@
+
+# Marts Pipeline — Dimensions, Facts, Aggregates, Feature Tables
+# Source: ${var.catalog}.${var.business_vault_schema} + ${var.catalog}.${var.raw_vault_schema}
+# Target: ${var.catalog}.${var.marts_schema}
+# Dimensions (4 MV): dim_date, dim_customer, dim_restaurant, dim_menu_item
+#   - Ghost records: UNKNOWN entries for late-arriving/orphan data
+# Facts (3 MV): fact_order, fact_order_item, fact_review
+# Aggregates (7 MV): restaurant_performance_daily, customer_360,
+#   menu_item_performance_monthly, review_insights_monthly,
+#   business_monthly_base, business_performance_trends, menu_item_ranked_monthly
+# Features (2 MV): feat_customer_features, feat_restaurant_demand_features
+# Metric Views (4, managed via SQL DDL — not in this pipeline)
+
+resources:
+  pipelines:
+    marts_pipeline:
+      name: datavault_marts
+      catalog: ${var.catalog}
+      target: ${var.marts_schema}
+      development: true
+      photon: true
+      serverless: true
+      channel: CURRENT
+      configuration:
+        pipelines.metrics.flowTimeReporter.enabled: "true"
+      libraries:
+        # Dimensions
+        - file:
+            path: ../src/marts/transformations/dim/dim_date.py
+        - file:
+            path: ../src/marts/transformations/dim/dim_customer.py
+        - file:
+            path: ../src/marts/transformations/dim/dim_restaurant.py
+        - file:
+            path: ../src/marts/transformations/dim/dim_menu_item.py
+        # Facts
+        - file:
+            path: ../src/marts/transformations/fact/fact_order.py
+        - file:
+            path: ../src/marts/transformations/fact/fact_order_item.py
+        - file:
+            path: ../src/marts/transformations/fact/fact_review.py
+        # Aggregates
+        - file:
+            path: ../src/marts/transformations/agg/agg_restaurant_performance_daily.py
+        - file:
+            path: ../src/marts/transformations/agg/agg_customer_360.py
+        - file:
+            path: ../src/marts/transformations/agg/agg_menu_item_performance_monthly.py
+        - file:
+            path: ../src/marts/transformations/agg/agg_review_insights_monthly.py
+        - file:
+            path: ../src/marts/transformations/agg/agg_business_monthly_base.py
+        - file:
+            path: ../src/marts/transformations/agg/agg_business_performance_trends.py
+        - file:
+            path: ../src/marts/transformations/agg/agg_menu_item_ranked_monthly.py
+        # ML Feature Tables
+        - file:
+            path: ../src/marts/transformations/feat/feat_customer_features.py
+        - file:
+            path: ../src/marts/transformations/feat/feat_restaurant_demand_features.py

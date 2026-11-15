@@ -1,0 +1,1134 @@
+{
+  "datasets": [
+    {
+      "name": "sales_ops_mv",
+      "displayName": "sales_operations_metrics",
+      "asset_name": "restaurant_chain_db.marts.sales_operations_metrics"
+    },
+    {
+      "name": "payment_trend",
+      "displayName": "Payment Method Trend",
+      "queryLines": [
+        "SELECT\n",
+        "  order_month,\n",
+        "  'Card' as method,\n",
+        "  SUM(card_orders) as orders\n",
+        "FROM\n",
+        "  restaurant_chain_db.marts.agg_restaurant_performance_daily\n",
+        "GROUP BY\n",
+        "  order_month\n",
+        "UNION ALL\n",
+        "SELECT\n",
+        "  order_month,\n",
+        "  'Cash',\n",
+        "  SUM(cash_orders)\n",
+        "FROM\n",
+        "  restaurant_chain_db.marts.agg_restaurant_performance_daily\n",
+        "GROUP BY\n",
+        "  order_month\n",
+        "UNION ALL\n",
+        "SELECT\n",
+        "  order_month,\n",
+        "  'Wallet',\n",
+        "  SUM(wallet_orders)\n",
+        "FROM\n",
+        "  restaurant_chain_db.marts.agg_restaurant_performance_daily\n",
+        "GROUP BY\n",
+        "  order_month\n",
+        "ORDER BY\n",
+        "  order_month"
+      ]
+    },
+    {
+      "name": "payment_mix_rest",
+      "displayName": "Payment Mix by Restaurant",
+      "queryLines": [
+        "SELECT\n",
+        "  restaurant_name,\n",
+        "  'Card' as method,\n",
+        "  ROUND(SUM(card_orders) * 100.0 / SUM(total_orders), 1) as mix_pct\n",
+        "FROM\n",
+        "  restaurant_chain_db.marts.agg_restaurant_performance_daily\n",
+        "GROUP BY\n",
+        "  restaurant_name\n",
+        "UNION ALL\n",
+        "SELECT\n",
+        "  restaurant_name,\n",
+        "  'Cash',\n",
+        "  ROUND(SUM(cash_orders) * 100.0 / SUM(total_orders), 1)\n",
+        "FROM\n",
+        "  restaurant_chain_db.marts.agg_restaurant_performance_daily\n",
+        "GROUP BY\n",
+        "  restaurant_name\n",
+        "UNION ALL\n",
+        "SELECT\n",
+        "  restaurant_name,\n",
+        "  'Wallet',\n",
+        "  ROUND(SUM(wallet_orders) * 100.0 / SUM(total_orders), 1)\n",
+        "FROM\n",
+        "  restaurant_chain_db.marts.agg_restaurant_performance_daily\n",
+        "GROUP BY\n",
+        "  restaurant_name"
+      ]
+    },
+    {
+      "name": "digital_trend",
+      "displayName": "Digital Payment Trend",
+      "queryLines": [
+        "SELECT\n",
+        "  order_month,\n",
+        "  ROUND((SUM(card_orders) + SUM(wallet_orders)) * 100.0 / SUM(total_orders), 1) as digital_pct\n",
+        "FROM\n",
+        "  restaurant_chain_db.marts.agg_restaurant_performance_daily\n",
+        "GROUP BY\n",
+        "  order_month\n",
+        "ORDER BY\n",
+        "  order_month"
+      ]
+    },
+    {
+      "name": "channel_mix_rest",
+      "displayName": "Channel Mix by Restaurant",
+      "queryLines": [
+        "SELECT\n",
+        "  restaurant_name,\n",
+        "  'Dine-In' as channel,\n",
+        "  ROUND(SUM(dine_in_orders) * 100.0 / SUM(total_orders), 1) as mix_pct\n",
+        "FROM\n",
+        "  restaurant_chain_db.marts.agg_restaurant_performance_daily\n",
+        "GROUP BY\n",
+        "  restaurant_name\n",
+        "UNION ALL\n",
+        "SELECT\n",
+        "  restaurant_name,\n",
+        "  'Takeaway',\n",
+        "  ROUND(SUM(takeaway_orders) * 100.0 / SUM(total_orders), 1)\n",
+        "FROM\n",
+        "  restaurant_chain_db.marts.agg_restaurant_performance_daily\n",
+        "GROUP BY\n",
+        "  restaurant_name\n",
+        "UNION ALL\n",
+        "SELECT\n",
+        "  restaurant_name,\n",
+        "  'Delivery',\n",
+        "  ROUND(SUM(delivery_orders) * 100.0 / SUM(total_orders), 1)\n",
+        "FROM\n",
+        "  restaurant_chain_db.marts.agg_restaurant_performance_daily\n",
+        "GROUP BY\n",
+        "  restaurant_name"
+      ]
+    },
+    {
+      "name": "orders_by_rest_channel",
+      "displayName": "Orders by Restaurant & Channel",
+      "queryLines": [
+        "SELECT\n",
+        "  restaurant_name,\n",
+        "  'Dine-In' as channel,\n",
+        "  SUM(dine_in_orders) as orders\n",
+        "FROM\n",
+        "  restaurant_chain_db.marts.agg_restaurant_performance_daily\n",
+        "GROUP BY\n",
+        "  restaurant_name\n",
+        "UNION ALL\n",
+        "SELECT\n",
+        "  restaurant_name,\n",
+        "  'Takeaway',\n",
+        "  SUM(takeaway_orders)\n",
+        "FROM\n",
+        "  restaurant_chain_db.marts.agg_restaurant_performance_daily\n",
+        "GROUP BY\n",
+        "  restaurant_name\n",
+        "UNION ALL\n",
+        "SELECT\n",
+        "  restaurant_name,\n",
+        "  'Delivery',\n",
+        "  SUM(delivery_orders)\n",
+        "FROM\n",
+        "  restaurant_chain_db.marts.agg_restaurant_performance_daily\n",
+        "GROUP BY\n",
+        "  restaurant_name"
+      ]
+    }
+  ],
+  "pages": [
+    {
+      "name": "25f54065",
+      "displayName": "Operations Overview",
+      "layout": [
+        {
+          "widget": {
+            "name": "title",
+            "multilineTextboxSpec": {
+              "lines": [
+                "## Sales & Operations Analytics — Data Vault Marts"
+              ]
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 0,
+            "width": 12,
+            "height": 1
+          }
+        },
+        {
+          "widget": {
+            "name": "kpi_revenue",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "sales_ops_mv",
+                  "fields": [
+                    {
+                      "name": "measure(total_revenue)",
+                      "expression": "MEASURE(`total_revenue`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "frame": {
+                "title": "Total Revenue",
+                "showTitle": true
+              },
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "measure(total_revenue)",
+                  "format": {
+                    "type": "number-currency",
+                    "currencyCode": "AED",
+                    "decimalPlaces": {
+                      "type": "exact",
+                      "places": 2
+                    },
+                    "abbreviation": "compact"
+                  },
+                  "displayName": "Total Revenue"
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 1,
+            "width": 3,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "kpi_orders",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "sales_ops_mv",
+                  "fields": [
+                    {
+                      "name": "measure(total_orders)",
+                      "expression": "MEASURE(`total_orders`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "frame": {
+                "title": "Total Orders",
+                "showTitle": true
+              },
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "measure(total_orders)",
+                  "format": {
+                    "type": "number-plain",
+                    "decimalPlaces": {
+                      "type": "exact",
+                      "places": 0
+                    },
+                    "abbreviation": "compact"
+                  },
+                  "displayName": "Total Orders"
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 3,
+            "y": 1,
+            "width": 3,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "kpi_items_per_order",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "sales_ops_mv",
+                  "fields": [
+                    {
+                      "name": "measure(avg_items_per_order)",
+                      "expression": "MEASURE(`avg_items_per_order`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "frame": {
+                "title": "Avg Items/Order",
+                "showTitle": true
+              },
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "measure(avg_items_per_order)",
+                  "format": {
+                    "type": "number-plain",
+                    "decimalPlaces": {
+                      "type": "exact",
+                      "places": 1
+                    },
+                    "abbreviation": "none"
+                  },
+                  "displayName": "Avg Items/Order"
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 6,
+            "y": 1,
+            "width": 3,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "kpi_rev_per_cust",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "sales_ops_mv",
+                  "fields": [
+                    {
+                      "name": "measure(revenue_per_customer)",
+                      "expression": "MEASURE(`revenue_per_customer`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "frame": {
+                "title": "Revenue/Customer",
+                "showTitle": true
+              },
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "measure(revenue_per_customer)",
+                  "format": {
+                    "type": "number-currency",
+                    "currencyCode": "AED",
+                    "decimalPlaces": {
+                      "type": "exact",
+                      "places": 2
+                    },
+                    "abbreviation": "none"
+                  },
+                  "displayName": "Revenue/Customer"
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 9,
+            "y": 1,
+            "width": 3,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "orders_by_rest_channel",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "orders_by_rest_channel",
+                  "fields": [
+                    {
+                      "name": "channel",
+                      "expression": "`channel`"
+                    },
+                    {
+                      "name": "restaurant_name",
+                      "expression": "`restaurant_name`"
+                    },
+                    {
+                      "name": "sum(orders)",
+                      "expression": "SUM(`orders`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "frame": {
+                "title": "Orders by Restaurant & Channel",
+                "showTitle": true
+              },
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "restaurant_name",
+                  "displayName": "Restaurant",
+                  "scale": {
+                    "type": "categorical"
+                  }
+                },
+                "y": {
+                  "fieldName": "sum(orders)",
+                  "displayName": "Orders",
+                  "scale": {
+                    "type": "quantitative"
+                  }
+                },
+                "color": {
+                  "fieldName": "channel",
+                  "displayName": "Channel",
+                  "scale": {
+                    "type": "categorical"
+                  }
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 3,
+            "width": 6,
+            "height": 5
+          }
+        },
+        {
+          "widget": {
+            "name": "items_trend",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "sales_ops_mv",
+                  "fields": [
+                    {
+                      "name": "order_month",
+                      "expression": "`order_month`"
+                    },
+                    {
+                      "name": "measure(avg_items_per_order)",
+                      "expression": "MEASURE(`avg_items_per_order`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "frame": {
+                "title": "Avg Items Per Order Trend",
+                "showTitle": true
+              },
+              "widgetType": "line",
+              "encodings": {
+                "x": {
+                  "fieldName": "order_month",
+                  "displayName": "Month",
+                  "scale": {
+                    "type": "quantitative"
+                  }
+                },
+                "y": {
+                  "fieldName": "measure(avg_items_per_order)",
+                  "displayName": "Avg Items/Order",
+                  "scale": {
+                    "type": "quantitative"
+                  }
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 6,
+            "y": 3,
+            "width": 6,
+            "height": 5
+          }
+        },
+        {
+          "widget": {
+            "name": "heatmap_dow",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "sales_ops_mv",
+                  "fields": [
+                    {
+                      "name": "measure(total_revenue)",
+                      "expression": "MEASURE(`total_revenue`)"
+                    },
+                    {
+                      "name": "order_day_of_week",
+                      "expression": "`order_day_of_week`"
+                    },
+                    {
+                      "name": "restaurant_name",
+                      "expression": "`restaurant_name`"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "frame": {
+                "title": "Revenue Heatmap: Day of Week × Restaurant",
+                "showTitle": true
+              },
+              "widgetType": "heatmap",
+              "encodings": {
+                "x": {
+                  "fieldName": "order_day_of_week",
+                  "displayName": "Day of Week",
+                  "scale": {
+                    "type": "quantitative"
+                  }
+                },
+                "y": {
+                  "fieldName": "restaurant_name",
+                  "displayName": "Restaurant",
+                  "scale": {
+                    "type": "categorical"
+                  }
+                },
+                "color": {
+                  "fieldName": "measure(total_revenue)",
+                  "displayName": "Total Revenue",
+                  "scale": {
+                    "type": "quantitative"
+                  }
+                },
+                "label": {
+                  "show": true
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 8,
+            "width": 8,
+            "height": 5
+          }
+        },
+        {
+          "widget": {
+            "name": "kpi_weekend",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "sales_ops_mv",
+                  "fields": [
+                    {
+                      "name": "measure(weekend_orders)",
+                      "expression": "MEASURE(`weekend_orders`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "frame": {
+                "title": "Weekend Orders",
+                "showTitle": true
+              },
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "measure(weekend_orders)",
+                  "format": {
+                    "type": "number-plain",
+                    "decimalPlaces": {
+                      "type": "exact",
+                      "places": 0
+                    },
+                    "abbreviation": "compact"
+                  },
+                  "displayName": "Weekend Orders"
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 8,
+            "y": 8,
+            "width": 4,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "kpi_weekday",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "sales_ops_mv",
+                  "fields": [
+                    {
+                      "name": "measure(weekday_orders)",
+                      "expression": "MEASURE(`weekday_orders`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "frame": {
+                "title": "Weekday Orders",
+                "showTitle": true
+              },
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "measure(weekday_orders)",
+                  "format": {
+                    "type": "number-plain",
+                    "decimalPlaces": {
+                      "type": "exact",
+                      "places": 0
+                    },
+                    "abbreviation": "compact"
+                  },
+                  "displayName": "Weekday Orders"
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 8,
+            "y": 10,
+            "width": 4,
+            "height": 2
+          }
+        }
+      ],
+      "pageType": "PAGE_TYPE_CANVAS",
+      "layoutVersion": "GRID_V1"
+    },
+    {
+      "name": "channel_payment",
+      "displayName": "Channel & Payment Deep Dive",
+      "layout": [
+        {
+          "widget": {
+            "name": "title",
+            "multilineTextboxSpec": {
+              "lines": [
+                "## Channel & Payment Deep Dive"
+              ]
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 0,
+            "width": 12,
+            "height": 1
+          }
+        },
+        {
+          "widget": {
+            "name": "kpi_dinein",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "sales_ops_mv",
+                  "fields": [
+                    {
+                      "name": "measure(dine_in_mix_pct)",
+                      "expression": "MEASURE(`dine_in_mix_pct`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "frame": {
+                "title": "Dine-In Mix",
+                "showTitle": true
+              },
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "measure(dine_in_mix_pct)",
+                  "format": {
+                    "type": "number-plain",
+                    "decimalPlaces": {
+                      "type": "exact",
+                      "places": 1
+                    },
+                    "abbreviation": "none"
+                  },
+                  "displayName": "Dine-In Mix %"
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 1,
+            "width": 3,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "kpi_takeaway",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "sales_ops_mv",
+                  "fields": [
+                    {
+                      "name": "measure(takeaway_mix_pct)",
+                      "expression": "MEASURE(`takeaway_mix_pct`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "frame": {
+                "title": "Takeaway Mix",
+                "showTitle": true
+              },
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "measure(takeaway_mix_pct)",
+                  "format": {
+                    "type": "number-plain",
+                    "decimalPlaces": {
+                      "type": "exact",
+                      "places": 1
+                    },
+                    "abbreviation": "none"
+                  },
+                  "displayName": "Takeaway Mix %"
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 3,
+            "y": 1,
+            "width": 3,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "kpi_delivery",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "sales_ops_mv",
+                  "fields": [
+                    {
+                      "name": "measure(delivery_mix_pct)",
+                      "expression": "MEASURE(`delivery_mix_pct`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "frame": {
+                "title": "Delivery Mix",
+                "showTitle": true
+              },
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "measure(delivery_mix_pct)",
+                  "format": {
+                    "type": "number-plain",
+                    "decimalPlaces": {
+                      "type": "exact",
+                      "places": 1
+                    },
+                    "abbreviation": "none"
+                  },
+                  "displayName": "Delivery Mix %"
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 6,
+            "y": 1,
+            "width": 3,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "kpi_digital",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "sales_ops_mv",
+                  "fields": [
+                    {
+                      "name": "measure(digital_payment_pct)",
+                      "expression": "MEASURE(`digital_payment_pct`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "frame": {
+                "title": "Digital Payment %",
+                "showTitle": true
+              },
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "measure(digital_payment_pct)",
+                  "format": {
+                    "type": "number-plain",
+                    "decimalPlaces": {
+                      "type": "exact",
+                      "places": 1
+                    },
+                    "abbreviation": "none"
+                  },
+                  "displayName": "Digital Payment %"
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 9,
+            "y": 1,
+            "width": 3,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "channel_by_rest",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "channel_mix_rest",
+                  "fields": [
+                    {
+                      "name": "channel",
+                      "expression": "`channel`"
+                    },
+                    {
+                      "name": "restaurant_name",
+                      "expression": "`restaurant_name`"
+                    },
+                    {
+                      "name": "sum(mix_pct)",
+                      "expression": "SUM(`mix_pct`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "frame": {
+                "title": "Channel Mix by Restaurant",
+                "showTitle": true
+              },
+              "mark": {
+                "layout": "stack"
+              },
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "restaurant_name",
+                  "displayName": "Restaurant",
+                  "scale": {
+                    "type": "categorical"
+                  }
+                },
+                "y": {
+                  "fieldName": "sum(mix_pct)",
+                  "displayName": "Mix %",
+                  "scale": {
+                    "type": "quantitative"
+                  }
+                },
+                "color": {
+                  "fieldName": "channel",
+                  "displayName": "Channel",
+                  "scale": {
+                    "type": "categorical"
+                  }
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 3,
+            "width": 6,
+            "height": 5
+          }
+        },
+        {
+          "widget": {
+            "name": "payment_by_rest",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "payment_mix_rest",
+                  "fields": [
+                    {
+                      "name": "method",
+                      "expression": "`method`"
+                    },
+                    {
+                      "name": "restaurant_name",
+                      "expression": "`restaurant_name`"
+                    },
+                    {
+                      "name": "sum(mix_pct)",
+                      "expression": "SUM(`mix_pct`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "frame": {
+                "title": "Payment Mix by Restaurant",
+                "showTitle": true
+              },
+              "mark": {
+                "layout": "stack"
+              },
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "restaurant_name",
+                  "displayName": "Restaurant",
+                  "scale": {
+                    "type": "categorical"
+                  }
+                },
+                "y": {
+                  "fieldName": "sum(mix_pct)",
+                  "displayName": "Mix %",
+                  "scale": {
+                    "type": "quantitative"
+                  }
+                },
+                "color": {
+                  "fieldName": "method",
+                  "displayName": "Method",
+                  "scale": {
+                    "type": "categorical"
+                  }
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 6,
+            "y": 3,
+            "width": 6,
+            "height": 5
+          }
+        },
+        {
+          "widget": {
+            "name": "digital_trend",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "digital_trend",
+                  "fields": [
+                    {
+                      "name": "order_month",
+                      "expression": "`order_month`"
+                    },
+                    {
+                      "name": "sum(digital_pct)",
+                      "expression": "SUM(`digital_pct`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "frame": {
+                "title": "Digital Payment % Trend",
+                "showTitle": true
+              },
+              "widgetType": "line",
+              "encodings": {
+                "x": {
+                  "fieldName": "order_month",
+                  "displayName": "Month",
+                  "scale": {
+                    "type": "quantitative"
+                  }
+                },
+                "y": {
+                  "fieldName": "sum(digital_pct)",
+                  "displayName": "Digital %",
+                  "scale": {
+                    "type": "quantitative"
+                  }
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 8,
+            "width": 6,
+            "height": 5
+          }
+        },
+        {
+          "widget": {
+            "name": "payment_trend",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "payment_trend",
+                  "fields": [
+                    {
+                      "name": "method",
+                      "expression": "`method`"
+                    },
+                    {
+                      "name": "order_month",
+                      "expression": "`order_month`"
+                    },
+                    {
+                      "name": "sum(orders)",
+                      "expression": "SUM(`orders`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "frame": {
+                "title": "Card vs Cash vs Wallet Trend",
+                "showTitle": true
+              },
+              "widgetType": "line",
+              "encodings": {
+                "x": {
+                  "fieldName": "order_month",
+                  "displayName": "Month",
+                  "scale": {
+                    "type": "quantitative"
+                  }
+                },
+                "y": {
+                  "fieldName": "sum(orders)",
+                  "displayName": "Orders",
+                  "scale": {
+                    "type": "quantitative"
+                  }
+                },
+                "color": {
+                  "fieldName": "method",
+                  "displayName": "Method",
+                  "scale": {
+                    "type": "categorical"
+                  }
+                }
+              }
+            }
+          },
+          "position": {
+            "x": 6,
+            "y": 8,
+            "width": 6,
+            "height": 5
+          }
+        }
+      ],
+      "pageType": "PAGE_TYPE_CANVAS",
+      "layoutVersion": "GRID_V1"
+    }
+  ],
+  "uiSettings": {
+    "theme": {
+      "widgetHeaderAlignment": "ALIGNMENT_UNSPECIFIED"
+    },
+    "applyModeEnabled": false
+  }
+}

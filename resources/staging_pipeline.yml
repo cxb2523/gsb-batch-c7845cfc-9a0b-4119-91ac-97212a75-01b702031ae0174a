@@ -1,0 +1,34 @@
+
+# Staging Pipeline — Hash Key Computation & Metadata Enrichment
+# Source: ${var.catalog}.${var.bronze_schema}
+# Target: ${var.catalog}.${var.staging_schema}
+# Tables (all MV): stg_orders, stg_order_items, stg_customers,
+#                  stg_restaurants, stg_menu_items, stg_reviews
+# Shared utility: _dv_hash.py (SHA-256 hashing with RESTAURANT_CHAIN salt)
+
+resources:
+  pipelines:
+    staging_pipeline:
+      name: datavault_staging
+      catalog: ${var.catalog}
+      target: ${var.staging_schema}
+      channel: CURRENT
+      photon: true
+      serverless: true
+      configuration:
+        pipelines.metrics.flowTimeReporter.enabled: "true"
+      libraries:
+        - file:
+            path: ../src/staging/transformations/_dv_hash.py
+        - file:
+            path: ../src/staging/transformations/stg_orders.py
+        - file:
+            path: ../src/staging/transformations/stg_order_items.py
+        - file:
+            path: ../src/staging/transformations/stg_customers.py
+        - file:
+            path: ../src/staging/transformations/stg_restaurants.py
+        - file:
+            path: ../src/staging/transformations/stg_menu_items.py
+        - file:
+            path: ../src/staging/transformations/stg_reviews.py

@@ -1,0 +1,31 @@
+# AI/BI Dashboard Resource Definitions
+# Exported from workspace using: databricks bundle generate dashboard --existing-id <id>
+# Dashboard JSON files stored in src/dashboards/
+# These are managed as bundle resources — not synced as regular files.
+
+resources:
+  dashboards:
+    executive_business_overview:
+      display_name: "Executive Business Overview"
+      file_path: ../src/dashboards/dv_executive_business_overview.lvdash.json
+      warehouse_id: ${var.warehouse_id}
+
+    sales_operations_analytics:
+      display_name: "Sales & Operations Analytics"
+      file_path: ../src/dashboards/dv_sales_operations_analytics.lvdash.json
+      warehouse_id: ${var.warehouse_id}
+
+    customer_intelligence_segmentation:
+      display_name: "Customer Intelligence & Segmentation"
+      file_path: ../src/dashboards/dv_customer_intelligence_segmentation.lvdash.json
+      warehouse_id: ${var.warehouse_id}
+
+    menu_engineering_product_performance:
+      display_name: "Menu Engineering & Product Performance"
+      file_path: ../src/dashboards/dv_menu_engineering_product_performance.lvdash.json
+      warehouse_id: ${var.warehouse_id}
+
+    data_pipeline_quality_health:
+      display_name: "Data Pipeline & Quality Health"
+      file_path: ../src/dashboards/dv_data_pipeline_quality_health.lvdash.json
+      warehouse_id: ${var.warehouse_id}

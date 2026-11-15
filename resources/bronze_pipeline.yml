@@ -1,0 +1,39 @@
+
+# Bronze Layer Ingestion Pipeline
+# Sources: Azure Event Hub (live orders), Azure SQL Server (reference + backfill)
+# Target schema: ${var.catalog}.${var.bronze_schema} (01_bronze)
+# Also writes to: ${var.catalog}.00_landing (hardcoded in source code)
+#
+# Tables in 00_landing: eventhub_raw (ST), historical_orders (MV)
+# Tables in 01_bronze: eventhub_parsed (temp view), orders (ST, merged
+#   streaming + historical), customers (MV), restaurants (MV),
+#   menu_items (MV), reviews (MV)
+#
+# Configuration: Event Hub (namespace, name, offsets), SQL Server (host, db)
+#
+# Secrets (hardcoded in Python source, scope: res-chain-pipeline):
+#   eh-conn-str          — Event Hub connection string
+#   db_admin_username    — SQL Server username
+#   db_admin_password    — SQL Server password
+
+resources:
+  pipelines:
+    bronze_pipeline:
+      name: datavault_bronze_ingestion
+      catalog: ${var.catalog}
+      target: ${var.bronze_schema}
+      channel: CURRENT
+      photon: true
+      serverless: true
+      configuration:
+        pipelines.metrics.flowTimeReporter.enabled: "true"
+        EH_NAMESPACE: ${var.eh_namespace}
+        EH_NAME: ${var.eh_name}
+        startingOffsets: ${var.eh_starting_offsets}
+        maxOffsetsPerTrigger: ${var.eh_max_offsets_per_trigger}
+        SQL_HOST_NAME: ${var.sql_host_name}
+        SQL_DB_NAME: ${var.sql_db_name}
+      libraries:
+        # Use glob pattern to include all nested subdirectories
+        - glob:
+            include: ../src/bronze/transformations/**
