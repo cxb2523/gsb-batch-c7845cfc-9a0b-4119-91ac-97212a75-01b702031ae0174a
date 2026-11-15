@@ -1,0 +1,32 @@
+[project]
+name = "mlx-mdx"
+version = "0.0.3"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "beautifulsoup4",
+    "filetype",
+    "mlx",
+    "mlx-lm",
+    "mlx-vlm",
+    "numpy>=2.1.0",
+    "pillow",
+    "playwright",
+    "mcp[cli]",
+    "pypdfium2",
+    "readability-lxml",
+    "requests",
+    "torchvision>=0.24.0",
+]
+
+[project.scripts]
+mlx-mdx = "mlx_mdx.cli:main"
+mlx-mdx-mcp = "mlx_mdx.mcp_server:main"
+
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["mlx_mdx"]
