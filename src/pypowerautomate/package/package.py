@@ -142,6 +142,13 @@ class Package:
     └── manifest.json
     """
 
+    # Mapping from an OpenApiConnection action's host connectionName to the
+    # setter method that registers the corresponding connector.
+    AUTO_CONNECTOR_SETTERS = {
+        "shared_sharepointonline": "set_sharepoint_connector",
+        "shared_dropbox": "set_dropbox_connector",
+    }
+
     def __init__(self, display_name: str, flow: Flow):
         """
         Initializes the package with a specific flow and a display name.
@@ -158,6 +165,35 @@ class Package:
 
         self.flow = flow
         self.__set_flow_resource()
+
+    def __auto_register_connectors(self):
+        """
+        Scans the exported actions of the flow and automatically registers the
+        connectors (SharePoint Online / Dropbox) used by OpenApiConnection actions.
+
+        - Connectors already registered via set_*_connector() are not registered twice.
+        - Each connector is registered at most once, even if multiple actions use it.
+        - Registration is done without a connection_name, so a connection name
+          explicitly set by the user is never overwritten.
+        - Connectors not used by any action are not registered.
+        """
+        registered_api_names = {api.name for api in self.__apis}
+        flow_definition = self.flow.export()
+        actions = flow_definition.get("actions", {})
+        for action in actions.values():
+            if not isinstance(action, dict):
+                continue
+            if action.get("type") != "OpenApiConnection":
+                continue
+            host = action.get("inputs", {}).get("host", {})
+            if not isinstance(host, dict):
+                continue
+            connection_name = host.get("connectionName")
+            setter_name = Package.AUTO_CONNECTOR_SETTERS.get(connection_name)
+            if setter_name is None or connection_name in registered_api_names:
+                continue
+            getattr(self, setter_name)()
+            registered_api_names.add(connection_name)
 
     def __set_flow_resource(self):
         """
@@ -402,6 +438,9 @@ class Package:
             f.write(json.dumps(content))
 
     def export_zipfile(self, output_dir: str = ".") -> str:
+        # フロー内のアクションが使用するコネクタを自動登録する
+        self.__auto_register_connectors()
+
         work_dir = tempfile.TemporaryDirectory().name
         definition_dir = path.join(
             work_dir, "Microsoft.Flow", "flows", self.__flow_resource.uuid)
