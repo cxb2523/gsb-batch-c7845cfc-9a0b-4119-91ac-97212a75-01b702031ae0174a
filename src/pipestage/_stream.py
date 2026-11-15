@@ -14,6 +14,17 @@ def _check_positive(name: str, value: int) -> None:
         raise ValueError(f"{name} must be >= 1, got {value}")
 
 
+def _check_timeout(timeout: Any) -> None:
+    if timeout is None:
+        return
+    if isinstance(timeout, bool) or not isinstance(timeout, (int, float)):
+        raise ValueError(
+            f"timeout must be a positive number of seconds, got {timeout!r}"
+        )
+    if not timeout > 0:  # also rejects NaN
+        raise ValueError(f"timeout must be > 0, got {timeout}")
+
+
 class Stream(Generic[T]):
 
     __slots__ = ("_source",)
@@ -27,9 +38,14 @@ class Stream(Generic[T]):
         *,
         concurrency: int = 1,
         ordered: bool = True,
+        timeout: float | None = None,
+        on_error: Callable[[BaseException], Any] | None = None,
     ) -> Stream[Any]:
         _check_positive("concurrency", concurrency)
-        return Stream(map_stage(self._source, fn, concurrency, ordered))
+        _check_timeout(timeout)
+        return Stream(
+            map_stage(self._source, fn, concurrency, ordered, timeout, on_error)
+        )
 
     def filter(
         self,

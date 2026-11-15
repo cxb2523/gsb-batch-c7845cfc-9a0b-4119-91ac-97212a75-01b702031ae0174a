@@ -153,10 +153,23 @@ stream(async_generator())
 ### .map()
 
 ```python
-.map(fn, *, concurrency=1, ordered=True)
+.map(fn, *, concurrency=1, ordered=True, timeout=None, on_error=None)
 ```
 
 Apply `fn` to every item. `fn` may be sync or async. `ordered=False` emits results as they finish instead of preserving input order.
+
+Optional per-item fault handling (useful for crawl/scrape batches where one stuck or failing item must not sink the whole batch):
+
+- `timeout` — seconds per item. A call exceeding it is treated as a failure and its concurrency slot is released. Must be a positive number; anything else raises `ValueError` when the stage is built. Default `None` means no timeout.
+- `on_error` — callable receiving the exception (a `TimeoutError` on timeout, or whatever `fn` raised) and returning a replacement value that flows downstream like a normal result: it keeps the item's position with `ordered=True` and is emitted in completion order with `ordered=False`. If `on_error` itself raises, that exception propagates fail-fast. Default `None` keeps the existing fail-fast behavior.
+
+```python
+results = await (
+    stream(urls)
+    .map(fetch, concurrency=20, timeout=5.0, on_error=lambda exc: None)
+    .collect()
+)  # slow/failing URLs come back as None, the batch always completes
+```
 
 ### .filter()
 

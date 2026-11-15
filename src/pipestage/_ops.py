@@ -10,6 +10,29 @@ from ._utils import _coerce, _try_aclose, to_async_iter
 _SKIP: Any = object()
 
 
+async def _guarded_call(
+    fn: Callable[..., Any],
+    item: Any,
+    timeout: float | None,
+    on_error: Callable[[BaseException], Any] | None,
+) -> Any:
+    # Per-item timeout + error isolation wrapper. A timeout counts as a failure:
+    # wait_for cancels the inner call (freeing the concurrency slot) and raises
+    # TimeoutError, which on_error may then convert into a replacement value.
+    # CancelledError always propagates so short-circuit cancellation (take/first/
+    # aclose) still kills in-flight work instead of emitting replacements.
+    try:
+        if timeout is not None:
+            return await asyncio.wait_for(_coerce(fn, item), timeout)
+        return await _coerce(fn, item)
+    except asyncio.CancelledError:
+        raise
+    except BaseException as exc:
+        if on_error is None:
+            raise
+        return await _coerce(on_error, exc)
+
+
 def _cancel_all(tasks: Iterable[asyncio.Task[Any]]) -> None:
     # synchronous — safe to call from inside an async generator's except/finally block
     # (awaiting inside those blocks is unreliable when the frame is closed externally)
@@ -120,7 +143,15 @@ def map_stage(
     fn: Callable[..., Any],
     concurrency: int,
     ordered: bool,
+    timeout: float | None = None,
+    on_error: Callable[[BaseException], Any] | None = None,
 ) -> AsyncIterator[Any]:
+    if timeout is not None or on_error is not None:
+        base_fn = fn
+
+        async def fn(item: Any) -> Any:
+            return await _guarded_call(base_fn, item, timeout, on_error)
+
     if concurrency == 1:
         return _map_serial(source, fn)
     if ordered:

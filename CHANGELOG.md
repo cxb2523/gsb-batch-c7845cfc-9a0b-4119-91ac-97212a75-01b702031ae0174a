@@ -4,6 +4,16 @@ All notable changes to pipestage will be documented here.
 
 ---
 
+## [Unreleased]
+
+### Added
+
+- `Stream.map()` now accepts two keyword-only fault-handling parameters:
+  - `timeout` - per-item timeout in seconds; a call exceeding it is treated as a failure and releases its concurrency slot. Must be a positive number, otherwise `ValueError` is raised when the stage is built. Default `None` keeps the previous no-timeout behavior
+  - `on_error` - callable receiving the exception (a `TimeoutError` on timeout, or whatever `fn` raised) and returning a replacement value that flows downstream: in the item's original position with `ordered=True`, in completion order with `ordered=False`. If `on_error` itself raises, that exception propagates fail-fast. Default `None` keeps the previous fail-fast behavior
+
+---
+
 ## [0.3.0] - 2026-08-25
 
 ### Added
