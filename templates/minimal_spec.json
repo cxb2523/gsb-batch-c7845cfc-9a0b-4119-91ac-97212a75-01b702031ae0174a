@@ -1,0 +1,51 @@
+{
+  "slug": "my-dataset",
+  "short_name": "My Dataset",
+  "full_name": "My Dataset (Publisher Attribution, Year)",
+  "description": "One-line summary describing what this dataset contains.",
+  "license": {
+    "spdx": "CC0-1.0",
+    "source_url": "https://example.com/LICENSE",
+    "redistribution_permitted": true,
+    "attribution_required": false,
+    "notes": null,
+    "scrape_advisory": null
+  },
+  "fetch": {
+    "type": "http",
+    "urls": [
+      "https://example.com/data.csv"
+    ],
+    "auth": null,
+    "expected_bytes": null,
+    "expected_sha256": null
+  },
+  "extract": {
+    "type": "passthrough",
+    "include": null,
+    "exclude": null,
+    "post": null
+  },
+  "parse": {
+    "reader": "csv",
+    "options": {
+      "delimiter": ",",
+      "has_header": true,
+      "encoding": "utf-8"
+    }
+  },
+  "transform": {
+    "handler": "tighten_types",
+    "params": {}
+  },
+  "write": {
+    "compression": "zstd",
+    "row_group_size_rows": 10000000,
+    "statistics": true
+  },
+  "expect": {
+    "rows": null,
+    "schema_hash": null,
+    "notes": "Populate `rows` after the first successful build."
+  }
+}

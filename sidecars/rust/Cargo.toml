@@ -1,0 +1,99 @@
+# SPDX-FileCopyrightText: 2026 Raincloud Maintainers
+# SPDX-License-Identifier: Apache-2.0
+[package]
+name = "raincloud-sidecars"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Raincloud cross-implementation sidecar binaries: parquet via arrow-rs, vortex via the Vortex Rust core, orc via orc-rust, avro via arrow-avro."
+
+# Standalone crate — NOT a member of the Vortex workspace: it lives in the
+# raincloud repo and depends on the PUBLISHED Vortex crate. This [workspace]
+# table makes it its own workspace root, so no parent Cargo.toml can absorb it
+# and it never edits a local vortex checkout. Its one other member is
+# nimble-ffi, the static library the nimble@cpp binaries (sidecars/nimble) link;
+# a plain build builds only this package.
+[workspace]
+members = ["nimble-ffi"]
+default-members = ["."]
+
+[lib]
+name = "raincloud_sidecars"
+path = "src/lib.rs"
+
+[[bin]]
+name = "parquet-write"
+path = "src/bin/parquet_write.rs"
+
+[[bin]]
+name = "parquet-read"
+path = "src/bin/parquet_read.rs"
+
+[[bin]]
+name = "vortex-write"
+path = "src/bin/vortex_write.rs"
+
+[[bin]]
+name = "vortex-read"
+path = "src/bin/vortex_read.rs"
+
+[[bin]]
+name = "orc-write"
+path = "src/bin/orc_write.rs"
+
+[[bin]]
+name = "orc-read"
+path = "src/bin/orc_read.rs"
+
+[[bin]]
+name = "avro-write"
+path = "src/bin/avro_write.rs"
+
+[[bin]]
+name = "avro-read"
+path = "src/bin/avro_read.rs"
+
+[dependencies]
+# Vortex Rust core, from crates.io. PINNED EXACTLY, and held in LOCKSTEP with
+# the other two Vortex lanes so a differing conformance verdict is an
+# implementation difference and never a version difference:
+#   vortex-data (PyPI)      -> pyproject.toml          [vortex@py]
+#   vortex (crates.io)      -> here                    [vortex@rs]
+#   dev.vortex:vortex-jni   -> sidecars/java/gradle.properties (vortexJniVersion) [vortex@jni]
+# Bump all three together, with clients/rust/Cargo.toml
+# (tests/test_native_protocol.py::test_vortex_pins_agree_across_python_rust_and_jvm
+# checks they agree). Features: files (open/write), tokio (async runtime
+# integration), zstd.
+vortex = { version = "=0.86.1", features = ["files", "tokio", "zstd"] }
+
+# arrow / parquet PINNED to =59.2 to unify with the arrow Vortex links (the
+# Vortex workspace pins `59.2`, so an exact `=59.2` here intersects to 59.2.x).
+# arrow-ipc needs the `zstd` feature: the canonical is an Arrow IPC
+# *file* whose record-batch bodies are zstd-compressed *inside* the IPC stream
+# (NOT an outer zstd wrapper). parquet's `variant_experimental` feature is how
+# arrow-rs 59.2 maps the `arrow.parquet.variant` extension to Parquet's VARIANT
+# logical type, on write and on read; without it a VARIANT column is written as
+# a plain group.
+arrow-array = "=59.2"
+arrow-schema = "=59.2"
+arrow-cast = "=59.2"
+arrow-select = "=59.2"
+arrow-ipc = { version = "=59.2", features = ["zstd"] }
+parquet = { version = "=59.2", features = ["variant_experimental"] }
+
+# ORC via orc-rust, the Arrow-native Rust implementation, PINNED EXACTLY. Its
+# 0.9 line is built on arrow 59, so it shares the =59.2 arrow above. The
+# default `async` feature is not needed: the sidecar reads and writes files.
+orc-rust = { version = "=0.9.0", default-features = false }
+
+# Avro object container files via arrow-avro, released with arrow-rs and pinned
+# with it (=59.2). Every codec Avro defines, so RAINCLOUD_AVRO_COMPRESSION can
+# name any of them (zstd unset).
+arrow-avro = { version = "=59.2", default-features = false, features = ["zstd", "deflate", "snappy", "bzip2", "xz"] }
+
+# CLI + JSON report + async runtime + stream adapter + error plumbing.
+clap = { version = "4.5", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "fs"] }
+futures = "0.3"
+anyhow = "1"

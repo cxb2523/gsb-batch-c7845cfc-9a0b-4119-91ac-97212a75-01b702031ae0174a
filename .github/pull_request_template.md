@@ -1,0 +1,15 @@
+<!-- Sign off each commit with git commit -s; see CONTRIBUTING.md#developer-certificate-of-origin-dco. -->
+
+## Summary
+<!-- What changed and why. 1–3 bullets is plenty. -->
+
+## Type of change
+<!-- Tick one or more. -->
+- [ ] New dataset (manifest entry — see [`SKILLS.md` → Adding a new dataset](../blob/develop/SKILLS.md#adding-a-new-dataset))
+- [ ] New transform handler (see [`SKILLS.md` → Adding a new transform handler](../blob/develop/SKILLS.md#adding-a-new-transform-handler))
+- [ ] Bug fix
+- [ ] Documentation
+- [ ] Tooling / CI / repo housekeeping
+
+## Notes for the reviewer
+<!-- Anything specific to look at, or context the diff doesn't make obvious. Optional. -->
