@@ -1,0 +1,178 @@
+name: CI
+
+permissions:
+  contents: read
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  main:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      # Cache node_modules
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 26
+          cache: 'npm'
+      - uses: actions/setup-java@v6
+        with:
+          distribution: 'temurin'
+          java-version: '25.0.5+8.0.LTS'
+      - run: npm ci
+
+      - name: Install protoc and xvfb
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler xvfb
+
+      - run: npm run format:check
+      - run: npx turbo run typecheck
+      - run: npx turbo run build
+      - name: Check packages (publint, attw, install smoke test)
+        run: npm run check:packages
+      - run: npm run lint
+      - run: npx turbo run test -- --coverage
+
+      - name: E2E against example-robot (NT server)
+        env:
+          E2E_HEADLESS: 1
+        run: npm run e2e:local
+
+      - name: Upload coverage reports to Codecov
+        uses: codecov/codecov-action@v7
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+          flags: unittests
+
+  # Release flow (https://changesets.dev/guide/automating):
+  # - pending changesets: open/update the "Version Packages" PR and publish betas to `beta`
+  # - no changesets left (that PR was merged): publish the new versions to `latest`
+  select-mode:
+    needs: main
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      mode: ${{ steps.select-mode.outputs.mode }}
+      publish-plan-artifact-id: ${{ steps.select-mode.outputs.publish-plan-artifact-id }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 26
+          package-manager-cache: false
+      - run: npm ci
+      - id: select-mode
+        uses: changesets/action/select-mode@v2
+
+  version:
+    needs: select-mode
+    if: needs.select-mode.outputs.mode == 'version'
+    runs-on: ubuntu-latest
+    concurrency:
+      group: changesets-version
+      cancel-in-progress: true
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 26
+          package-manager-cache: false
+      - run: npm ci
+      - uses: changesets/action/version@v2
+        env:
+          # @changesets/changelog-github looks up PR links and authors.
+          GITHUB_TOKEN: ${{ github.token }}
+        with:
+          # A PAT so CI runs on the Version Packages PR (PRs opened with GITHUB_TOKEN don't trigger workflows).
+          github-token: ${{ secrets.RELEASE_GITHUB_TOKEN }}
+          script: npm run version-packages
+          commit-message: 'chore: version packages'
+          pr-title: 'chore: version packages'
+
+  publish-beta:
+    needs: select-mode
+    if: needs.select-mode.outputs.mode == 'version'
+    runs-on: ubuntu-latest
+    concurrency:
+      group: npm-publish-beta
+      cancel-in-progress: true
+    permissions:
+      contents: read
+      pull-requests: read # PR links in snapshot changelogs
+      id-token: write # npm trusted publishing
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 26
+          registry-url: 'https://registry.npmjs.org'
+          package-manager-cache: false
+      - run: npm ci
+      - run: npx turbo run build --filter='./packages/*'
+      # https://changesets.dev/guide/snapshot-releases — the version bump is never committed.
+      - run: npx changeset version --snapshot beta
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+      - run: npx changeset publish --tag beta --no-git-tag
+
+  pack:
+    needs: select-mode
+    if: needs.select-mode.outputs.mode == 'publish'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      pack-dir-artifact-id: ${{ steps.pack.outputs.pack-dir-artifact-id }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 26
+          package-manager-cache: false
+      - run: npm ci
+      - run: npx turbo run build --filter='./packages/*'
+      - id: pack
+        uses: changesets/action/pack@v2
+        with:
+          publish-plan-artifact-id: ${{ needs.select-mode.outputs.publish-plan-artifact-id }}
+
+  publish:
+    needs: pack
+    runs-on: ubuntu-latest
+    concurrency:
+      group: npm-publish-latest
+      cancel-in-progress: false
+    permissions:
+      contents: write # git tags + GitHub releases
+      id-token: write # npm trusted publishing
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 26
+          registry-url: 'https://registry.npmjs.org'
+          package-manager-cache: false
+      - run: npm ci
+      - uses: changesets/action/publish@v2
+        with:
+          pack-dir-artifact-id: ${{ needs.pack.outputs.pack-dir-artifact-id }}

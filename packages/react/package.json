@@ -1,0 +1,55 @@
+{
+  "name": "@ntcore-ts/react",
+  "version": "1.1.1",
+  "description": "React bindings for @ntcore-ts/client (NetworkTables for FRC)",
+  "license": "MIT",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/cjlawson02/ntcore-ts.git",
+    "directory": "packages/react"
+  },
+  "main": "./dist/index.esm.js",
+  "module": "./dist/index.esm.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    "./package.json": "./package.json",
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.esm.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.spec.json --noEmit",
+    "build": "rm -rf dist && rollup -c rollup.config.mts",
+    "test": "vitest run",
+    "bench": "vitest bench --run",
+    "lint": "oxlint .",
+    "check:pack": "publint --strict && attw --pack . --profile esm-only"
+  },
+  "peerDependencies": {
+    "@ntcore-ts/client": ">=1.0.0-0",
+    "react": ">=18.0.0",
+    "react-dom": ">=18.0.0",
+    "zod": ">=4.0.0"
+  },
+  "devDependencies": {
+    "@ntcore-ts/client": "*"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "keywords": [
+    "ntcore",
+    "networktables",
+    "frc",
+    "robot",
+    "robotics",
+    "react",
+    "hooks"
+  ]
+}

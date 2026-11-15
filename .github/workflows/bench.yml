@@ -1,0 +1,37 @@
+# Benchmarks run under CodSpeed's CPU simulation, which counts simulated CPU cycles instead of
+# wall-clock time, so results are stable on shared GitHub runners. CodSpeed comments on PRs and
+# reports a status check: https://codspeed.io/cjlawson02/ntcore-ts
+name: Bench
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  # Lets CodSpeed backfill baseline data for earlier commits.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  benchmarks:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # OIDC authentication with CodSpeed
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 26
+          cache: npm
+      - run: npm ci
+      # The react benches import @ntcore-ts/client from its built dist.
+      - run: npx turbo run build --filter=@ntcore-ts/client
+      - name: Run benchmarks
+        uses: CodSpeedHQ/action@v5
+        with:
+          mode: simulation
+          # Not `npm run bench`: Turbo's strict env mode would drop the CODSPEED_* variables.
+          run: npm run bench -w @ntcore-ts/client && npm run bench -w @ntcore-ts/react

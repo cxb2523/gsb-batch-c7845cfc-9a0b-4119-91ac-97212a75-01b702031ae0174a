@@ -1,0 +1,56 @@
+{
+  "name": "@ntcore-ts/mcp",
+  "version": "1.1.0",
+  "description": "Model Context Protocol server for NetworkTables, built on @ntcore-ts/client",
+  "license": "MIT",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/cjlawson02/ntcore-ts.git",
+    "directory": "packages/mcp"
+  },
+  "main": "./dist/index.esm.js",
+  "module": "./dist/index.esm.js",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "ntcore-ts-mcp": "./dist/cli.js"
+  },
+  "exports": {
+    "./package.json": "./package.json",
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.esm.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.spec.json --noEmit",
+    "build": "rm -rf dist && rollup -c rollup.config.mts",
+    "test": "vitest run",
+    "lint": "oxlint .",
+    "start": "tsx src/cli.ts",
+    "serve": "tsx src/cli.ts",
+    "check:pack": "publint --strict && attw --pack . --profile esm-only"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/server": "^2.3.1",
+    "@ntcore-ts/client": "^1.0.0-beta.2",
+    "zod": "^4.6.4"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "keywords": [
+    "ntcore",
+    "networktables",
+    "mcp",
+    "model context protocol",
+    "frc",
+    "robot",
+    "robotics",
+    "wpilib"
+  ]
+}
