@@ -5,7 +5,9 @@ from email_infor import *
 import requests
 import time
 import random
+import os
 import os.path
+from datetime import datetime, timedelta
 
 
 # add header for the crawler
@@ -31,30 +33,100 @@ search_list = ["所罗门群岛", "斯洛伐克", "贝宁", "圣多美和普林�
 urlencoded_search_list = url_encoding(search_list)
 urls = create_url_list(urlencoded_search_list)
 
-# loop for none stop run
-day_count = 0
-while 1:
+
+# A word is given up after this many consecutive page requests fail.
+# Normal request failures still keep the old behaviour: count them, rest for
+# an hour once the exception count passes six, sleep 50 seconds and try the
+# next page.  Only when nothing has succeeded for many pages in a row do we
+# stop the word, and that outcome is recorded instead of silently moving on.
+MAX_CONSECUTIVE_REQUEST_FAILURES = 12
+
+
+def _outcome_record(word, outcome, last_success_page, page_count):
+    return {
+        "word": word,
+        "outcome": outcome,
+        "last_page": last_success_page,
+        "page_count": page_count,
+    }
+
+
+def build_daily_report(report_date, total_page_count, success_page_count,
+                       failed_word_count, no_data_word_count,
+                       start_time, end_time, word_outcomes):
+    """Build the daily log/email body.
+
+    The original fields (total page, start/end time, duration) are kept and
+    followed by the successful page total, the failed word count, the
+    no-data word count and one line per word: word, outcome, last successful
+    page number.  "Failed" words are those abandoned after request errors or
+    a write failure; "no data" means the word genuinely had no result.
+    """
+    daily_report = (
+        report_date + ", Total page: " + str(total_page_count) +
+        ", Starttime: " + str(start_time) +
+        ", Endtime: " + str(end_time) +
+        ", During: " + str(end_time - start_time) + "\n" +
+        "Success page: " + str(success_page_count) +
+        ", Failed word: " + str(failed_word_count) +
+        ", No data word: " + str(no_data_word_count) + "\n" +
+        "Per-word outcome (word\toutcome\tlast success page):\n"
+    )
+    for item in word_outcomes:
+        daily_report += (item["word"] + "\t" + item["outcome"] + "\t" +
+                         str(item["last_page"]) + "\n")
+    return daily_report
+
+
+def run_daily_mission(day_count=0, data_root="../WBTestdata/", logfile_path="mylog.txt",
+                      word_list=None, word_urls=None,
+                      clock=None, sleep_fn=None, request_fn=None,
+                      write_fn=None, mail_fn=None,
+                      page_cap=300,
+                      consecutive_failure_limit=MAX_CONSECUTIVE_REQUEST_FAILURES):
+    """Run one full day's crawl and write the daily report.
+
+    The keyword arguments are seams for local verification; production calls
+    only use the defaults.  The function returns a summary dict with the
+    report text and the per-word outcomes.
+    """
+    if clock is None:
+        clock = datetime.now
+    if sleep_fn is None:
+        sleep_fn = time.sleep
+    if request_fn is None:
+        request_fn = requests.get
+    if write_fn is None:
+        write_fn = write_page_file
+    if mail_fn is None:
+        mail_fn = send_email
+    if word_list is None:
+        word_list = search_list
+    if word_urls is None:
+        word_urls = urls
+
     # you can personalize your own report email here
     # send an email to you when everyday's mission start
     start_title = "Program start!"
-    start_report = str(datetime.now())
-    send_email(user, pwd, recipient, start_title, start_report)
+    start_report = str(clock())
+    mail_fn(user, pwd, recipient, start_title, start_report)
 
     # define folder path
-    yesterday_folder = "../WBTestdata/" + yesterday()
-    today_folder = "../WBTestdata/" + today()
+    now = clock()
+    yesterday_folder = os.path.join(data_root, (now - timedelta(days=1)).strftime("%m-%d"))
+    today_folder = os.path.join(data_root, now.strftime("%m-%d"))
 
     # Testify if today's folder exist, if not, create
     if not os.path.exists(today_folder):
         print "Today's first run! Create new folder."
-        os.mkdir(today_folder)
+        ensure_folder(today_folder)
 
     # start mission, set 0, print out mission information: start time, date of today, how many days this program has run
     word_count = 0
     total_page_count = 0
-    today_start_time = datetime.now()
+    today_start_time = now
     print "Start time: ", today_start_time
-    print "Today is: " + today()
+    print "Today is: " + today_start_time.strftime("%m-%d")
     print "daycount: ", day_count
 
     # Print out welcome message
@@ -63,114 +135,189 @@ while 1:
     else:
         print "Detect ysterday's data! Welcome back!"
 
+    word_outcomes = []
+
     # loop for every word in the list
-    for country in range(len(search_list)):
+    for country in range(len(word_list)):
         word_count += 1
-        unico_this_word = search_list[country].decode('UTF-8')  # get current country in UNICODE
-        this_baseurl = urls[country]  # create base url: without page number
+        unico_this_word = word_list[country]  # get current country in UNICODE
+        this_baseurl = word_urls[country]  # create base url: without page number
         initial_page_number = 1  # define start page
         str_initial_page_number = str(initial_page_number)
-        exception_count = 0  # exception count
-        end_date = days_ago(2)  # Determine the date of when to end, format [03-30]
+        exception_count = 0  # exception count, kept across the whole word
+        consecutive_request_failures = 0
+        last_success_page = 0
+        this_word_page_count = 0
+        outcome = OUTCOME_COMPLETED
 
         # loop for adding page number and requesting them in succession
-        # The date below all follow format [04-02], check function.py for more information
-        for i in range(initial_page_number, initial_page_number + 300):  # Let's say, no more than 300 pages per word
+        # The date below all follow format [04-02], check functions.py for more information
+        for i in range(initial_page_number, initial_page_number + page_cap):  # no more than 300 pages per word
             this_page_number = str(i)
             this_url = this_baseurl + this_page_number  # generate current url with current page number
             print "This is word number", word_count, ", the word is ", unico_this_word, ", this is page ", this_page_number
 
             # Get and write down JSON data into txt file with structured file name
             try:
-                req = requests.get(this_url, headers=headers, timeout=4)
+                req = request_fn(this_url, headers=headers, timeout=4)
                 content = req.content
-                this_file_path = "../WBTestdata/" + today() + "/" + unico_this_word + today() + "page" + this_page_number + ".txt"  # generate txt file name and path
-                try:
-                    with open(this_file_path, "w") as f:
-                        f.write(content)  # write down data
+                if content is None or len(content) == 0:
+                    # Never store an empty body or count it as a good page.
+                    raise EmptyContentError("empty response body")
 
-                # This situation happens when today's mission did not finished on time before 24:00
-                # So there is not folder exist for today's file path: this_file_path
-                # Need to create the folder first
-                except OSError:
-                    if not os.path.exists(today_folder):
-                        print "Why you are so late? ok ok, create the new folder for you..."
-                        os.mkdir(today_folder)
-                        with open(this_file_path, "w") as f:
-                            f.write(content)  # write down data
-                print "total page count: ", total_page_count
+                # Read the page's end time before writing, so an unusable
+                # response is not saved as if it were a complete page.
+                this_end_time = get_this_endtime_text(content)
+
+                # Original behaviour: a page that was received counts here.
+                # The stricter success total below only counts written pages.
                 total_page_count += 1
 
-                # Get this page's end time to determine to continue to next page or to next word
-                try:
-                    this_end_time = get_this_endtime_text(content)
+                # Write the page, retrying once.  The folder and file name use
+                # the actual write time of each attempt, so pages written after
+                # midnight go into the new day's folder.
+                write_ok = False
+                for attempt in range(1, 3):
+                    try:
+                        this_file_path = write_fn(data_root, unico_this_word, i, content,
+                                                  now=clock())
+                        write_ok = True
+                        break
+                    except Exception, e:
+                        print "Writing page failed (attempt " + str(attempt) + "): ", e
 
-                # This situation happens when the server changed the JSON structure,
-                # if happens, please check the JSON data and change the retrieve structure accordingly
-                except Exception, e:
-                    print "Get this endtime fail! jump to next country."
+                if not write_ok:
+                    print "Can not write this page after retry, give up this word: ", unico_this_word
+                    outcome = OUTCOME_WRITE_FAILED
                     break
 
+                print "page written: ", this_file_path
+                this_word_page_count += 1
+                last_success_page = i
+                consecutive_request_failures = 0
+
+                # Stop this word once the last weibo on the page is older than
+                # the day two days ago.  The boundary is calculated at check
+                # time, not at program start, so a run across midnight does not
+                # compare against the wrong day.
+                end_date = days_ago_text(2, clock())
                 if end_date > this_end_time:
                     print "current endtime: ", this_end_time
                     print "We reached 2 days ago's data! Now sleep a while and call for next country!"
+                    outcome = OUTCOME_COMPLETED
                     break
                 else:
                     print "current page's endtime: ", this_end_time
                     print "Not enough! Sleep a while and continue requesting for next page!"
-                    time.sleep(random.randint(2, 8))
+                    sleep_fn(random.randint(2, 8))
 
             # This situation happens when there is no weibo exist for the word your try to search
             # Pleas double check on the web page
-            except IndexError:
+            except NoDataError:
                 print "There is no data! to the next country!"
+                if last_success_page == 0:
+                    outcome = OUTCOME_NO_DATA
+                else:
+                    # Results ran out after some good pages: the word was
+                    # crawled to the end of what the search offers.
+                    outcome = OUTCOME_COMPLETED
                 break
 
-            # Other than index error, it could also be request rejecting due to high frequency
+            # Other than no-data, it could also be request rejecting due to high frequency
+            # or an unusable/truncated response.
             except Exception, e:
                 exception_count += 1
+                consecutive_request_failures += 1
                 if exception_count > 6:
                     print "ehhhhh! I have failed 5 times for this country, I got to stop really long! 1 hour!"
 
                     # you can personalize your own report email here
                     # send an email to you when exception received more than 6 time
                     error_title = "Error!"
-                    error_report = str(datetime.now())
-                    send_email(user, pwd, recipient, error_title, error_report)
+                    error_report = str(clock())
+                    mail_fn(user, pwd, recipient, error_title, error_report)
 
                     exception_count = 0  # Set exception count back to 0 and sleep for 1 hour
-                    time.sleep(600)
+                    sleep_fn(600)
+
+                if consecutive_request_failures >= consecutive_failure_limit:
+                    print "Requests kept failing for this word, give up: ", unico_this_word
+                    outcome = OUTCOME_REQUEST_ABANDONED
+                    break
 
                 print "request has been rejected or failed! Sleep 1 minutes and try next page!"
                 print e
-                time.sleep(50)
+                sleep_fn(50)
                 continue
+        else:
+            # The page cap was reached without a natural stop.  If not a
+            # single page was written, the word never got usable data.
+            if last_success_page == 0:
+                outcome = OUTCOME_REQUEST_ABANDONED
+            else:
+                outcome = OUTCOME_COMPLETED
+
         print "Finish: " + unico_this_word + " sleep 10 seconds"
-        time.sleep(10)
+        word_outcomes.append(_outcome_record(unico_this_word, outcome,
+                                            last_success_page, this_word_page_count))
+        sleep_fn(10)
 
     # Print out today's mission information
     print "Finish today's work, sleep for tomorrow..."
-    today_end_time = datetime.now()
+    today_end_time = clock()
     sleep_time = sleep_how_long(24, today_start_time, today_end_time)
     print "Today's sleep time is: ", sleep_time
-    print "Today start at: ",today_start_time
+    print "Today start at: ", today_start_time
     print "Today end at: ", today_end_time
     print "Duration: ", today_end_time - today_start_time
     print "Total page: ", total_page_count
 
+    success_page_count = sum(item["page_count"] for item in word_outcomes)
+    failed_word_count = sum(1 for item in word_outcomes if item["outcome"] in FAILED_OUTCOMES)
+    no_data_word_count = sum(1 for item in word_outcomes if item["outcome"] == OUTCOME_NO_DATA)
+
     # you can personalize your own report email here
     # send an email to you when everyday's mission finished
-    daily_title = today() + "  Report"
-    daily_report = today() + ", Total page: " + str(total_page_count) + ", Starttime: " + str(today_start_time) + ", Endtime: " + str(today_end_time) + ", During: " + str(today_end_time - today_start_time) + "\n"
+    daily_title = today_end_time.strftime("%m-%d") + "  Report"
+    daily_report = build_daily_report(today_end_time.strftime("%m-%d"), total_page_count,
+                                      success_page_count, failed_word_count,
+                                      no_data_word_count,
+                                      today_start_time, today_end_time, word_outcomes)
     #send_email(user, pwd, recipient, subject, body)
-    send_email(user, pwd, recipient, daily_title, daily_report)
+    mail_fn(user, pwd, recipient, daily_title, daily_report)
 
     # Create a txt file to save daily report
-    logfile = "mylog.txt"
-    with open(logfile, "a") as f:
-        f.write(daily_report)
-        print "Log output finished..."
+    logfile = logfile_path
+    log_folder = os.path.dirname(logfile)
+    if log_folder:
+        ensure_folder(log_folder)
+    # The report now contains Chinese word names; append_report stores it as
+    # UTF-8 so mylog.txt reads the same regardless of the system locale.
+    append_report(logfile, daily_report)
+    print "Log output finished..."
 
-    day_count += 1
-    word_count = 0
-    time.sleep(sleep_time)
+    return {
+        "total_page_count": total_page_count,
+        "success_page_count": success_page_count,
+        "failed_word_count": failed_word_count,
+        "no_data_word_count": no_data_word_count,
+        "word_outcomes": word_outcomes,
+        "word_count": word_count,
+        "start_time": today_start_time,
+        "end_time": today_end_time,
+        "sleep_time": sleep_time,
+        "report": daily_report,
+    }
+
+
+def main():
+    # loop for none stop run
+    day_count = 0
+    while 1:
+        summary = run_daily_mission(day_count=day_count)
+        day_count += 1
+        time.sleep(summary["sleep_time"])
+
+
+if __name__ == "__main__":
+    main()

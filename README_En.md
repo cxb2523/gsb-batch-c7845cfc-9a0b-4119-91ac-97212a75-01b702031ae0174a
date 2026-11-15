@@ -113,6 +113,31 @@ And the older the posts, the bigger the time interval -- page 1 may contain 10 p
   3. Start from page 1 request data untill the last record was post longer than two days
   4. Finish all keyword search, send me another Email
   5. Print some information about the mission, and write the report into a log.txt
+
+### How pages are written
+
+- The date folder and the date in the file name both come from the **actual write time** of each page, so pages written after midnight go into the new day's folder instead of the date the program started.
+- The target folder is created before every write. If a page fails to write, it is **retried once**; if it still fails the word is marked "write failed" and the crawler moves to the next word. Empty bodies and half-written files are never counted as a good page (no partial file is left behind).
+- Each word records one outcome: `完成` (reached the two-days-ago boundary), `无数据` (the search truly has no result), `请求异常放弃` (gave up after repeated request failures), `写入失败` (could not be written after the retry), plus its **last successful page number**.
+- A refused request (e.g. rate limiting / `ok=0` without a "no content" message), truncated JSON or a changed structure is treated as a bad page, never as "no data".
+
+### Daily report (email body and mylog.txt)
+
+In addition to the original total page count, start/end time and duration, the report now contains:
+
+```
+11-16, Total page: 10, Starttime: ..., Endtime: ..., During: ...
+Success page: 9, Failed word: 4, No data word: 1
+Per-word outcome (word	outcome	last success page):
+跨午夜词	完成	2
+写入失败词	写入失败	2
+请求异常词	请求异常放弃	0
+...
+```
+
+`Total page` keeps its original meaning (pages received), `Success page` counts pages actually written, `Failed word` counts words that were abandoned after request errors or a write failure, and `No data word` counts words that genuinely had no result.
+
+The random inter-page delay, the long rest after the exception count limit and the daily scheduled sleep are unchanged.
 ***
 The comment line in the code is very into detail, please check for any further question.
 
