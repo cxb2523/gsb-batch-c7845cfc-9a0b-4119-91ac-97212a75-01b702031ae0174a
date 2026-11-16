@@ -31,3 +31,32 @@ pipeline:
   target:
     type: lake
     path: output/region_revenue.csv
+
+# Example API source with pagination and rate-limit retries.
+# Without a `pagination` block the source behaves as a single one-shot GET.
+#
+# pipeline:
+#   name: paginated_api_pipeline
+#   source:
+#     type: api
+#     url: https://api.example.com/v1/orders
+#     params:
+#       region: global
+#     records_path: data.items        # extraction applied to every page
+#     pagination:
+#       page_param: page              # query parameter holding the page number
+#       start_page: 1                 # first page number (default: 1)
+#       page_size: 100                # per-page size (omitted from request if absent)
+#       page_size_param: per_page     # size query parameter (default: per_page)
+#       max_pages: 50                 # hard stop even if no empty page is seen
+#     retry:
+#       max_retries: 3                # extra attempts per page on 429/5xx/timeouts
+#       backoff_seconds: 1            # exponential base: 1s, 2s, 4s, ...
+#   target:
+#     type: lake
+#     path: output/api_orders.csv
+#
+# Paging stops on the first empty page or when max_pages pages have been
+# requested. If a page still fails after retries, the already fetched pages
+# are kept, the failed page number and reason are recorded, and the run ends
+# with a PartialExtractionError rather than succeeding silently.

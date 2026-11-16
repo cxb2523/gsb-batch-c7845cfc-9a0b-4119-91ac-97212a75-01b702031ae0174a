@@ -44,9 +44,45 @@ Designed for **scalable, reliable, and auditable data workflows**.
 ### 📥 Multi-Source Extraction
 - Supports:
   - CSV files  
-  - APIs  
+  - APIs (paginated collection with retries and partial-failure handling)
   - Databases  
   - Streaming sources  
+
+#### API pagination, retries and partial-failure semantics
+
+An `api` source can declare a `pagination` block under `source` in
+`pipeline_config.yaml`:
+
+```yaml
+source:
+  type: api
+  url: https://api.example.com/v1/orders
+  records_path: data.items          # applied independently to every page
+  pagination:
+    page_param: page                # query parameter holding the page number
+    start_page: 1                   # first page number (default: 1)
+    page_size: 100                  # per-page size (omitted from the request when absent)
+    page_size_param: per_page       # size query parameter (default: per_page)
+    max_pages: 50                   # hard stop even if no empty page is returned
+  retry:
+    max_retries: 3                  # extra attempts per page on HTTP 429/5xx and network errors
+    backoff_seconds: 1              # exponential backoff base: 1s, 2s, 4s, ...
+```
+
+Behaviour:
+
+- The extractor requests pages one at a time and stops on the **first empty
+  page** or once **`max_pages`** pages have been requested — it never requests
+  beyond the stopping boundary.
+- Each failed page is retried up to `max_retries` times (HTTP 429, 5xx and
+  connection/timeout errors; other 4xx errors fail immediately).
+- If a page still fails after retries, the pages already fetched are **kept**,
+  the failed page number and reason are recorded, and the run ends with a
+  `PartialExtractionError` carrying the partial `DataFrame` — never a silent
+  success and never a loss of collected data.
+- Without a `pagination` block the source keeps its original single-GET
+  behaviour; `records_path` extraction continues to apply in both modes.
+
 
 ### 🔄 Transformation Engine
 - Data cleaning and normalization  

@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from extractors.api_extractor import APIExtractor
+from extractors.api_extractor import APIExtractor, PartialExtractionError
 from extractors.csv_extractor import CSVExtractor
 from extractors.db_extractor import DBExtractor
 from extractors.stream_extractor import StreamExtractor
@@ -46,7 +46,28 @@ class ETLPipeline:
         if source_type == "csv":
             return CSVExtractor(self.root / source["path"]).extract()
         if source_type == "api":
-            return APIExtractor(source["url"], source.get("params"), source.get("records_path")).extract()
+            result = APIExtractor(
+                source["url"],
+                source.get("params"),
+                source.get("records_path"),
+                source.get("pagination"),
+                source.get("retry"),
+            ).extract()
+            if not result.ok:
+                # Keep the pages already collected and end with an
+                # interpretable failure instead of silent success.
+                self.lineage.record(
+                    "extract:api",
+                    rows=len(result.frame),
+                    details={
+                        "status": result.status,
+                        "stop_reason": result.stop_reason,
+                        "pages_fetched": result.pages_fetched,
+                        "failed_pages": result.failed_pages,
+                    },
+                )
+                raise PartialExtractionError(result)
+            return result.frame
         if source_type == "db":
             return DBExtractor(source["connection_url"], source["query"]).extract()
         if source_type == "stream":
