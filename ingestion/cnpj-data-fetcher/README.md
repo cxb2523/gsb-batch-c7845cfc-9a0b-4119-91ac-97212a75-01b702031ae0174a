@@ -25,6 +25,9 @@ Este é um [Cloud Run Job](https://cloud.google.com/run/docs/create-jobs), const
 │   │
 │   ├── main.js            # Ponto de entrada do processo
 │
+├── test/
+│   ├── fetcher.test.js    # Testes do controller com dependências falsas (node:test)
+│
 ├── package.json
 ├── package-lock.json
 ├── Dockerfile
@@ -62,6 +65,22 @@ Após o download, o conteúdo do ZIP é extraído linha a linha, validando o cha
 ### 5. Upload dos dados
 
 Por fim, o CSV é enviado para o bucket e o arquivo ZIP é excluído.
+
+### 6. Tolerância a falhas por arquivo
+
+Cada arquivo ZIP é processado de forma independente. Se o download, a extração
+ou o upload de um arquivo falhar, o nome do arquivo e o motivo do erro são
+registrados nos logs e no Slack, e o job continua processando os arquivos
+seguintes em vez de interromper todo o lote. Arquivos já presentes no Storage
+continuam sendo pulados, sem download repetido.
+
+Ao fim do processamento:
+
+- **Sem falhas** (todos os arquivos processados ou já existentes): o arquivo
+  `last_folder.txt` é atualizado e o job encerra com sucesso.
+- **Com ao menos uma falha**: o diretório **não** é marcado como processado e
+  o job encerra com falha (`PartialFailureError`). A mensagem final de resumo
+  no Slack separa as quantidades e os detalhes de sucessos, ignorados e falhas.
 
 > Durante todas as etapas, o job gera logs que são enviadas para o [Google Cloud Logging](https://cloud.google.com/logging), além de alertas para um canal no [Slack](https://slack.com).
 
@@ -114,3 +133,10 @@ npm start
 ```
 
 > Se não for usar notificações do Slack, não é necessário configurar a URL. Para ativá-las, siga [estas instruções](https://api.slack.com/messaging/webhooks).
+
+### Testes
+
+Os testes usam o executor nativo do Node.js ([`node:test`](https://nodejs.org/api/test.html)), sem dependências extras, e simulam download, extração, upload e alertas com dependências falsas — incluindo falhas parciais de arquivos:
+```sh
+npm test
+```
