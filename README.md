@@ -39,9 +39,11 @@ data-pipeline-assignment/
 │       └── automobileEDA_processed.csv         # output pipeline (dihasilkan otomatis)
 ├── src/
 │   ├── pipeline.py                             # script ETL utama
+│   ├── batch_ingest.py                         # entry point batch ingestion (multi-CSV)
 │   └── generate_eda_charts.py                  # generator chart EDA (opsional)
 ├── tests/
-│   └── test_pipeline.py                        # unit & integration tests (pytest)
+│   ├── test_pipeline.py                        # unit & integration tests pipeline (pytest)
+│   └── test_batch_ingest.py                    # tests batch ingestion (pytest)
 ├── documentation/
 │   ├── data-flow-diagram.png                   # diagram alur data
 │   ├── terminal-output.png                     # bukti eksekusi pipeline
@@ -206,9 +208,36 @@ Contoh keluaran nyata saat pipeline dijalankan:
 pytest -v
 ```
 
-Terdapat **15 unit & integration test** yang memvalidasi output pipeline
+Terdapat **21 unit & integration test** yang memvalidasi output pipeline
 (jumlah baris, tidak ada missing di kolom kritikal, skala numerik dalam [0, 1],
-serta kebenaran hasil encoding).
+serta kebenaran hasil encoding) dan perilaku batch ingestion.
+
+### (Opsional) Batch ingestion — banyak file CSV per batch
+
+Selain mode single-file di atas, tersedia entry point untuk data yang masuk
+secara bertahap: semua CSV dalam satu direktori dibaca berurutan sesuai nama
+file, dibersihkan dengan logika cleaning & transformasi yang sama, lalu
+digabung menjadi satu processed dataset.
+
+```bash
+python src/batch_ingest.py data/raw/batches \
+    --out data/processed/automobileEDA_processed.csv \
+    --manifest data/processed/batch_manifest.csv
+```
+
+Perilaku utama:
+
+- **Settlement manifest** (`batch_manifest.csv`) mencatat tiap batch: nama
+  file, baris dibaca, baris setelah cleaning, status
+  (`success` / `failed` / `skipped`), dan alasan kegagalan yang dapat
+  dilacak (kolom + nomor baris).
+- **Baris rusak** (nilai numerik tidak bisa di-parse, jumlah kolom tidak
+  sesuai) hanya menggagalkan batch yang bersangkutan — batch lain tetap
+  diproses.
+- **Batch duplikat** (isi identik dengan batch yang sudah sukses) dilewati
+  dan ditandai `skipped`, tidak dihitung ulang ke hasil akhir.
+- **Direktori tidak ada / kosong** menghasilkan error yang jelas, bukan
+  file output kosong.
 
 ### (Opsional) Regenerasi chart EDA
 ```bash
