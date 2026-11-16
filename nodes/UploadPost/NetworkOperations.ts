@@ -18,7 +18,23 @@ export type NetworkRequest = {
 	qs?: IDataObject;
 	isUploadOperation: boolean;
 	waitForCompletion: boolean;
+	// Bluesky cursor-paged listings that the node can walk page after page.
+	// `itemsKey` names the array holding the page entries in the API response.
+	paging?: { itemsKey: string };
 };
+
+// Bluesky operations whose listing responses carry an AT-Protocol cursor, and
+// the response field that holds their page entries.
+export const BLUESKY_PAGED_OPERATIONS: Record<string, string> = {
+	getBlueskyNotifications: 'notifications',
+	searchBlueskyPosts: 'posts',
+	searchBlueskyActors: 'actors',
+	listBlueskyDrafts: 'drafts',
+};
+
+// Safety stop when Auto Paginate is on but Max Pages is left empty. The node
+// must never follow cursors without a bounded number of requests.
+export const BLUESKY_AUTO_PAGING_DEFAULT_MAX_PAGES = 10;
 
 export const NETWORK_RESOURCES = ['queue', 'telegram', 'bluesky', 'googleBusiness'];
 
@@ -880,8 +896,43 @@ export const networkProperties: INodeProperties[] = [
 		name: 'blueskyCursor',
 		type: 'string',
 		default: '',
-		description: 'Cursor of the previous page',
-		displayOptions: showFor('bluesky', ['getBlueskyNotifications', 'searchBlueskyPosts', 'searchBlueskyActors', 'listBlueskyDrafts']),
+		description:
+			'Cursor of the previous page. With Auto Paginate enabled this is the starting cursor; every following page reuses the cursor returned by the previous one.',
+		displayOptions: showFor('bluesky', [
+			'getBlueskyNotifications',
+			'searchBlueskyPosts',
+			'searchBlueskyActors',
+			'listBlueskyDrafts',
+		]),
+	},
+	{
+		displayName: 'Auto Paginate',
+		name: 'blueskyAutoPaginate',
+		type: 'boolean',
+		default: false,
+		description:
+			'Whether to keep requesting pages automatically from the current Cursor until the API returns no cursor, Max Pages is reached or a page fails. Off: only one page is requested, exactly as before.',
+		displayOptions: showFor('bluesky', [
+			'getBlueskyNotifications',
+			'searchBlueskyPosts',
+			'searchBlueskyActors',
+			'listBlueskyDrafts',
+		]),
+	},
+	{
+		displayName: 'Max Pages',
+		name: 'blueskyMaxPages',
+		type: 'number',
+		typeOptions: { minValue: 1 },
+		default: 10,
+		description:
+			'Maximum number of pages to fetch when Auto Paginate is on. Must be a positive integer; empty uses the default of 10. Stops before an unbounded loop.',
+		displayOptions: showFor('bluesky', [
+			'getBlueskyNotifications',
+			'searchBlueskyPosts',
+			'searchBlueskyActors',
+			'listBlueskyDrafts',
+		]),
 	},
 	{
 		displayName: 'Draft Text',
@@ -1245,6 +1296,15 @@ const buildTelegramRequest = (ctx: NetworkContext, user: string): NetworkRequest
 const BS = '/uploadposts/bluesky';
 const BLUESKY_PAGING: Array<[string, string]> = [['blueskyPageSize', 'limit'], ['blueskyCursor', 'cursor']];
 
+const pagedBlueskyRequest = (
+	ctx: NetworkContext,
+	endpoint: string,
+	qs: IDataObject,
+): NetworkRequest => ({
+	...request('GET', endpoint, qs),
+	paging: { itemsKey: BLUESKY_PAGED_OPERATIONS[ctx.operation] },
+});
+
 const buildBlueskyRequest = (ctx: NetworkContext, user: string): NetworkRequest => {
 	switch (ctx.operation) {
 		case 'getBlueskyProfile': {
@@ -1257,7 +1317,7 @@ const buildBlueskyRequest = (ctx: NetworkContext, user: string): NetworkRequest 
 			const reasons = param(ctx, 'blueskyReasons', []) as string[];
 			if (Array.isArray(reasons) && reasons.length > 0) qs.reasons = reasons.join(',');
 			putFilled(ctx, qs, BLUESKY_PAGING);
-			return request('GET', `${BS}/notifications`, qs);
+			return pagedBlueskyRequest(ctx, `${BS}/notifications`, qs);
 		}
 		case 'getBlueskyUnreadCount':
 			return request('GET', `${BS}/notifications/unread-count`, { user });
@@ -1271,17 +1331,17 @@ const buildBlueskyRequest = (ctx: NetworkContext, user: string): NetworkRequest 
 				['blueskyUntil', 'until'],
 				...BLUESKY_PAGING,
 			]);
-			return request('GET', `${BS}/search/posts`, qs);
+			return pagedBlueskyRequest(ctx, `${BS}/search/posts`, qs);
 		}
 		case 'searchBlueskyActors': {
 			const qs: IDataObject = { user, q: requireStr(ctx, 'blueskyQuery', 'Search Query') };
 			putFilled(ctx, qs, BLUESKY_PAGING);
-			return request('GET', `${BS}/search/actors`, qs);
+			return pagedBlueskyRequest(ctx, `${BS}/search/actors`, qs);
 		}
 		case 'listBlueskyDrafts': {
 			const qs: IDataObject = { user };
 			putFilled(ctx, qs, BLUESKY_PAGING);
-			return request('GET', `${BS}/drafts`, qs);
+			return pagedBlueskyRequest(ctx, `${BS}/drafts`, qs);
 		}
 		case 'createBlueskyDraft': {
 			const body: IDataObject = { user };

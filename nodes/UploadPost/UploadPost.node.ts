@@ -14,6 +14,7 @@ import {
 
 import {
 	applyNetworkUploadOptions,
+	BLUESKY_AUTO_PAGING_DEFAULT_MAX_PAGES,
 	buildNetworkRequest,
 	NETWORK_RESOURCES,
 	networkProperties,
@@ -135,6 +136,8 @@ type RequestConfig = {
 	// Validate JWT authenticates with the profile token, not the API key, so the
 	// credential's Authorization header must not overwrite it.
 	skipCredentialAuth?: boolean;
+	// Set on cursor-paged Bluesky listings; enables the auto-paginate loop.
+	paging?: { itemsKey: string };
 };
 
 type ExecutionContext = {
@@ -2429,6 +2432,216 @@ const pollUploadStatus = async (
 		}
 	}
 	return finalData;
+};
+
+// ---------------------------------------------------------------------------
+// Bluesky cursor auto-pagination
+// ---------------------------------------------------------------------------
+
+type AutoPagingState = {
+	pagesFetched: number;
+	hasNextPage: boolean;
+	nextCursor: string;
+	incomplete: boolean;
+	failedPage?: number;
+	error?: string;
+};
+
+const isPlainRecord = (value: unknown): value is IDataObject =>
+	typeof value === 'object' && value !== null && !Array.isArray(value);
+
+// The listings can answer with the AT-Protocol shape (`cursor`/`has_more` at
+// the root) or with the cursor nested in a `pagination`/`paging` object.
+const findCursor = (data: unknown): string => {
+	if (!isPlainRecord(data)) return '';
+	const normalize = (value: unknown): string => {
+		if (typeof value === 'string' && value.trim()) return value.trim();
+		if (typeof value === 'number' && Number.isFinite(value)) return String(value);
+		return '';
+	};
+	for (const key of ['pagination', 'paging']) {
+		const nested = data[key];
+		if (isPlainRecord(nested)) {
+			const inner = normalize(nested.next_cursor) || normalize(nested.cursor);
+			if (inner) return inner;
+		}
+	}
+	return normalize(data.cursor) || normalize(data.next_cursor);
+};
+
+const findHasMore = (data: unknown): boolean | undefined => {
+	if (!isPlainRecord(data)) return undefined;
+	if (typeof data.has_more === 'boolean') return data.has_more;
+	for (const key of ['pagination', 'paging']) {
+		const nested = data[key];
+		if (isPlainRecord(nested) && typeof nested.has_more === 'boolean') {
+			return nested.has_more as boolean;
+		}
+	}
+	return undefined;
+};
+
+const extractPageItems = (data: unknown, itemsKey: string): unknown[] => {
+	if (!isPlainRecord(data)) return [];
+	const direct = data[itemsKey];
+	if (Array.isArray(direct)) return direct;
+	// Some wrapped responses put the payload under `data`.
+	const envelope = data.data;
+	if (isPlainRecord(envelope) && Array.isArray(envelope[itemsKey])) {
+		return envelope[itemsKey] as unknown[];
+	}
+	return [];
+};
+
+const describeRequestError = (error: unknown): string => {
+	if (error instanceof Error && error.message) return error.message;
+	if (isPlainRecord(error)) {
+		const errorResponse = error.response;
+		const responseData =
+			errorResponse && isPlainRecord(errorResponse) ? errorResponse.data : undefined;
+		const payload = isPlainRecord(responseData) ? responseData : error;
+		const message = payload.message ?? payload.error;
+		if (typeof message === 'string' && message) return message;
+	}
+	return String(error);
+};
+
+const buildAutoPagingState = (partial: AutoPagingState): IDataObject => ({
+	pages_fetched: partial.pagesFetched,
+	has_next_page: partial.hasNextPage,
+	next_cursor: partial.nextCursor,
+	incomplete: partial.incomplete,
+	...(partial.failedPage !== undefined ? { failed_page: partial.failedPage } : {}),
+	...(partial.error ? { error: partial.error } : {}),
+});
+
+const sendPagedRequest = async (
+	node: IExecuteFunctions,
+	requestOptions: IHttpRequestOptions,
+): Promise<any> =>
+	parseJsonIfNeeded(
+		await node.helpers.httpRequestWithAuthentication.call(node, 'uploadPostApi', requestOptions),
+	);
+
+// Walks a cursor-paged Bluesky listing. The first page uses the request exactly
+// as buildRequestConfig produced it (so a filled Cursor/Page Size still wins);
+// every later page only swaps the `cursor` query parameter for the one the API
+// returned. A failure on page 1 throws; later failures keep the merged pages and
+// flag the result incomplete instead of pretending the list is complete.
+const executeAutoPagedRequest = async (
+	node: IExecuteFunctions,
+	itemIndex: number,
+	config: RequestConfig,
+	requestOptions: IHttpRequestOptions,
+): Promise<IDataObject> => {
+	const rawMaxPages = node.getNodeParameter(
+		'blueskyMaxPages',
+		itemIndex,
+		BLUESKY_AUTO_PAGING_DEFAULT_MAX_PAGES,
+	);
+	const maxPages = Number(rawMaxPages);
+	if (!Number.isInteger(maxPages) || maxPages < 1) {
+		throw new NodeOperationError(
+			node.getNode(),
+			'Max Pages must be a positive integer when Auto Paginate is enabled',
+			{ itemIndex },
+		);
+	}
+
+	const itemsKey = config.paging?.itemsKey ?? '';
+	const merged: unknown[] = [];
+	let firstPage: IDataObject | undefined;
+	let requestCursor =
+		typeof requestOptions.qs?.cursor === 'string' ? requestOptions.qs.cursor.trim() : '';
+	let pagesFetched = 0;
+	let nextCursor = '';
+	let hasNextPage = false;
+
+	while (pagesFetched < maxPages) {
+		const pageNumber = pagesFetched + 1;
+		let pageData: any;
+		try {
+			pageData = await sendPagedRequest(node, requestOptions);
+		} catch (error) {
+			const reason = describeRequestError(error);
+			if (pagesFetched === 0) {
+				// First page failed: no data at all, surface the failure instead of
+				// emitting an empty result.
+				throw new NodeOperationError(node.getNode(), `Bluesky page 1 request failed: ${reason}`, {
+					itemIndex,
+				});
+			}
+			return {
+				...(firstPage ?? {}),
+				[itemsKey]: merged,
+				auto_paging: buildAutoPagingState({
+					pagesFetched,
+					hasNextPage: true,
+					nextCursor,
+					incomplete: true,
+					failedPage: pageNumber,
+					error: reason,
+				}),
+			};
+		}
+
+		const returnedCursor = findCursor(pageData);
+		// A cursor identical to the one we sent cannot advance the listing: treat
+		// it as a failure so the loop can never spin on the same page forever.
+		if (requestCursor && returnedCursor && returnedCursor === requestCursor) {
+			const reason =
+				`page ${pageNumber} returned the same cursor it was sent (${requestCursor}); ` +
+				'the API cannot advance, stopping to avoid an endless loop';
+			if (pagesFetched === 0) {
+				throw new NodeOperationError(node.getNode(), `Bluesky pagination stalled: ${reason}`, {
+					itemIndex,
+				});
+			}
+			return {
+				...(firstPage ?? {}),
+				[itemsKey]: merged,
+				auto_paging: buildAutoPagingState({
+					pagesFetched,
+					hasNextPage: true,
+					nextCursor,
+					incomplete: true,
+					failedPage: pageNumber,
+					error: reason,
+				}),
+			};
+		}
+
+		if (!isPlainRecord(pageData)) {
+			pageData = { [itemsKey]: [] } as IDataObject;
+		}
+		if (firstPage === undefined) firstPage = { ...(pageData as IDataObject) };
+		merged.push(...extractPageItems(pageData, itemsKey));
+		pagesFetched += 1;
+		nextCursor = returnedCursor;
+		const explicitHasMore = findHasMore(pageData);
+		hasNextPage = explicitHasMore ?? Boolean(returnedCursor);
+		if (!hasNextPage) break;
+		if (pagesFetched >= maxPages) break;
+
+		requestCursor = returnedCursor;
+		// A fresh query object per page keeps earlier request options (and any
+		// retry by the workflow) pointing at the page they actually sent.
+		requestOptions = {
+			...requestOptions,
+			qs: { ...(requestOptions.qs ?? {}), cursor: returnedCursor },
+		};
+	}
+
+	return {
+		...(firstPage ?? {}),
+		[itemsKey]: merged,
+		auto_paging: buildAutoPagingState({
+			pagesFetched,
+			hasNextPage,
+			nextCursor: hasNextPage ? nextCursor : '',
+			incomplete: false,
+		}),
+	};
 };
 
 export class UploadPost implements INodeType {
@@ -7288,28 +7501,37 @@ export class UploadPost implements INodeType {
 				requestOptions.json = true;
 			}
 
-			const rawResponse = config.skipCredentialAuth
-				? await this.helpers.httpRequest(requestOptions)
-				: await this.helpers.httpRequestWithAuthentication.call(
-					this,
-					'uploadPostApi',
-					requestOptions,
-				);
+			const autoPaginate =
+				config.paging !== undefined &&
+				this.getNodeParameter('blueskyAutoPaginate', itemIndex, false) === true;
 
-			const responseData = parseJsonIfNeeded(rawResponse);
-
-			let finalData: any = responseData;
-			if (config.isUploadOperation && config.waitForCompletion) {
-				const requestId = responseData && (responseData as any).request_id
-					? ((responseData as any).request_id as string)
-					: undefined;
-				if (requestId) {
-					finalData = await pollUploadStatus(
+			let finalData: any;
+			if (autoPaginate) {
+				finalData = await executeAutoPagedRequest(this, itemIndex, config, requestOptions);
+			} else {
+				const rawResponse = config.skipCredentialAuth
+					? await this.helpers.httpRequest(requestOptions)
+					: await this.helpers.httpRequestWithAuthentication.call(
 						this,
-						requestId,
-						config.pollInterval ?? 10,
-						config.pollTimeout ?? 600,
+						'uploadPostApi',
+						requestOptions,
 					);
+
+				const responseData = parseJsonIfNeeded(rawResponse);
+
+				finalData = responseData;
+				if (config.isUploadOperation && config.waitForCompletion) {
+					const requestId = responseData && (responseData as any).request_id
+						? ((responseData as any).request_id as string)
+						: undefined;
+					if (requestId) {
+						finalData = await pollUploadStatus(
+							this,
+							requestId,
+							config.pollInterval ?? 10,
+							config.pollTimeout ?? 600,
+						);
+					}
 				}
 			}
 

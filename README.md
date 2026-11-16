@@ -127,6 +127,11 @@ Your own bot in the connected chat, group or channel.
 ### Bluesky Actions
 - **Get Profile** (one or several handles/DIDs, or the connected account), **Get Notifications**, **Get Unread Count**, **Search Posts**, **Search Accounts**.
 - **List Drafts / Create Draft / Delete Draft**: drafts shown in the Bluesky app (text only; delete needs **Confirm**).
+- **Auto Paginate** (Get Notifications, Search Posts, Search Accounts, List Drafts): off by default, so a node keeps returning one page exactly as before. Turn it on to follow the returned cursor automatically from the current **Cursor** until the API sends no cursor, **Max Pages** is reached (default 10; must be a positive integer — there is no unbounded mode) or a page fails.
+  - Pages are merged in order into one output item. Its `auto_paging` object reports `pages_fetched`, `has_next_page`, `next_cursor` (store it in **Cursor** to resume later), and `incomplete`.
+  - A failure on the first page throws an error and produces no empty result. A failure after at least one page stops the loop, keeps the pages already fetched and sets `incomplete: true` with `failed_page` and the error reason — an incomplete list is never returned as a complete one.
+  - A page that answers with the same cursor it was sent is treated as a failure (the listing cannot advance), using the same first-page vs. later-page rules, to prevent an endless loop.
+  - **Page Size** and **Cursor** stay compatible: an explicitly filled value is sent on the first request and Page Size is reused on every later page; only the cursor is replaced between pages.
 
 ### Google Business Actions
 - **List Posts / Get Post**: the location's posts. Edit them with Post Action > Edit Post and delete them with Unpublish Post (platform Google Business).
