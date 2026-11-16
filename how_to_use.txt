@@ -17,6 +17,9 @@ Run: python run.py
 2. Ban one selected member by username or ID, with confirmation.
 3. Unban one selected member by username or ID, with confirmation.
 4. Export group administrators (ID and available username) to users.json.
+   Results are saved after every batch. If an account cannot be read it is
+   skipped and listed under "failures"; if the network drops, the export stays
+   marked in_progress and running option 4 again resumes it without duplicates.
 5. Create an invitation link for people who choose to join.
 6. Exit.
 
