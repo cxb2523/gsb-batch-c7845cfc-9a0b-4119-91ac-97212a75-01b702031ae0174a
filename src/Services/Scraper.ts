@@ -12,6 +12,16 @@ export interface ScraperOptions {
   tags?: string;
 }
 
+export interface FailedPage {
+  path: string;
+  error: string;
+}
+
+export interface CrawlResult {
+  success: string[];
+  failed: FailedPage[];
+}
+
 class Scraper {
   private website: string;
   private baseSegments: number;
@@ -42,6 +52,16 @@ class Scraper {
     if (normalized === "/") return 0;
     const segments = normalized.split("/").filter(Boolean).length;
     return segments - this.baseSegments;
+  }
+
+  private toErrorMessage(error: unknown): string {
+    if (error instanceof Error && error.message) return error.message;
+    try {
+      const message = String(error);
+      return message === "[object Object]" ? "Unknown crawl error" : message;
+    } catch {
+      return "Unknown crawl error";
+    }
   }
 
   private async processPage(page: Page, endpoint: string): Promise<string[]> {
@@ -95,61 +115,68 @@ class Scraper {
     return links;
   }
 
-  async bfs(endpoint: string = "/"): Promise<string[]> {
+  /**
+   * Shared traversal used by both BFS and DFS. A failure on a single page
+   * (navigation timeout, extraction error, ...) is recorded and the crawl
+   * continues with the remaining links. Failed paths are marked as visited
+   * before processing, so they can never be enqueued again. Every page and
+   * its context are closed regardless of outcome.
+   */
+  private async crawl(
+    start: string,
+    mode: "bfs" | "dfs",
+  ): Promise<CrawlResult> {
     const visited: Record<string, boolean> = {};
-    const results: string[] = [];
-    const queue = [endpoint];
+    const success: string[] = [];
+    const failed: FailedPage[] = [];
+    const pending: string[] = [start];
 
-    while (queue.length > 0) {
-      const size = queue.length;
-      for (let i = 0; i < size; i++) {
-        const current = queue.shift();
-        if (!current || visited[current]) continue;
-        if (this.depth !== -1 && this.relativeDepth(current) > this.depth) continue;
-
-        visited[current] = true;
-        results.push(current);
-
-        const page = await this.browserService.getPage();
-        try {
-          const links = await this.processPage(page, current);
-          queue.push(...links.filter((l) => !visited[l]));
-        } finally {
-          await this.browserService.closePage(page);
-        }
-
-        if (this.delay > 0) await new Promise((r) => setTimeout(r, this.delay));
-      }
-    }
-
-    return results;
-  }
-
-  async dfs(endpoint: string = "/"): Promise<string[]> {
-    const visited: Record<string, boolean> = {};
-    const results: string[] = [];
-    const stack = [endpoint];
-
-    while (stack.length > 0) {
-      const current = stack.pop();
+    while (pending.length > 0) {
+      const current = mode === "bfs" ? pending.shift() : pending.pop();
       if (!current || visited[current]) continue;
       if (this.depth !== -1 && this.relativeDepth(current) > this.depth) continue;
 
+      // Count the attempt up-front: failed pages stay visited and are
+      // never re-enqueued by links discovered on other pages.
       visited[current] = true;
-      results.push(current);
 
-      const page = await this.browserService.getPage();
+      let page: Page | null = null;
       try {
+        page = await this.browserService.getPage();
         const links = await this.processPage(page, current);
-        stack.push(...links.filter((l) => !visited[l]).reverse());
+        success.push(current);
+
+        const freshLinks = links.filter((link) => !visited[link]);
+        if (mode === "dfs") freshLinks.reverse();
+        pending.push(...freshLinks);
+      } catch (error) {
+        failed.push({ path: current, error: this.toErrorMessage(error) });
       } finally {
-        await this.browserService.closePage(page);
+        if (page) {
+          try {
+            await this.browserService.closePage(page);
+          } catch (closeError) {
+            // Closing must never abort the crawl; the page/context may
+            // already have been torn down by the browser itself.
+            console.warn(
+              `Failed to close page for ${current}: ${this.toErrorMessage(closeError)}`,
+            );
+          }
+        }
       }
 
       if (this.delay > 0) await new Promise((r) => setTimeout(r, this.delay));
     }
 
-    return results;
+    return { success, failed };
+  }
+
+  async bfs(endpoint: string = "/"): Promise<CrawlResult> {
+    return this.crawl(endpoint, "bfs");
+  }
+
+  async dfs(endpoint: string = "/"): Promise<CrawlResult> {
+    return this.crawl(endpoint, "dfs");
   }
 
   async close(): Promise<void> {

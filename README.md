@@ -113,10 +113,17 @@ const scraper = new Scraper('https://example.com', {
 });
 
 // Using BFS
-const results = await scraper.bfs('/');
+const { success, failed } = await scraper.bfs('/');
 
 // Using DFS
-const results = await scraper.dfs('/');
+const result = await scraper.dfs('/');
+
+// success: paths that were scraped and saved
+// failed:  [{ path, error }] for pages that timed out or failed extraction
+console.log(`Succeeded: ${success.length}, failed: ${failed.length}`);
+for (const { path, error } of result.failed) {
+  console.error(`${path}: ${error}`);
+}
 
 await scraper.close();
 ```
@@ -160,11 +167,27 @@ new Scraper(website: string, options?: ScraperOptions)
 
 #### Methods
 
-##### `bfs(endpoint?: string): Promise<string[]>`
-Crawls the website using Breadth-First Search algorithm.
+##### `bfs(endpoint?: string): Promise<CrawlResult>`
+Crawls the website using Breadth-First Search algorithm. A failure on any
+single page (navigation timeout, extraction error, ...) is recorded and the
+crawl continues with the remaining links; failed paths are never re-enqueued.
 
-##### `dfs(endpoint?: string): Promise<string[]>`
-Crawls the website using Depth-First Search algorithm.
+##### `dfs(endpoint?: string): Promise<CrawlResult>`
+Crawls the website using Depth-First Search algorithm, with the same
+per-page fault isolation as `bfs`. Successful paths are returned in DFS
+visit order.
+
+Both methods resolve (they never reject for per-page failures) with:
+
+```typescript
+interface CrawlResult {
+  success: string[];          // endpoints scraped and written to disk
+  failed: { path: string; error: string }[]; // skipped pages
+}
+```
+
+If the root page fails, `success` is empty and `failed` contains the root
+endpoint. Every page/context is closed whether it succeeded or failed.
 
 ##### `close(): Promise<void>`
 Closes the browser and cleans up all resources.

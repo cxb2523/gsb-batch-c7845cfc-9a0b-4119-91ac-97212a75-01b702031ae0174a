@@ -175,12 +175,21 @@ inquirer
 
     try {
       const url = new URL(answers.url);
-      if (answers.algo === "bfs") await scraper.bfs(url.pathname);
-      else await scraper.dfs(url.pathname);
+      const result =
+        answers.algo === "bfs"
+          ? await scraper.bfs(url.pathname)
+          : await scraper.dfs(url.pathname);
 
       console.log("-".repeat(20));
-      console.log("Scraping completed successfully!");
+      console.log("Scraping completed!");
+      console.log(`Successful pages: ${result.success.length}`);
       console.log(`Files saved to: ${answers.outputPath}`);
+      if (result.failed.length > 0) {
+        console.log(`Failed pages: ${result.failed.length}`);
+        for (const failure of result.failed) {
+          console.log(`  - ${failure.path}: ${failure.error}`);
+        }
+      }
       console.log("-".repeat(20));
       process.exit(0);
     } catch (e) {

@@ -17,9 +17,9 @@ export interface SelectorResult {
 export interface ContentItem {
   tag: string;
   text: string;
-  href?: string;
-  src?: string;
-  alt?: string;
+  href?: string | undefined;
+  src?: string | undefined;
+  alt?: string | undefined;
 }
 
 const DEFAULT_SELECTOR =

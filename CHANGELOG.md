@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **Per-page fault isolation**: a navigation timeout or content-extraction error on one page no longer aborts the whole BFS/DFS crawl. The failed path is recorded (`{ path, error }`) and the remaining links are processed normally
+- **`CrawlResult` return value**: `bfs()` and `dfs()` now resolve to `{ success: string[], failed: FailedPage[] }` instead of `string[]`. Failed pages are marked visited before processing, so they are never re-enqueued; successful paths keep their previous BFS/DFS ordering
+- **Root failure handling**: when the root page fails, the crawl resolves with an empty `success` set and a `failed` entry for the root instead of throwing an unhandled exception
+- **Offline test suite**: Node built-in test runner tests (`npm test`) using a controllable in-memory fake browser — covers a successful home page, one child that fails navigation, one that fails extraction, successful siblings, root failure, and verification that every page/context is closed
+
+### Changed
+- CLI run summary now prints the successful-page count and any failed paths with their error messages; interactive prompts and flow are unchanged
+- Pages and their browser contexts are closed in a `finally` block on both success and failure, and close errors are swallowed with a warning so cleanup can never interrupt a crawl
+
 ## [2.0.0] - 2026-06-24
 
 ### Added
