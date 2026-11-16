@@ -1,0 +1,14 @@
+<!DOCTYPE html>
+<html>
+  <head><title>Local fixture: home</title></head>
+  <body>
+    <a href="/about.html">About (relative)</a>
+    <a href="/about.html">About again (duplicate)</a>
+    <a href="https://local.test/about.html">About (fully qualified duplicate)</a>
+    <a href="/broken.html">Broken page (request throws)</a>
+    <a href="/empty.html">Empty page (link parsing throws)</a>
+    <a href="https://external.example.com/away.html">External page</a>
+    <a href="#top">Anchor</a>
+    <a href="about.html">Bare relative (not collected by current rules)</a>
+  </body>
+</html>

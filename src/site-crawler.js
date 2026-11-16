@@ -16,6 +16,27 @@ import { forEachAsync } from './utils.js';
 const log = new Log(LOG_FILE_NAME);
 
 /**
+ * @description The possible outcomes for an attempted page crawl
+ * @constant {object} CRAWL_STATUSES
+ * @property {string} success - the page was requested and its links were parsed
+ * @property {string} requestFailed - the page could not be requested
+ * @property {string} linkParseFailed - the page was requested but its links could not be parsed
+ */
+export const CRAWL_STATUSES = {
+  success: 'success',
+  requestFailed: 'request-failed',
+  linkParseFailed: 'link-parse-failed',
+};
+
+/**
+ * @typedef {object} CrawlResult
+ * @property {string} url - the url of the attempted page
+ * @property {string} status - one of CRAWL_STATUSES
+ * @property {number} linkCount - how many in-site links were collected from the page
+ * @property {string} [reason] - a summary of why the page failed (absent on success)
+ */
+
+/**
  * @typedef {object} SiteCrawlerConfig
  * @property {string} startPage - The starting URL for crawling or sitemap retrieval
  * @property {string} linkSelector - CSS selector used to find links on pages
@@ -69,9 +90,24 @@ export default class SiteCrawler {
     this.linkSet = new Set();
     /**
      * @public
+     * @type {CrawlResult[]} - The per-page outcome of the most recent crawl
+     */
+    this.crawlResults = [];
+    /**
+     * @public
      * @type {Outputter} - The outputter for the crawler; used to create the sitemap.json file
      */
     this.outputter = new Outputter('sitemap.json', log);
+  }
+
+  /**
+   * The possible outcomes of an attempted page crawl
+   * @static
+   * @readonly
+   * @returns {object} the crawl statuses
+   */
+  static get statuses() {
+    return CRAWL_STATUSES;
   }
 
   /**
@@ -166,6 +202,48 @@ export default class SiteCrawler {
   }
 
   /**
+   * A canonical key for a link so that a relative and a fully qualified version
+   * of the same page are recognized as the same page
+   * @param  {string} link - an href value (relative or fully qualified)
+   * @returns {string} a canonical key for the link
+   */
+  getLinkKey(link) {
+    try {
+      return new URL(link, this.origin).href;
+    } catch (linkKeyError) {
+      return link;
+    }
+  }
+
+  /**
+   * The results of the most recent crawl, one entry per attempted page
+   * @readonly
+   * @returns {CrawlResult[]} the per-page crawl results
+   */
+  get crawlReport() {
+    return this.crawlResults;
+  }
+
+  /**
+   * Counts of the outcomes of the most recent crawl
+   * @readonly
+   * @returns {{total: number, succeeded: number, failed: number,
+   *   failures: CrawlResult[]}} a summary of the crawl
+   */
+  get crawlSummary() {
+    const failures = this.crawlResults.filter(
+      (result) => result.status !== CRAWL_STATUSES.success,
+    );
+
+    return {
+      total: this.crawlResults.length,
+      succeeded: this.crawlResults.length - failures.length,
+      failed: failures.length,
+      failures,
+    };
+  }
+
+  /**
    * adds multiple items to the linkSet property
    * @param  {string[]|object[]} linkArray an array of href values, or objects with a loc property
    */
@@ -179,7 +257,17 @@ export default class SiteCrawler {
       }
       return '';
     });
-    this.linkSet = new Set([...this.linkSet, ...cleanArray]);
+    // A relative and a fully qualified version of the same page are the same page
+    const linkKeys = new Set([...this.linkSet].map((link) => this.getLinkKey(link)));
+    const newLinks = cleanArray.filter((link) => {
+      if (!link) return false;
+      const key = this.getLinkKey(link);
+      if (linkKeys.has(key)) return false;
+      linkKeys.add(key);
+      return true;
+    });
+
+    this.linkSet = new Set([...this.linkSet, ...newLinks]);
   }
 
   /**
@@ -195,12 +283,28 @@ export default class SiteCrawler {
 
     if (!url) throw new Error('A url was not provided');
     try {
-      const { data } = await ajax(url);
-      result = data;
+      result = await SiteCrawler.fetchPageAsync(url, ajax);
     } catch (getFileError) {
       await log.errorToFileAsync(getFileError);
     }
     return result;
+  }
+
+  /**
+   * Gets an HTML page, throwing when the request fails so that callers can
+   * distinguish a failed request from a page with no links
+   * @static
+   * @async
+   * @param  {string|URL} url - fully qualified url to page
+   * @param  {Axios} [ajax=this.defaultLibraries.ajax] - ajax library
+   * @returns {string} HTML markup as a string
+   */
+  static async fetchPageAsync(url, ajax = this.defaultLibraries.ajax) {
+    if (!url) throw new Error('A url was not provided');
+
+    const { data } = await ajax(url);
+
+    return data;
   }
 
   /**
@@ -288,15 +392,49 @@ export default class SiteCrawler {
     let pageLinks = [];
 
     try {
-      const $ = dom.load(pageMarkup);
-      const nodes = $(linkSelector);
-      pageLinks = [...nodes]
-        .map((node) => node.attribs.href);
+      pageLinks = SiteCrawler.extractLinksFromMarkup(pageMarkup, linkSelector, dom);
     } catch (getLinksFromMarkupError) {
       log.toConsole(getLinksFromMarkupError);
     }
 
     return pageLinks;
+  }
+
+  /**
+   * Gets only links from a string containing markup, throwing if the markup cannot be parsed
+   * @static
+   * @param  {string} pageMarkup string containing markup
+   * @param  {string} [linkSelector=this.defaultConfig.linkSelector] selector to find links
+   * @param  {Cheerio} [dom=this.defaultLibraries.dom] Dom querying library
+   * @returns {string[]} array of href values
+   */
+  static extractLinksFromMarkup(
+    pageMarkup,
+    linkSelector = this.defaultConfig.linkSelector,
+    dom = this.defaultLibraries.dom,
+  ) {
+    if (!pageMarkup) throw new Error('Markup was not provided');
+
+    const $ = dom.load(pageMarkup);
+    const nodes = $(linkSelector);
+
+    return [...nodes].map((node) => node.attribs.href);
+  }
+
+  /**
+   * Summarizes an error (or thrown value) into a short, single-line reason
+   * @static
+   * @param {Error|string} error - an error or any thrown value
+   * @returns {string} a short summary of the error
+   */
+  static summarizeError(error) {
+    if (!error) return 'Unknown error';
+
+    const message = typeof error === 'object' && error.message
+      ? error.message
+      : String(error);
+
+    return message.replace(/\s+/g, ' ').trim().slice(0, 200);
   }
 
   /**
@@ -310,12 +448,25 @@ export default class SiteCrawler {
     if (!siteOrigin) throw new Error('No site origin is provided');
 
     const filteredLinks = pageLinks.filter((pageLink) => {
+      if (typeof pageLink !== 'string') return false;
       const isFullyQualifiedSiteLink = pageLink.indexOf(siteOrigin) === 0;
       const isRelativeLink = pageLink.indexOf('/') === 0;
       const isAnchorLink = pageLink.indexOf('#') === 0;
       return !isAnchorLink && (isFullyQualifiedSiteLink || isRelativeLink);
     });
-    const uniqueLinks = [...new Set(filteredLinks)];
+    // A relative and a fully qualified version of the same page are the same page
+    const seenLinks = new Set();
+    const uniqueLinks = filteredLinks.filter((pageLink) => {
+      let canonicalLink = pageLink;
+      try {
+        canonicalLink = new URL(pageLink, siteOrigin).href;
+      } catch (canonicalLinkError) {
+        canonicalLink = pageLink;
+      }
+      if (seenLinks.has(canonicalLink)) return false;
+      seenLinks.add(canonicalLink);
+      return true;
+    });
 
     return uniqueLinks;
   }
@@ -342,35 +493,117 @@ export default class SiteCrawler {
   }
 
   /**
-   * Crawls a page and adds links to the linkSet
+   * Attempts to crawl a single page, reporting what happened without throwing
+   * @private
+   * @async
+   * @param  {string} url fully qualified url to page
+   * @returns {Promise<CrawlResult>} the outcome for this page
+   */
+  async attemptPageCrawlAsync(url) {
+    const { linkSelector } = this.config;
+    const { ajax, dom } = this.libraries;
+    let pageMarkup;
+
+    try {
+      pageMarkup = await SiteCrawler.fetchPageAsync(url, ajax);
+    } catch (requestError) {
+      await log.errorToFileAsync(requestError);
+
+      return {
+        url,
+        status: CRAWL_STATUSES.requestFailed,
+        linkCount: 0,
+        reason: SiteCrawler.summarizeError(requestError),
+      };
+    }
+
+    try {
+      const pageLinks = SiteCrawler.extractLinksFromMarkup(pageMarkup, linkSelector, dom);
+      const siteLinks = SiteCrawler.filterPageLinks(pageLinks, this.origin);
+      this.addLinks(siteLinks);
+
+      return {
+        url,
+        status: CRAWL_STATUSES.success,
+        linkCount: siteLinks.length,
+      };
+    } catch (linkParseError) {
+      await log.errorToFileAsync(linkParseError);
+
+      return {
+        url,
+        status: CRAWL_STATUSES.linkParseFailed,
+        linkCount: 0,
+        reason: SiteCrawler.summarizeError(linkParseError),
+      };
+    }
+  }
+
+  /**
+   * Crawls a page, records its outcome, and adds links to the linkSet when successful
    * @async
    * @param  {string} url fully qualified usrl to page
-   * @returns {Promise<void>}
+   * @returns {Promise<CrawlResult>} the outcome for this page
    */
   async crawlPageAsync(url) {
+    let result;
     try {
-      const pageLinks = await this.getLinksFromPageAsync(url);
-      this.addLinks(pageLinks);
+      result = await this.attemptPageCrawlAsync(url);
     } catch (crawlPageError) {
       await log.errorToFileAsync(crawlPageError);
+      result = {
+        url,
+        status: CRAWL_STATUSES.linkParseFailed,
+        linkCount: 0,
+        reason: SiteCrawler.summarizeError(crawlPageError),
+      };
     }
+
+    this.crawlResults.push(result);
+
+    return result;
+  }
+
+  /**
+   * Removes links that failed to crawl from the searchable link pool
+   * @private
+   * @returns {void}
+   */
+  removeFailedLinks() {
+    this.crawlResults.forEach((result) => {
+      if (result.status === CRAWL_STATUSES.success) return;
+
+      const key = this.getLinkKey(result.url);
+      [...this.linkSet].forEach((link) => {
+        if (this.getLinkKey(link) === key) {
+          this.linkSet.delete(link);
+        }
+      });
+    });
   }
 
   /**
    * Crawls entire site looking for links
    * @async
    * @param  {string} url=this.config.startPage - the page where the crawler begins its crawl
-   * @returns {Promise<void>}
+   * @returns {Promise<CrawlResult[]>} the per-page outcomes for this crawl
    */
   async crawlSiteAsync(url = this.config.startPage) {
-    try {
-      await this.crawlPageAsync(url);
-      await forEachAsync(this.urlset, async (urlObject) => {
-        await this.crawlPageAsync(urlObject.loc);
-      });
-    } catch (crawlPageError) {
-      await log.errorToFileAsync(crawlPageError);
-    }
+    this.crawlResults = [];
+    const attemptedUrls = new Set([this.getLinkKey(url)]);
+    await this.crawlPageAsync(url);
+
+    const pagesToCrawl = this.urlset;
+    await forEachAsync(pagesToCrawl, async (urlObject) => {
+      const pageKey = this.getLinkKey(urlObject.loc);
+      if (attemptedUrls.has(pageKey)) return;
+      attemptedUrls.add(pageKey);
+      await this.crawlPageAsync(urlObject.loc);
+    });
+
+    this.removeFailedLinks();
+
+    return this.crawlReport;
   }
 
   /**
@@ -390,13 +623,14 @@ export default class SiteCrawler {
   /**
    * Crawls. Wrapper for crawl, in case other functionality should be added
    * @param  {string} startPage=this.config.startPage - the page where the crawler begins its crawl
-   * @returns {Promise<void>}
+   * @returns {Promise<CrawlResult[]>} the per-page outcomes for this crawl
    */
   async crawl(startPage = this.config.startPage) {
     try {
-      await this.crawlSiteAsync(startPage);
+      return await this.crawlSiteAsync(startPage);
     } catch (crawlError) {
       await log.errorToFileAsync(crawlError);
+      return this.crawlReport;
     }
   }
 
@@ -463,6 +697,7 @@ export default class SiteCrawler {
    * @async
    * @param  {boolean} [shouldCrawl=this.config.shouldCrawl] - whether it should crawl
    * @param {boolean} [useExportedSitemap=this.config.useExportedSitemap] - use existing file if already exists
+   * @returns {Promise<CrawlResult[]>} the per-page outcomes when crawling (empty otherwise)
    */
   async produceSiteLinks(
     shouldCrawl = this.config.shouldCrawl,
@@ -474,14 +709,17 @@ export default class SiteCrawler {
       await log.infoToFileAsync(alreadyExistsMessage);
       log.toConsole(alreadyExistsMessage);
       await this.setLinksFromJsonFile(`${this.exportFileName}.${this.outputter.defaultOutputFile}`);
-      return;
+      return this.crawlReport;
     }
 
+    let crawlResults = [];
     if (shouldCrawl) {
-      await this.crawl();
+      crawlResults = await this.crawl();
     } else {
       await this.setSitemap(this.config.startPage);
     }
     await this.exportSiteLinks(this.exportFileName);
+
+    return crawlResults;
   }
 }

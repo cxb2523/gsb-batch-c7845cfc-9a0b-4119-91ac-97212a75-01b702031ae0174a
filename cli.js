@@ -265,6 +265,23 @@ ${mainConfig.useExportedSitemap ? '' : '💡  Ignore any existing .sitemap.json 
 
     log.toConsole(siteLinksMessage);
 
+    if (mainConfig.crawl && siteCrawler.crawlSummary.failed > 0) {
+      const {
+        total,
+        succeeded,
+        failed,
+        failures,
+      } = siteCrawler.crawlSummary;
+      const failureLines = failures
+        .map((failure) => `  • ${failure.url} — ${failure.status}: ${failure.reason}`)
+        .join('\n');
+      const crawlReportMessage = `
+🧾  Crawl report: ${succeeded}/${total} pages succeeded, ${failed} failed.
+${failureLines}
+`;
+      await log.toConsole(crawlReportMessage).infoToFileAsync(crawlReportMessage);
+    }
+
     if (siteCrawler.linkSet.size === 0) {
       const noLinksMessage = `
       🚫🔗  No links found. Nothing To search.`;

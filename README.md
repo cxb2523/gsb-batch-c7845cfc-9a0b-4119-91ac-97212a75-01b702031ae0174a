@@ -96,6 +96,35 @@ Crawl the site, starting from a landing page.
 SelectorHound -u https://mysite.com/landing -r -s ".myClass"
 ```
 
+#### Crawl results and failed pages
+
+When crawling, every page the crawler attempts gets an outcome, so you can tell whether the resulting
+link list is complete. A single page failing never stops the rest of the crawl, and pages that failed
+are left out of `<site>.sitemap.json` (the exported file keeps its usual array of `{ "loc": "..." }`
+entries), so the selector search never targets a page that couldn't be fetched.
+
+Programmatically, `SiteCrawler` exposes that settlement information:
+
+```JavaScript
+await siteCrawler.crawlSiteAsync();
+
+siteCrawler.crawlReport;  // one entry per attempted page
+// [
+//   { url: 'https://mysite.com/',           status: 'success',           linkCount: 4 },
+//   { url: 'https://mysite.com/about.html', status: 'success',           linkCount: 2 },
+//   { url: 'https://mysite.com/old.html',   status: 'request-failed',    linkCount: 0,
+//     reason: 'Request failed with status code 404' },
+//   { url: 'https://mysite.com/raw.html',   status: 'link-parse-failed', linkCount: 0,
+//     reason: 'Markup was not provided' }
+// ]
+
+siteCrawler.crawlSummary;
+// { total: 4, succeeded: 2, failed: 2, failures: [ ... ] }
+```
+
+`crawlSiteAsync()`, `crawl()`, `crawlPageAsync()`, and `produceSiteLinks()` all return the per-page
+results. The CLI prints a crawl report whenever a crawl has failures.
+
 ### Taking Screenshots or dealing with SPAs
 
 Scan the first 20 pages and take screenshots
