@@ -14,6 +14,51 @@ import db
 from diagnostics import QuarterFailures, format_failure, persist_failure
 
 
+class CatalogueError(RuntimeError):
+    """The TMS quarter catalogue could not be obtained; nothing was scraped."""
+
+
+def load_catalogue(session) -> dict[str, str]:
+    """Fetch and parse the TMS quarter catalogue before any per-quarter work.
+
+    The catalogue gates every quarter, so a failure here must stop the run
+    loudly instead of letting an empty selection masquerade as success.
+    """
+    try:
+        html = send_request(session, BASE).text
+    except Exception as exc:
+        raise CatalogueError(
+            "Could not download the TMS quarter catalogue; "
+            "no quarters were scraped this run"
+        ) from exc
+    try:
+        catalogue = discover_terms(html)
+    except ValueError as exc:
+        raise CatalogueError(
+            "TMS quarter catalogue parsed empty; no quarters were scraped this run"
+        ) from exc
+    if not catalogue:
+        raise CatalogueError(
+            "TMS quarter catalogue is empty; no quarters were scraped this run"
+        )
+    return catalogue
+
+
+def select_terms(args: argparse.Namespace, catalogue: dict[str, str]) -> list[str]:
+    if args.all_quarters:
+        return list(catalogue)
+    code = args.term or config.year + config.quarter
+    if code not in catalogue:
+        available = ", ".join(
+            f"{term} ({label})" for term, label in catalogue.items()
+        )
+        raise ValueError(
+            f"Requested quarter {code} is not in the TMS catalogue; "
+            f"TMS currently advertises: {available}"
+        )
+    return [code]
+
+
 def main(args: argparse.Namespace) -> None:
     start_time = time.time()
 
@@ -23,16 +68,10 @@ def main(args: argparse.Namespace) -> None:
         print("Database migration complete")
         return
     session = authenticated_session()
-    catalogue = discover_terms(send_request(session, BASE).text)
+    catalogue = load_catalogue(session)
     if args.db:
         db.update_catalogue(catalogue, config.year + config.quarter)
-    selected = (
-        list(catalogue)
-        if args.all_quarters
-        else [args.term or config.year + config.quarter]
-    )
-    if any(code not in catalogue for code in selected):
-        raise ValueError("Requested quarter is not advertised by TMS")
+    selected = select_terms(args, catalogue)
     failures: dict[str, str] = {}
     for term_index, code in enumerate(selected, start=1):
         print(
