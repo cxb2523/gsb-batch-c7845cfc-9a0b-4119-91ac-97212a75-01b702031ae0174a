@@ -28,7 +28,7 @@ Then, install the Python dependencies:
 > Depending on the user agent used, it may affect your ability to solve the Cloudflare challenge.
 
 ```
-usage: main.py [-h] [-f FILE] [-t TIMEOUT] [-p PROXY] [-ua USER_AGENT] [--disable-http2] [--disable-http3] [--headed] [-ac] [-c] [-w] [-a] URL
+usage: main.py [-h] [-f FILE] [-t TIMEOUT] [-p PROXY] [-ua USER_AGENT] [--disable-http2] [--disable-http3] [--headed] [-ac] [-c] [-w] [-a] [-j] URL
 
 A simple program for scraping Cloudflare clearance (cf_clearance) cookies from websites issuing Cloudflare challenges to visitors
 
@@ -51,7 +51,77 @@ options:
   -c, --curl            Get the cURL command for the request with the cookies and user agent
   -w, --wget            Get the Wget command for the request with the cookies and user agent
   -a, --aria2           Get the aria2 command for the request with the cookies and user agent
+  -j, --json            Print the structured collection result as JSON
 ```
+
+The command line entry point is a thin wrapper around `collect_clearance()` and
+reports the same status, challenge type, cookies, user agent, proxy, duration
+and failure reason that the programmatic interface returns.
+
+## Programmatic interface
+
+```python
+import asyncio
+
+from main import CollectionStatus, collect_clearance
+
+
+async def main() -> None:
+    result = await collect_clearance(
+        "https://example.com/challenge",
+        timeout=30,
+        proxy="http://user:pass@proxy:8080",
+    )
+
+    if result.status is CollectionStatus.SUCCESS:
+        print(result.cf_clearance["value"], result.user_agent)
+    elif result.status is CollectionStatus.NO_CHALLENGE:
+        print("The page did not issue a challenge")
+    else:
+        print(result.status.value, result.error)
+
+    # Cookies obtained before a failure are kept.
+    print(result.cookies, result.elapsed)
+
+
+asyncio.run(main())
+```
+
+`collect_clearance()` never raises for browser launch failures, page request
+errors, proxy authentication failures or challenge timeouts; those are reported
+through the returned `CollectionResult`. The result exposes:
+
+| field            | meaning                                                                 |
+| ---------------- | ----------------------------------------------------------------------- |
+| `status`         | `success`, `no_challenge`, `timeout`, `proxy_error`, `browser_error`, `page_error` or `error` |
+| `challenge_type` | detected `ChallengePlatform`, if any                                     |
+| `cookies`        | every cookie present on finish, including partial results after failure  |
+| `cf_clearance`   | the extracted clearance cookie, if one was obtained                      |
+| `user_agent`     | user agent of the browser that produced the cookies (same-origin)        |
+| `proxy`          | proxy URL that was used, if any                                          |
+| `elapsed`        | duration of the attempt in seconds                                       |
+| `error`          | failure reason, `None` for `success` and `no_challenge`                  |
+
+`success` and `no_challenge` are both successful outcomes (`result.ok` is true);
+challenge detection and the solving loop never click after `timeout` elapses,
+and a failed proxy authentication is always reported as `proxy_error` rather
+than as a timeout or as "no challenge".
+
+## Tests
+
+The test suite stubs the browser or serves fake pages from a local HTTP server,
+so it is fully local and deterministic:
+
+    $ pip install -r requirements.txt pytest
+    $ pytest
+
+The tests cover the four acceptance paths:
+
+- `success` - a `cf_clearance` cookie is obtained
+- `no_challenge` - the page issues no challenge and no cookie
+- `timeout` - the challenge is never solved; the loop stops near `timeout`
+- `proxy authentication failure` - reported as `proxy_error`, not `timeout`
+
 
 ## Example
     $ python main.py -f cookies.json https://sergiodemo.com/security/challenge/legacy-challenge
