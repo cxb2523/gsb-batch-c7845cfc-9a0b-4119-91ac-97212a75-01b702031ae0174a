@@ -64,6 +64,8 @@ class DomainTester:
         self.inactive_domains = []
         # servicio -> [url activa]; solo dominios cuyo contenido/host se reconoce
         self.by_service = {}
+        # dominios que respondieron pero classify() no reconoció (descartados)
+        self.discarded = []
 
     def test_domain(self, domain, retries=2):
         """
@@ -93,6 +95,7 @@ class DomainTester:
                     service = classify(response.url, response.text)
                     if service is None:
                         print(f"  ⚠️ {domain} -> {response.status_code} (no reconocido, descartado)")
+                        self.discarded.append(domain)
                         return None
                     print(f"  ✅ {domain} -> {response.status_code} ({service})")
                     self.by_service.setdefault(service, []).append(response.url)
@@ -121,6 +124,7 @@ class DomainTester:
         """
         self.active_domains = []
         self.by_service = {}
+        self.discarded = []
 
         for domain in domains:
             if domain in _BLOCKED_DOMAINS:

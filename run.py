@@ -13,6 +13,7 @@ from datetime import datetime
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from config.settings import AUTO_VERIFIABLE, MANUAL_VERIFY, BLOCKED_DOMAINS
+from core.candidates import CollectionResult
 from core.domain_tester import DomainTester
 from core.open_slum_crawler import crawl_open_slum
 from core.social_crawler import SocialCrawler
@@ -120,32 +121,48 @@ def main():
     tester = DomainTester()
     publisher = IPFSPublisher()
 
-    # 1. Rastrear candidatos
+    # 1. Rastrear candidatos (cada fuente etiqueta sus dominios; el fallo de
+    # una fuente se registra y no descarta los resultados de las demás)
     print("[1/5] Rastreando candidatos...")
-    slum_domains = crawl_open_slum()
+    slum_result = crawl_open_slum()
     sc = SocialCrawler()
-    social_domains = sc.crawl_all()
+    social_results = sc.crawl_all()
+    collection = CollectionResult(sources=[slum_result, *social_results])
+
+    for src in collection.sources:
+        marker = "[+]" if src.ok else "[!]"
+        print(f"  {marker} {src.status_line()}")
+    if collection.failed_sources:
+        print(f"  [!] Fuentes sin éxito esta ronda: {', '.join(collection.failed_sources)}")
 
     # 2. Obtener dominios conocidos de la base de datos
     verified_domains = voter.get_verified()
     print(f"  [+] Dominios verificados en DB: {len(verified_domains)}")
 
     # 3. Consolidar y Probar
-    # Combinamos: estáticos + verificados en DB + nuevos candidatos de crawlers
-    all_candidates = list(dict.fromkeys(
-        slum_domains + social_domains + list(AUTO_VERIFIABLE) + verified_domains
-    ))
+    # Combinamos: candidatos de crawlers + estáticos + verificados en DB.
+    # El mismo dominio aportado por varias fuentes se prueba UNA sola vez.
+    collection.add_extra(AUTO_VERIFIABLE, "config")
+    collection.add_extra(verified_domains, "db")
 
     # Filtrar bloqueados ANTES de testear: ni siquiera queremos gastar una
     # petición de red contra un dominio ya confirmado como malicioso o ruido.
-    blocked_found = [d for d in all_candidates if d in BLOCKED_DOMAINS]
+    candidates_by_domain, blocked_found = collection.filter_blocked(BLOCKED_DOMAINS)
     if blocked_found:
         print(f"  [!] Ignorando {len(blocked_found)} dominio(s) bloqueado(s): {blocked_found}")
-    all_candidates = [d for d in all_candidates if d not in BLOCKED_DOMAINS]
+    all_candidates = list(candidates_by_domain)
+
+    multi = {d: s for d, s in candidates_by_domain.items() if len(s) > 1}
+    if multi:
+        print(f"  [*] Dominios vistos en varias fuentes (se prueban una vez): "
+              f"{', '.join(f'{d} ({'/'.join(s)})' for d, s in sorted(multi.items()))}")
 
     print(f"\n[2/5] Probando {len(all_candidates)} dominios...")
     active = tester.test_multiple(all_candidates)
     print(f"  [+] Activos encontrados: {len(active)}")
+    if tester.discarded:
+        print(f"  [!] Descartados por classify (respondieron pero no se reconocieron): "
+              f"{tester.discarded}")
 
     # 4. Auto-proponer nuevos al sistema de votos
     # Si un crawler encontró algo que no teníamos, lo metemos en la DB
@@ -184,10 +201,13 @@ def main():
     # 7. Guardar log
     print("\n[5/5] Guardando log...")
     os.makedirs("logs", exist_ok=True)
+    failed = ",".join(collection.failed_sources) or "ninguna"
     with open("logs/update.log", "a") as f:
         f.write(
             f"{datetime.now()} | cid={hash_id} | activos={len(active)}"
-            f" | slum={len(slum_domains)} | social={len(social_domains)}\n"
+            f" | descartados={len(tester.discarded)}"
+            f" | fuentes_fallidas={failed}"
+            f" | candidatos={len(all_candidates)}\n"
         )
 
     print("\n✅ Ejecución completada")

@@ -119,7 +119,10 @@ def main():
         
         elif option == "8":
             print("\n[🌐] Rastreando open-slum.org...")
-            candidates = crawl_open_slum()
+            result = crawl_open_slum()
+            candidates = result.domains
+            if not result.ok:
+                print(f"[!] Fuente open-slum falló: {result.error}")
             if candidates:
                 print(f"\n[*] Probando {len(candidates)} candidatos...")
                 active = tester.test_multiple(candidates)
@@ -138,7 +141,13 @@ def main():
         elif option == "9":
             print("\n[🔍] Rastreando fuentes sociales...")
             sc = SocialCrawler()
-            candidates = sc.crawl_all()
+            results = sc.crawl_all()
+            for src in results:
+                marker = "[+]" if src.ok else "[!]"
+                print(f"  {marker} {src.status_line()}")
+            candidates = list(dict.fromkeys(
+                d for src in results for d in src.domains
+            ))
             if candidates:
                 print(f"\n[*] Probando {len(candidates)} candidatos...")
                 active = tester.test_multiple(candidates)
