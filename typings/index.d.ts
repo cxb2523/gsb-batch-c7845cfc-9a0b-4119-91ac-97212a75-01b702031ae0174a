@@ -7,11 +7,14 @@ import { hero } from './autogen'
 
 declare module 'overwatch-stats-api' {
   /**
-   * Gets all the possible stats for a user. Combines the results from the other 3 methods: `getBasicInfo`, `getHeroStats` and `getMostPlayed`
+   * Gets all the possible stats for a user. Combines the results from the other 3 methods: `getBasicInfo`, `getHeroStats` and `getMostPlayed`.
+   * Sections that could not be parsed (or are missing from the page) are `null`
+   * and described in `errors`; the remaining sections are still returned.
    * @param battletag Use the `'NAME-DISCRIMINATOR'` format if on pc, otherwise just type the name (case sensitive)
    * @param platform Either `'pc'`, `'xbl'` or `'psn'`
+   * @param options Optional retry configuration for transient HTTP failures (429 / 5xx)
    */
-  export function getAllStats(battletag: string, platform: string): Promise<AllStats>
+  export function getAllStats(battletag: string, platform: string, options?: RetryOptions): Promise<AllStats>
 
   /**
    * Gets some basic stats about the profile
@@ -36,9 +39,29 @@ declare module 'overwatch-stats-api' {
 
   export type Hero = hero
 
-  interface AllStats extends BasicInfo {
-    heroStats: HeroStats
-    mostPlayed: MostPlayed
+  /** Retry settings for rate limited (429) and temporary (5xx) responses. */
+  interface RetryOptions {
+    /** Number of retries after the first attempt. Defaults to 2. */
+    retries?: number
+    /** Base delay in milliseconds, doubled on each retry. Defaults to 1000. */
+    retryDelay?: number
+    /** Upper bound in milliseconds for a single wait. Defaults to 30000. */
+    maxRetryDelay?: number
+  }
+
+  /** Names of the sections that could not be collected, mapped to the reason. */
+  interface StatsErrors {
+    basicInfo?: string
+    heroStats?: string
+    mostPlayed?: string
+  }
+
+  interface AllStats extends Partial<BasicInfo> {
+    /** The same object as the top-level basic fields, or null if it failed. */
+    basicInfo: BasicInfo | null
+    heroStats: HeroStats | null
+    mostPlayed: MostPlayed | null
+    errors: StatsErrors
   }
 
   interface BasicInfo {
