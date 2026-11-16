@@ -91,8 +91,45 @@ lose data due to `pipelines.reset.allowed = false`.
 ## Edge Cases
 
 ### Duplicate EventHub messages
-EventHub has at-least-once delivery. The `orders` streaming table may contain duplicates.
-Deduplication should be handled in the downstream silver/gold layer (e.g., window dedup on `order_id`).
+EventHub has at-least-once delivery. Duplicates are now absorbed **inside the
+bronze layer** instead of being deferred downstream:
+
+1. a watermarked stateful `dropDuplicates("order_id")` collapses repeats within
+   the dedup state window per micro-batch (incremental, no full scan);
+2. the `orders` live flow is an idempotent `merge_flow` on `order_id`, so
+   redelivery across micro-batches or pipeline restarts updates the existing
+   row rather than inserting a second copy.
+
+`orders` therefore holds exactly one row per live `order_id`. The historical
+`once=True` append flow is unchanged and not part of the MERGE.
+
+### Unparseable / order_id-less messages
+Nothing is silently dropped. Messages that fail `from_json` (reason
+`malformed_json`) or parse but have a null/blank `order_id` (reason
+`missing_order_id`) are appended to the queryable streaming table
+`01_bronze.order_rejections`, including the original `raw_value`,
+`event_time`, `ingestion_time` and `rejected_at`. They never enter `orders`.
+
+Inspect recent rejections with:
+
+```sql
+SELECT rejection_reason, COUNT(*)
+FROM restaurant_chain_db.01_bronze.order_rejections
+GROUP BY rejection_reason;
+
+SELECT raw_value, event_time, ingestion_time, rejection_reason
+FROM restaurant_chain_db.01_bronze.order_rejections
+ORDER BY rejected_at DESC
+LIMIT 100;
+```
+
+### Reproducing bad/duplicate messages locally
+The Event Hub read is injectable. With pipeline configuration
+`bronze.eventhub.source=local-file` and `bronze.eventhub.source.path` pointing
+at a directory of newline-delimited JSON records, the same streaming logic
+runs without the Event Hub connection string or any Databricks secret. The
+pytest suite under `tests/` drives valid, malformed, missing-id and duplicate
+records through real micro-batches — see `tests/README.md`.
 
 ### PII in reviews
 `review_text` in the `reviews` table is NOT masked. It may contain customer names, emails,

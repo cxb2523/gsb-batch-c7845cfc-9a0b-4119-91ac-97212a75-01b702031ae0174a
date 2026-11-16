@@ -1,0 +1,5 @@
+# Local test dependencies. Installed against the portable/standard Python 3.11
+# interpreter; pyspark 3.5.x requires Java 17 on PATH.
+pyspark==3.5.3
+delta-spark==3.2.0
+pytest==8.3.4

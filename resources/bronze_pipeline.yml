@@ -5,11 +5,17 @@
 # Also writes to: ${var.catalog}.00_landing (hardcoded in source code)
 #
 # Tables in 00_landing: eventhub_raw (ST), historical_orders (MV)
-# Tables in 01_bronze: eventhub_parsed (temp view), orders (ST, merged
-#   streaming + historical), customers (MV), restaurants (MV),
+# Tables in 01_bronze: eventhub_parsed (temp view), eventhub_rejected
+#   (temp view), order_rejections (ST), orders (ST, merged streaming +
+#   historical), customers (MV), restaurants (MV),
 #   menu_items (MV), reviews (MV)
 #
 # Configuration: Event Hub (namespace, name, offsets), SQL Server (host, db)
+#
+# Testable input injection (no connection string / secret needed locally):
+#   bronze.eventhub.source       kafka (default, production) | local-file
+#   bronze.eventhub.source.path  watched JSON directory when source=local-file
+#   bronze.eventhub.watermark.delay  dedup watermark (default 24 hours)
 #
 # Secrets (hardcoded in Python source, scope: res-chain-pipeline):
 #   eh-conn-str          — Event Hub connection string
@@ -31,6 +37,12 @@ resources:
         EH_NAME: ${var.eh_name}
         startingOffsets: ${var.eh_starting_offsets}
         maxOffsetsPerTrigger: ${var.eh_max_offsets_per_trigger}
+        # Injectable input source. Default "kafka" preserves production
+        # behaviour; set bronze.eventhub.source=local-file (+ .path) for
+        # secret-free local/test runs. See src/bronze/tests/README.md.
+        bronze.eventhub.source: ${var.bronze_eventhub_source}
+        bronze.eventhub.source.path: ${var.bronze_eventhub_source_path}
+        bronze.eventhub.watermark.delay: ${var.bronze_eventhub_watermark_delay}
         SQL_HOST_NAME: ${var.sql_host_name}
         SQL_DB_NAME: ${var.sql_db_name}
       libraries:

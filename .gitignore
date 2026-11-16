@@ -12,8 +12,16 @@ build/
 
 # Virtual environments
 .venv/
+.venv-local/
 venv/
 env/
+
+# Local test toolchain scratch (portable Python/Java/Hadoop artifacts,
+# downloaded wheels, Spark warehouses, pytest caches)
+wheels/
+pip/
+spark-warehouse/
+.pytest_cache/
 
 # IDE files
 .idea/

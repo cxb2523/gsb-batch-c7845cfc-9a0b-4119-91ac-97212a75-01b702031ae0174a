@@ -1,51 +1,41 @@
-"""Bronze · Parsed EventHub Orders (Temporary View)
+"""Bronze · Parsed EventHub Orders and Rejections (Temporary Views)
 
-Pipeline-private view that parses EventHub JSON without persisting to
-storage. Feeds into 01_bronze.orders via append flow.
+Pipeline-private views that parse EventHub JSON without persisting to storage:
 
-Cost: Zero storage — implemented as a temporary view. The parsed data
-is consumed immediately by the bronze orders append flow.
+* ``eventhub_parsed``          — successfully parsed orders, feeding the
+  ``01_bronze.orders`` live flow. Same column shape as before.
+* ``eventhub_rejected``        — every message that could not be turned into an
+  order, carrying the raw payload and the rejection reason. Feeds the
+  persisted ``01_bronze.order_rejections`` table.
+
+The split is explicit (see ``_shared/order_ingest.py``) rather than relying on
+a soft expectation: malformed JSON and missing/blank ``order_id`` records are
+routed to the rejection stream and can never silently enter ``orders``.
 """
+import os
+import sys
+
 from pyspark import pipelines as dp
-from pyspark.sql.functions import col, from_json
-from pyspark.sql.types import (
-    ArrayType,
-    DoubleType,
-    IntegerType,
-    StringType,
-    StructField,
-    StructType,
+
+sys.path.insert(
+    0, os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 )
-
-ITEM_SCHEMA = StructType([
-    StructField("item_id",    StringType()),
-    StructField("name",       StringType()),
-    StructField("category",   StringType()),
-    StructField("quantity",   IntegerType()),
-    StructField("unit_price", DoubleType()),
-    StructField("subtotal",   DoubleType()),
-])
-
-ORDER_SCHEMA = StructType([
-    StructField("order_id",       StringType()),
-    StructField("timestamp",      StringType()),
-    StructField("restaurant_id",  StringType()),
-    StructField("customer_id",    StringType()),
-    StructField("order_type",     StringType()),
-    StructField("items",          ArrayType(ITEM_SCHEMA)),
-    StructField("total_amount",   DoubleType()),
-    StructField("payment_method", StringType()),
-    StructField("order_status",   StringType()),
-    StructField("created_at",     StringType()),
-])
+from _shared.order_ingest import split_parsed_orders  # noqa: E402
 
 
 @dp.temporary_view()
-@dp.expect("valid_parse", "order_id IS NOT NULL")
 def eventhub_parsed():
-    return (
-        spark.readStream
-        .table("restaurant_chain_db.00_landing.eventhub_raw")
-        .withColumn("parsed", from_json(col("value"), ORDER_SCHEMA))
-        .select("parsed.*", "event_time", "ingestion_time")
+    """Parsed, order_id-bearing messages. Downstream shape is unchanged."""
+    good, _rejected = split_parsed_orders(
+        spark.readStream.table("restaurant_chain_db.00_landing.eventhub_raw")
     )
+    return good
+
+
+@dp.temporary_view()
+def eventhub_rejected():
+    """Rejected messages with raw value, landing timestamps and reason."""
+    _good, rejected = split_parsed_orders(
+        spark.readStream.table("restaurant_chain_db.00_landing.eventhub_raw")
+    )
+    return rejected

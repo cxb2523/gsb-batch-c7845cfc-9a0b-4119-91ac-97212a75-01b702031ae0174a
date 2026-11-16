@@ -1,44 +1,37 @@
 """Landing · EventHub Raw Stream
 
-Raw Event Hubs messages ingested via Kafka-compatible connector.
+Raw Event Hubs messages ingested via an *injectable input source* (see
+``_shared/eventhub_sources.py``). In production the source is the Kafka-
+compatible Event Hub connector; tests inject a local-file / in-memory source
+via the ``bronze.eventhub.source`` Spark conf, so no connection string or
+Databricks secret is needed locally.
+
 Published to 00_landing as a streaming table. Data is kept as-is —
-JSON parsing happens downstream in the bronze temp view.
+JSON parsing happens downstream in the bronze temp views.
 
 Production settings:
   failOnDataLoss=true   → Fail fast if offsets expire (never silently skip).
   maxOffsetsPerTrigger  → Cap batch size to prevent backlog spikes on restart.
   kafka.request/session → Resilience against transient EventHub delays.
 """
+import os
+import sys
+
 from pyspark import pipelines as dp
-from pyspark.sql.functions import col, current_timestamp
 
-# ── Event Hubs / Kafka Configuration ─────────────────────────────
-EH_NAMESPACE = spark.conf.get("EH_NAMESPACE")
-EH_NAME      = spark.conf.get("EH_NAME")
-EH_CONN_STR  = dbutils.secrets.get(scope="res-chain-pipeline", key="eh-conn-str")
-
-KAFKA_OPTIONS = {
-    "kafka.bootstrap.servers"  : f"{EH_NAMESPACE}.servicebus.windows.net:9093",
-    "subscribe"                : EH_NAME,
-    "kafka.sasl.mechanism"     : "PLAIN",
-    "kafka.security.protocol"  : "SASL_SSL",
-    "kafka.sasl.jaas.config"   : (
-        "kafkashaded.org.apache.kafka.common.security.plain.PlainLoginModule"
-        f' required username="$ConnectionString" password="{EH_CONN_STR}";'
-    ),
-    "startingOffsets"          : spark.conf.get("startingOffsets"),
-    "maxOffsetsPerTrigger"     : spark.conf.get("maxOffsetsPerTrigger"),
-    "failOnDataLoss"           : "true",
-    "kafka.request.timeout.ms" : "60000",
-    "kafka.session.timeout.ms" : "30000",
-}
+# Make the shared, SDP-independent helper package importable
+# (transformations/_shared).
+sys.path.insert(
+    0, os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+)
+from _shared.eventhub_sources import build_eventhub_source  # noqa: E402
 
 
 # ── Landing ST ────────────────────────────────────────────────────
 
 @dp.table(
     name="restaurant_chain_db.00_landing.eventhub_raw",
-    comment="Raw Event Hubs messages ingested via Kafka connector",
+    comment="Raw Event Hubs messages ingested via the injectable Event Hub source",
     table_properties={
         "quality": "landing",
         "pipelines.reset.allowed": "false",
@@ -49,12 +42,7 @@ KAFKA_OPTIONS = {
 @dp.expect("valid_event_time", "event_time IS NOT NULL")
 @dp.expect("valid_ingestion_time", "ingestion_time IS NOT NULL")
 def eventhub_raw():
-    return (
-        spark.readStream
-        .format("kafka")
-        .options(**KAFKA_OPTIONS)
-        .load()
-        .withColumn("value", col("value").cast("string"))
-        .withColumn("event_time", col("timestamp"))
-        .withColumn("ingestion_time", current_timestamp())
-    )
+    # Injection entry: bronze.eventhub.source = kafka | local-file
+    # (tests may also pass an InMemoryEventHubSource programmatically).
+    source = build_eventhub_source(spark, dbutils)
+    return source.read_stream(spark)

@@ -82,6 +82,22 @@ variables:
     description: "Max offsets per micro-batch trigger"
     default: "10000"
 
+  # ── Event Hub testability / input injection ───────────────────
+  # kafka   = production Event Hub connector (needs eh-conn-str secret)
+  # local-file = read newline-delimited JSON records from a directory,
+  #              no connection string or Databricks secret required.
+  bronze_eventhub_source:
+    description: "Event Hub input source implementation: kafka | local-file"
+    default: "kafka"
+
+  bronze_eventhub_source_path:
+    description: "Input directory when bronze_eventhub_source=local-file"
+    default: ""
+
+  bronze_eventhub_watermark_delay:
+    description: "Watermark delay bounding the order_id dedup state store"
+    default: "24 hours"
+
   # ── Azure SQL Server Configuration ───────────────────────────
   sql_host_name:
     description: "Azure SQL Server hostname"

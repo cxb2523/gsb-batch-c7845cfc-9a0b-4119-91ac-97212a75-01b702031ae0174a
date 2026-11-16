@@ -59,7 +59,8 @@ FROM restaurant_chain_db.information_schema.tables WHERE table_schema = 'busines
 UNION ALL
 SELECT 'marts', COUNT(*)
 FROM restaurant_chain_db.information_schema.tables WHERE table_schema = 'marts';
--- Expected: 01_bronze 5, staging 6, raw_vault 14, business_vault 11, marts 20+
+-- Expected: 01_bronze 6, staging 6, raw_vault 14, business_vault 11, marts 20+
+-- (01_bronze gained order_rejections, the audit table for bad Event Hub messages)
 ```
 
 ---
@@ -70,7 +71,7 @@ FROM restaurant_chain_db.information_schema.tables WHERE table_schema = 'marts';
 flowchart LR
     subgraph Job["datavault_full_pipeline"]
         direction LR
-        B["00_bronze\n5 tables"]
+        B["00_bronze\n6 tables"]
         S["01_staging\n6 MVs"]
         R["02_raw_vault\n14 MVs"]
         BV["03_business_vault\n10 MVs + 2 STs"]
@@ -91,12 +92,12 @@ flowchart LR
 
 | Task | Pipeline Name | Schema | Tables | Rows |
 | --- | --- | --- | --- | --- |
-| 00_bronze_ingestion | `datavault_bronze_ingestion` | `01_bronze` | 5 | — |
+| 00_bronze_ingestion | `datavault_bronze_ingestion` | `01_bronze` | 6 | — |
 | 01_staging | `datavault_staging` | `staging` | 6 | 148,511 |
 | 02_raw_vault | `datavault_raw_vault` | `raw_vault` | 14 | 185,464 |
 | 03_business_vault | `datavault_business_vault` | `business_vault` | 12 | 297,999 |
 | 04_marts | `datavault_marts` | `marts` | 20 | 303,852 |
-| **Total** | | | **57** | **935,826+** |
+| **Total** | | | **58** | **935,826+** |
 
 > **Note**: Pipeline IDs are managed by DABs and regenerate on each deployment. Always reference pipelines by **name** in the UI. Use `databricks pipelines list` to find current IDs.
 

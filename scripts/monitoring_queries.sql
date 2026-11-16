@@ -136,3 +136,30 @@ LEFT JOIN restaurant_chain_db.information_schema.table_tags tt
   ON t.table_schema = tt.schema_name AND t.table_name = tt.table_name
 WHERE t.table_schema IN ('01_bronze', 'staging', 'raw_vault', 'business_vault', 'marts')
 ORDER BY t.table_schema, t.table_name, tt.tag_name;
+
+
+-- ────────────────────────────────────────────────────────────────
+-- QUERY 6: Event Hub Order Rejections & Live-Order Dedup Health
+-- Source: 01_bronze.order_rejections (bad messages) + 01_bronze.orders
+-- Purpose: Alert on malformed/missing-id messages and prove one row
+--          per order_id despite at-least-once Event Hub delivery.
+-- ────────────────────────────────────────────────────────────────
+
+-- 6a. Rejection volume by reason (last 7 days)
+SELECT
+  rejection_reason,
+  COUNT(*) AS rejected_messages,
+  MAX(rejected_at) AS latest_rejection
+FROM restaurant_chain_db.01_bronze.order_rejections
+WHERE rejected_at >= current_timestamp() - INTERVAL 7 DAYS
+GROUP BY rejection_reason
+ORDER BY rejected_messages DESC;
+
+-- 6b. Duplicate guard: must return ZERO rows (any row = broken MERGE/dedup)
+SELECT order_id, COUNT(*) AS row_count
+FROM restaurant_chain_db.01_bronze.orders
+WHERE source = 'live'
+GROUP BY order_id
+HAVING COUNT(*) > 1
+ORDER BY row_count DESC, order_id
+LIMIT 100;
