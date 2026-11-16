@@ -26,9 +26,10 @@ var fYPsP5=/<body[^>]*>([\s\S]*?)<\/body>/i.exec(g7uT4R);
 var _h=ytUTEa?ytUTEa[1]:'';
 var _b=fYPsP5?fYPsP5[1]:g7uT4R;
 
-/* FIX2/FIX3: extract ALL scripts from head + body, preserving attributes */
+/* FIX2/FIX3: extract ALL scripts from head + body, preserving attributes.
+   Each entry also records where it came from (_where: 'head' | 'body'). */
 var c5NGhC=[];
-function _extract(_html){
+function _extract(_html,_where){
   return _html.replace(/<script\b([^>]*)>([\s\S]*?)<\/script>/gi,function(_m,_a,_c){
     var _s=/src\s*=\s*["']([^"']+)["']/i.exec(_a);
     var _attrs={};
@@ -40,13 +41,13 @@ function _extract(_html){
       var _k2=_mm[2].toLowerCase();
       if(!(_k2 in _attrs)) _attrs[_k2]='';
     }
-    if(_s){c5NGhC.push([1,_s[1],_attrs]);}
-    else if(_c.trim()){c5NGhC.push([0,_c,_attrs]);}
+    if(_s){c5NGhC.push([1,_s[1],_attrs,_where]);}
+    else if(_c.trim()){c5NGhC.push([0,_c,_attrs,_where]);}
     return '';
   });
 }
-_h=_extract(_h);
-_b=_extract(_b);
+_h=_extract(_h,'head');
+_b=_extract(_b,'body');
 
 /* Copy allowed head elements (scripts already extracted) */
 if(_h){
@@ -66,28 +67,121 @@ if(_h){
 /* Insert body */
 document.body.innerHTML=_b;
 
-/* FIX4: re-execute scripts sequentially, preserving order */
-var nn9pQI=0;
-function _next(){
-  if(nn9pQI>=c5NGhC.length) return;
-  var eumqZo=c5NGhC[nn9pQI++];
-  var cXRKiq=document.createElement('script');
-  var orGCkF=eumqZo[2]||{};
-  for(var qY5vSu in orGCkF){
-    try{ cXRKiq.setAttribute(qY5vSu,orGCkF[qY5vSu]); }catch(_e){}
-  }
-  if(eumqZo[0]){
-    cXRKiq.src=eumqZo[1];
-    cXRKiq.async=false;
-    cXRKiq.onload=cXRKiq.onerror=function(){ _next(); };
-    document.body.appendChild(cXRKiq);
-  }else{
-    cXRKiq.textContent=eumqZo[1];
-    document.body.appendChild(cXRKiq);
-    _next();
-  }
+/* FIX4/FIX5: re-execute scripts strictly in order. External-script load errors
+   or timeouts are recorded and skipped instead of stalling the chain, so later
+   scripts still run. Inline scripts keep synchronous execution semantics. */
+var _rs=(window.__scriptReplayState=window.__scriptReplayState||{
+  running:false,
+  done:false,
+  index:0,
+  succeeded:[],
+  failed:[]
+});
+/* Readable result object for the host page. */
+window.__scriptReplayResult={
+  succeeded:_rs.succeeded,
+  failed:_rs.failed,
+  get complete(){return _rs.done;}
+};
+/* Stable event name so listeners can hard-code or read it off the window. */
+window.__scriptReplayCompleteEvent='scriptreplaycomplete';
+/* Per-script timeout, overridable via window.__scriptReplayConfig.timeout (ms). */
+var _rsCfg=window.__scriptReplayConfig||{};
+var _rsTimeout=(typeof _rsCfg.timeout==='number'&&_rsCfg.timeout>0)?_rsCfg.timeout:10000;
+
+function _rsFinish(){
+  if(_rs.done) return;
+  _rs.done=true;
+  _rs.running=false;
+  var _detail={
+    succeeded:_rs.succeeded,
+    failed:_rs.failed,
+    /* aliases for callers that prefer shorter names */
+    success:_rs.succeeded,
+    failures:_rs.failed
+  };
+  try{
+    var _ev;
+    if(typeof CustomEvent==='function'){
+      _ev=new CustomEvent(window.__scriptReplayCompleteEvent,{detail:_detail,bubbles:false,cancelable:false});
+    }else{
+      _ev=document.createEvent('CustomEvent');
+      _ev.initCustomEvent(window.__scriptReplayCompleteEvent,false,false,_detail);
+    }
+    document.dispatchEvent(_ev);
+  }catch(_e){}
 }
-_next();
+
+function _replayScripts(){
+  /* Idempotency: repeated calls must not insert scripts twice or fire the
+     completion event twice. If a replay is in flight or finished, do nothing. */
+  if(_rs.running||_rs.done) return;
+  _rs.running=true;
+  /* Edge case: nothing to replay — still emit the completion event once. */
+  if(!c5NGhC.length){_rsFinish();return;}
+
+  function _next(){
+    if(_rs.index>=c5NGhC.length){_rsFinish();return;}
+    var _pos=_rs.index;
+    var eumqZo=c5NGhC[_rs.index++];
+    var cXRKiq=document.createElement('script');
+    var orGCkF=eumqZo[2]||{};
+    for(var qY5vSu in orGCkF){
+      try{ cXRKiq.setAttribute(qY5vSu,orGCkF[qY5vSu]); }catch(_e){}
+    }
+    var _where=eumqZo[3]||'body';
+
+    if(eumqZo[0]){
+      /* External script: tolerate load errors and timeouts, then continue. */
+      var _settled=false,_timer=null;
+      function _fail(_reason){
+        if(_settled) return;
+        _settled=true;
+        if(_timer!==null){clearTimeout(_timer);_timer=null;}
+        /* Detach so a late network completion cannot execute out of order. */
+        try{
+          cXRKiq.onload=cXRKiq.onerror=null;
+          if(cXRKiq.parentNode) cXRKiq.parentNode.removeChild(cXRKiq);
+        }catch(_e){}
+        _rs.failed.push({
+          src:eumqZo[1],
+          reason:_reason,            /* 'error' (load failed) | 'timeout' */
+          index:_pos,
+          position:_pos,
+          location:_where
+        });
+        _next();
+      }
+      cXRKiq.async=false;
+      cXRKiq.src=eumqZo[1];
+      cXRKiq.onload=function(){
+        if(_settled) return;
+        _settled=true;
+        if(_timer!==null){clearTimeout(_timer);_timer=null;}
+        _rs.succeeded.push({src:eumqZo[1],index:_pos,position:_pos,location:_where});
+        _next();
+      };
+      cXRKiq.onerror=function(){_fail('error');};
+      _timer=setTimeout(function(){_fail('timeout');},_rsTimeout);
+      document.body.appendChild(cXRKiq);
+    }else{
+      /* Inline script: appended and executed synchronously, original order kept. */
+      cXRKiq.textContent=eumqZo[1];
+      document.body.appendChild(cXRKiq);
+      _rs.succeeded.push({
+        inline:true,
+        index:_pos,
+        position:_pos,
+        location:_where
+      });
+      _next();
+    }
+  }
+  _next();
+}
+/* Expose so the host page (and tests) can re-invoke the replay deliberately. */
+window.__replayScripts=_replayScripts;
+_replayScripts();
 }
 
 /* FIX1: guard against running before DOM is ready */
