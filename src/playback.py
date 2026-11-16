@@ -1,0 +1,405 @@
+# -*- coding: utf-8 -*-
+"""
+LinuxTask - playback.py
+Description: Playback half of the app (playback thread, humanize, event
+             validation and macro persistence), moved out of main.py.
+             Methods are mixed into LinuxTaskApp, so the public surface
+             is unchanged.
+Author: JADRT22 (https://github.com/JADRT22)
+License: MIT
+"""
+
+import json
+import logging
+import os
+import random
+import threading
+import time
+import traceback
+from tkinter import filedialog
+
+from evdev import ecodes as e
+
+logger = logging.getLogger("LinuxTask")
+
+
+def save_macro_file(path, macro_data):
+    """Writes a macro JSON readable only by its owner (0600).
+
+    A macro file contains every keystroke captured between Record and Stop,
+    so it must not land world-readable: the file is created with O_CREAT and
+    mode 0600 (no 0644 window before a chmod) and an existing file is
+    tightened, because writing into it does not change its mode otherwise.
+    """
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fp:
+        json.dump(macro_data, fp, indent=2)
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        logger.debug("Could not tighten permissions on %s", path)
+
+
+class Playback:
+    """Playback methods; state (events, playing flag, driver) lives on the app."""
+
+    def handle_play_key(self):
+        """Handles play/stop hotkey press."""
+        if self.recording:
+            return
+        if self.playing:
+            self.playing = False
+        else:
+            self.start_playback()
+
+    def start_playback(self):
+        """Starts playback in a background thread."""
+        if self.playing:
+            return
+        with self.events_lock:
+            if not self.events:
+                logger.warning("Play pressed with no events recorded.")
+                return
+        self.playing = True
+        self.btn_play.configure(text="■", fg_color="#b71c1c")
+        threading.Thread(target=self.playback_thread, daemon=True).start()
+
+    def _setting_speed(self):
+        """Playback speed, read without touching Tk from this thread.
+
+        main.py mirrors speed_var into self._speed_value from a Tk trace
+        (UI thread), which is what the worker reads; the headless CLI sets
+        the same attribute directly. Bare instances built through __new__
+        have no mirror, so the .get() fallback keeps them (and _Value
+        doubles) working. __dict__ lookups, not getattr(): this class is
+        mixed into a Tkinter widget, whose __getattr__ recurses on a
+        missing attribute.
+        """
+        value = self.__dict__.get('_speed_value')
+        if isinstance(value, (int, float)):
+            return float(value) or 1.0
+        try:
+            return float(str(self.speed_var.get()).replace("x", "").strip())
+        except (AttributeError, ValueError, TypeError):
+            return 1.0
+
+    def _setting_humanize(self):
+        """Humanize switch, read without touching Tk (see _setting_speed)."""
+        value = self.__dict__.get('_humanize_value')
+        if value is not None:
+            return bool(value)
+        try:
+            return bool(self.humanize_enabled.get())
+        except (AttributeError, TypeError, ValueError):
+            return False
+
+    def _humanize_jitter(self):
+        """(±2 px, ±2 px) when humanize is on, (0, 0) when it is off."""
+        if not self._setting_humanize():
+            return 0, 0
+        return random.randint(-2, 2), random.randint(-2, 2)
+
+    def _humanize_point(self, x, y):
+        """Jittered absolute target for a 'pos' event."""
+        jx, jy = self._humanize_jitter()
+        return x + jx, y + jy
+
+    def _humanize_delta(self, dx, dy):
+        """Jittered relative move for a 'rel' event."""
+        jx, jy = self._humanize_jitter()
+        return dx + jx, dy + jy
+
+    def _humanize_gap_delay(self, gap):
+        """Extra wait for one event: 0-3% of the gap to the next event.
+
+        Applied per event on top of the absolute schedule, so the variance
+        cannot accumulate into a drift of the whole macro.
+        """
+        if gap <= 0 or not self._setting_humanize():
+            return 0.0
+        return gap * random.uniform(0, 0.03)
+
+    def _event_gap(self, events, i, speed):
+        """Time (s) between event i and the next one, already speed-scaled."""
+        if i + 1 >= len(events):
+            return 0.0
+        return (events[i + 1]['time'] - events[i]['time']) / speed
+
+    def playback_thread(self):
+        """Main playback loop, runs in a background thread."""
+        # Tally for the end-of-playback summary. Reset here (not in
+        # start_playback) so it is always owned by the running thread.
+        attempted_events = 0
+        failed_events = 0
+        # One UI warning per playback when the driver declines an event
+        # (portal not ready / failed call): the dialog must not fire per event.
+        warned_ui = False
+
+        def note_decline():
+            nonlocal warned_ui
+            if not warned_ui:
+                warned_ui = True
+                self._ui_queue.put("driver_warning")
+
+        def warp_uinput(x, y):
+            """Moves the cursor to (x, y) through the virtual device.
+
+            The absolute path is the only event type a compositor driver
+            can refuse outright (a dead portal on KDE Wayland refuses
+            move_cursor before any D-Bus call), so it needs its own
+            fallback: the delta from the last known position is written as
+            EV_REL, which the kernel accepts regardless of driver state.
+            The tracked position is re-read before each hop, because a
+            live driver keeps it exact while the uinput write is only
+            best-effort.
+            """
+            if self.uinput_device is None:
+                return False
+            try:
+                cur = self.manager.get_cursor_pos()
+            except Exception as exc:
+                logger.debug("get_cursor_pos failed: %s", exc)
+                cur = None
+            if not cur:
+                return False
+            cx, cy = cur
+            dx, dy = x - cx, y - cy
+            if dx == 0 and dy == 0:
+                return True
+            try:
+                self.uinput_device.write(e.EV_REL, e.REL_X, int(dx))
+                self.uinput_device.write(e.EV_REL, e.REL_Y, int(dy))
+                self.uinput_device.syn()
+                return True
+            except Exception as exc:
+                logger.debug("uinput warp to (%d, %d) failed: %s",
+                             x, y, exc)
+                return False
+        try:
+            while self.playing:
+                if self.start_cursor_pos is not None:
+                    # A dead driver must not leave the pointer wherever
+                    # the previous pass ended: loop repeats would then
+                    # drift. The uinput warp is deliberately inside the
+                    # try, so a driver that returns False (refused) and
+                    # a driver that raises are handled the same way.
+                    if self.manager.move_cursor(
+                            *self.start_cursor_pos) is False:
+                        try:
+                            warp_uinput(*self.start_cursor_pos)
+                        except Exception as exc:
+                            logger.debug(
+                                "uinput start-pos warp failed: %s", exc
+                            )
+                    time.sleep(0.01)
+
+                start_p = time.monotonic()
+                speed = self._setting_speed()
+
+                with self.events_lock:
+                    events_copy = list(self.events)
+                logger.info(
+                    "Playback started: %d events at %sx.",
+                    len(events_copy), speed,
+                )
+                # Let the driver re-sync its tracked position once
+                # (drivers that need it implement sync_for_playback).
+                sync = getattr(self.manager, "sync_for_playback", None)
+                if callable(sync):
+                    try:
+                        sync()
+                    except Exception as exc:
+                        logger.debug("sync_for_playback failed: %s", exc)
+
+                for i, ev in enumerate(events_copy):
+                    if not self.playing:
+                        break
+
+                    # One bad event must not abort the whole macro: the timing
+                    # math reads ev['time'] too, so it belongs inside this try.
+                    attempted_events += 1
+                    try:
+                        # Humanize shifts this one event later by a fraction
+                        # of the gap that follows it; the schedule stays
+                        # absolute, so the shifts cannot add up.
+                        target_time = (
+                            start_p + (ev['time'] / speed)
+                            + self._humanize_gap_delay(
+                                self._event_gap(events_copy, i, speed))
+                        )
+                        remaining = target_time - time.monotonic()
+                        if remaining > 0:
+                            # Sliced wait: Stop/F9 takes effect promptly
+                            # instead of only after the full gap elapses.
+                            deadline = time.monotonic() + remaining
+                            while self.playing:
+                                left = deadline - time.monotonic()
+                                if left <= 0:
+                                    break
+                                time.sleep(min(left, 0.05))
+
+                        if not self.playing:
+                            break
+
+                        if ev['type'] == "pos":
+                            x, y = self._humanize_point(ev['x'], ev['y'])
+                            if self.manager.move_cursor(x, y) is False:
+                                note_decline()
+                                # The virtual device is second choice, not
+                                # a skip: an absolute macro is otherwise
+                                # replayed as nothing at all.
+                                warp_uinput(x, y)
+
+                        elif ev['type'] == "rel":
+                            dx, dy = self._humanize_delta(ev['dx'], ev['dy'])
+
+                            handled = self.manager.move_relative(dx, dy)
+                            if not handled:
+                                note_decline()
+                            if not handled and self.uinput_device is not None:
+                                self.uinput_device.write(e.EV_REL, e.REL_X, dx)
+                                self.uinput_device.write(e.EV_REL, e.REL_Y, dy)
+                                self.uinput_device.syn()
+                            elif not handled:
+                                logger.warning(
+                                    "Relative move (%d, %d) dropped: driver "
+                                    "declined and UInput unavailable.", dx, dy
+                                )
+
+                        elif ev['type'] == "scroll":
+                            handled = self.manager.scroll(
+                                ev['direction'], ev.get('clicks', 1)
+                            )
+                            if not handled:
+                                note_decline()
+                                if self.uinput_device is not None:
+                                    wheel = 1 if ev['direction'] == 'up' else -1
+                                    for _ in range(ev.get('clicks', 1)):
+                                        self.uinput_device.write(
+                                            e.EV_REL, e.REL_WHEEL, wheel
+                                        )
+                                    self.uinput_device.syn()
+                                else:
+                                    logger.warning(
+                                        "Scroll (%s x%d) dropped: driver "
+                                        "declined and UInput unavailable.",
+                                        ev['direction'], ev.get('clicks', 1)
+                                    )
+
+                        elif ev['type'] == "key":
+                            if ev['code'] in [e.BTN_LEFT, e.BTN_RIGHT, e.BTN_MIDDLE]:
+                                handled = self.manager.mouse_button(ev['code'], ev['val'] == 1)
+                                if handled:
+                                    continue
+                                note_decline()
+
+                            if self.uinput_device is not None:
+                                self.uinput_device.write(
+                                    e.EV_KEY, ev['code'], ev['val']
+                                )
+                                self.uinput_device.syn()
+                            else:
+                                if ev['val'] == 1:
+                                    logger.warning(
+                                        "UInput unavailable and driver could not handle "
+                                        "mouse button (code=%d)", ev['code']
+                                    )
+                    except Exception as exc:
+                        failed_events += 1
+                        logger.warning(
+                            "Playback event %d (%s) failed, skipping: %s",
+                            i, ev.get('type'), exc, exc_info=True
+                        )
+                        continue
+
+                if not self.loop_enabled:
+                    break
+
+            if failed_events > 0:
+                logger.warning(
+                    "Playback finished with %d failed events out of %d.",
+                    failed_events, attempted_events
+                )
+
+        except Exception as exc:
+            logger.error("Playback error: %s", exc)
+            logger.error(traceback.format_exc())
+        finally:
+            self.playing = False
+            # UI reset via queue (this runs on a worker thread).
+            self._ui_queue.put("play_finished")
+
+    def save_file(self):
+        """Saves recorded events to a JSON file."""
+        f = filedialog.asksaveasfilename(
+            defaultextension=".json",
+            filetypes=[("JSON Files", "*.json"), ("All Files", "*.*")]
+        )
+        if f:
+            try:
+                with self.events_lock:
+                    events_copy = list(self.events)
+                macro_data = {
+                    "start_pos": self.start_cursor_pos,
+                    "events": events_copy
+                }
+                save_macro_file(f, macro_data)
+                logger.info("Macro saved to %s (%d events).", os.path.basename(f), len(events_copy))
+            except OSError as exc:
+                logger.error("Failed to save file: %s", exc)
+
+    def _validate_event(self, ev):
+        if not isinstance(ev, dict):
+            return False
+        # playback_thread reads ev['time'] for every event before
+        # dispatching it, so a non-numeric 'time' there aborts the whole
+        # macro. A missing 'time' stays valid (legacy macros omit it) but is
+        # caught per-event by the try in playback_thread; only reject a
+        # 'time' that is present and not a real number.
+        if "time" in ev and (not isinstance(ev["time"], (int, float))
+                             or isinstance(ev["time"], bool)):
+            return False
+        ev_type = ev.get("type")
+        if ev_type == "pos":
+            return isinstance(ev.get("x"), (int, float)) and isinstance(ev.get("y"), (int, float))
+        elif ev_type == "rel":
+            return isinstance(ev.get("dx"), (int, float)) and isinstance(ev.get("dy"), (int, float))
+        elif ev_type == "scroll":
+            return ev.get("direction") in ("up", "down") and isinstance(ev.get("clicks", 1), int)
+        elif ev_type == "key":
+            return isinstance(ev.get("code"), int) and isinstance(ev.get("val"), int)
+        return False
+
+    def open_file(self):
+        """Loads recorded events from a JSON file."""
+        f = filedialog.askopenfilename(
+            filetypes=[("JSON Files", "*.json"), ("All Files", "*.*")]
+        )
+        if f:
+            try:
+                with open(f, encoding="utf-8") as fp:
+                    data = json.load(fp)
+                if isinstance(data, dict):
+                    raw_events = data.get("events", [])
+                    pos = data.get("start_pos")
+                    if (isinstance(pos, (list, tuple)) and len(pos) == 2
+                            and all(isinstance(v, (int, float))
+                                    and not isinstance(v, bool) for v in pos)):
+                        self.start_cursor_pos = tuple(pos)
+                else:
+                    raw_events = data
+                    self.start_cursor_pos = None
+                if not isinstance(raw_events, list):
+                    raise ValueError("events must be a list")
+                valid = [ev for ev in raw_events if self._validate_event(ev)]
+                if len(valid) != len(raw_events):
+                    logger.warning("Filtered %d invalid event(s) from macro.",
+                                   len(raw_events) - len(valid))
+                with self.events_lock:
+                    self.events = valid
+                logger.info(
+                    "Macro loaded from %s (%d events, start_pos=%s).",
+                    os.path.basename(f), len(valid), self.start_cursor_pos
+                )
+            except (OSError, json.JSONDecodeError, ValueError) as exc:
+                logger.error("Failed to load file: %s", exc)

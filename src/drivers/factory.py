@@ -1,0 +1,142 @@
+# -*- coding: utf-8 -*-
+"""
+LinuxTask - factory.py
+Description: Driver factory for auto-detection of desktop environment.
+Author: JADRT22 (https://github.com/JADRT22)
+License: MIT
+"""
+
+import importlib.util
+import logging
+import os
+
+logger = logging.getLogger(__name__)
+
+# python-xlib is pip-installable (requirements.txt), but users who skip
+# requirements.txt (e.g. manual installs) deserve a clear message too.
+_XLIB_HINT = (
+    "pip3 install --user python-xlib  (or distro package: "
+    "apt install python3-xlib / pacman -S python-xlib / "
+    "dnf install python3-xlib)"
+)
+
+# dbus-python and PyGObject need C headers to build from PyPI, so they
+# must come from the distro, not pip. See tools/install.sh step 1.
+_DBUS_HINT = (
+    "install the system packages: "
+    "apt install python3-dbus python3-gi / pacman -S python-dbus python-gobject / "
+    "dnf install python3-dbus python3-gobject"
+)
+
+
+def _ensure_importable(module: str, hint: str) -> None:
+    """Raise a friendly RuntimeError if `module` cannot be imported."""
+    try:
+        spec = importlib.util.find_spec(module)
+    except (ImportError, ValueError):
+        # Broken installation / missing parent package: treat as absent.
+        spec = None
+    if spec is None:
+        raise RuntimeError(
+            f"Missing dependency '{module}' for this desktop environment. "
+            f"To fix: {hint}"
+        )
+
+
+def AutoDetectDriver():
+    """
+    Detects the current desktop environment and returns the appropriate driver.
+
+    Detection order:
+        1. Hyprland (via HYPRLAND_INSTANCE_SIGNATURE)
+        2. Sway (via SWAYSOCK, then XDG_CURRENT_DESKTOP)
+        3. XDG_CURRENT_DESKTOP matching
+        4. X11 fallback (via DISPLAY env var)
+        5. Error if nothing matches
+    """
+
+    # 1. Check for Hyprland-specific signature
+    if os.environ.get("HYPRLAND_INSTANCE_SIGNATURE"):
+        from .hyprland import HyprlandDriver
+        logger.info("Detected environment: Hyprland")
+        return HyprlandDriver()
+
+    # 2. Check for the Sway IPC socket (set by sway itself)
+    if os.environ.get("SWAYSOCK"):
+        from .sway import SwayDriver
+        logger.info("Detected environment: Sway")
+        return SwayDriver()
+
+    # 3. Check XDG_CURRENT_DESKTOP
+    current_desktop = os.environ.get("XDG_CURRENT_DESKTOP", "").upper()
+
+    if "HYPRLAND" in current_desktop:
+        from .hyprland import HyprlandDriver
+        logger.info("Detected environment: Hyprland (via XDG)")
+        return HyprlandDriver()
+
+    if "SWAY" in current_desktop:
+        from .sway import SwayDriver
+        logger.info("Detected environment: Sway (via XDG)")
+        return SwayDriver()
+
+    if "GNOME" in current_desktop:
+        session_type = os.environ.get("XDG_SESSION_TYPE", "").lower()
+        if session_type == "wayland":
+            from .gnome import GnomeDriver
+            logger.info("Detected environment: GNOME Wayland")
+            return GnomeDriver()
+        else:
+            _ensure_importable("Xlib", _XLIB_HINT)
+            from .x11 import X11Driver
+            logger.info("Detected environment: GNOME on X11")
+            return X11Driver()
+
+    if "KDE" in current_desktop:
+        session_type = os.environ.get("XDG_SESSION_TYPE", "").lower()
+        if session_type == "wayland":
+            # KDE Wayland uses the Portal RemoteDesktop via dbus-python
+            # and a GLib main loop from PyGObject.
+            _ensure_importable("dbus", _DBUS_HINT)
+            _ensure_importable("gi", _DBUS_HINT)
+            from .kde_wayland import KdeWaylandDriver
+            logger.info("Detected environment: KDE Wayland")
+            return KdeWaylandDriver()
+        else:
+            _ensure_importable("Xlib", _XLIB_HINT)
+            from .x11 import X11Driver
+            logger.info("Detected environment: KDE on X11")
+            return X11Driver()
+
+    # X11-based desktops: Cinnamon, MATE, XFCE, etc.
+    x11_desktops = [
+        "X-CINNAMON", "CINNAMON", "MATE", "XFCE", "LXDE",
+        "LXQT", "BUDGIE", "PANTHEON", "UNITY"
+    ]
+    for desktop in x11_desktops:
+        if desktop in current_desktop:
+            _ensure_importable("Xlib", _XLIB_HINT)
+            from .x11 import X11Driver
+            logger.info(
+                "Detected environment: %s (X11 driver)",
+                current_desktop
+            )
+            return X11Driver()
+
+    # 3. Generic X11 fallback
+    if os.environ.get("DISPLAY"):
+        _ensure_importable("Xlib", _XLIB_HINT)
+        from .x11 import X11Driver
+        logger.warning(
+            "Unknown desktop '%s' but DISPLAY is set. "
+            "Using X11 driver as fallback.",
+            current_desktop
+        )
+        return X11Driver()
+
+    # 4. No supported environment detected
+    raise RuntimeError(
+        f"Unsupported desktop environment: '{current_desktop}'. "
+        f"LinuxTask requires X11, KDE Wayland, Hyprland, Sway, "
+        f"or GNOME Wayland."
+    )

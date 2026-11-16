@@ -1,0 +1,678 @@
+# -*- coding: utf-8 -*-
+"""
+LinuxTask - test_kde_wayland.py
+Description: Headless tests for the KDE Wayland portal driver (portal and
+             DBus init mocked out): clicks must reach the portal as evdev
+             button codes 272/273/274, per the RemoteDesktop portal spec,
+             and skipped input must surface as WARNING + a UI notice.
+Author: JADRT22 (https://github.com/JADRT22)
+License: MIT
+"""
+
+import json
+import os
+import tempfile
+import unittest
+from unittest.mock import MagicMock, patch
+
+try:
+    import dbus
+except ImportError as exc:  # pragma: no cover
+    # python-dbus comes from the distribution, never from PyPI, so an
+    # interpreter without it must skip this suite instead of failing to
+    # import it — which is what a plain `pip install -r requirements.txt`
+    # CI job sees (see .github/workflows/python-app.yml).
+    raise unittest.SkipTest(
+        "KDE Wayland driver needs the distro python-dbus bindings "
+        "(apt install python3-dbus / pacman -S python-dbus)") from exc
+
+from drivers.kde_wayland import (
+    _KWIN_SCRIPT_NAME as KWIN_SCRIPT_NAME,
+)
+from drivers.kde_wayland import (
+    BTN_MAP,
+    KdeWaylandDriver,
+    _KwinCursorProbe,
+)
+
+
+def make_driver(portal_ready=True):
+    """Driver with DBus/portal init patched out and a mock portal."""
+    with patch.object(KdeWaylandDriver, '_detect_resolution'), \
+            patch.object(KdeWaylandDriver, '_portal_init'):
+        driver = KdeWaylandDriver()
+    driver._portal = MagicMock()
+    driver._portal_ready = portal_ready
+    driver._session_handle = "/org/freedesktop/portal/desktop/session/1"
+    return driver
+
+
+class TestKdeWaylandButtons(unittest.TestCase):
+
+    def test_map_is_evdev_codes(self):
+        self.assertEqual(BTN_MAP, {272: 272, 273: 273, 274: 274})
+
+    def test_mouse_button_sends_evdev_code_to_portal(self):
+        driver = make_driver()
+        for code in (272, 273, 274):
+            self.assertTrue(driver.mouse_button(code, True))
+            args = driver._portal.NotifyPointerButton.call_args.args
+            self.assertEqual(args[2], code, "portal must get the evdev code")
+            self.assertEqual(args[3], 1)
+        self.assertTrue(driver.mouse_button(272, False))
+        self.assertEqual(
+            driver._portal.NotifyPointerButton.call_args.args[3], 0)
+
+    def test_unknown_button_is_declined(self):
+        driver = make_driver()
+        self.assertFalse(driver.mouse_button(999, True))
+        driver._portal.NotifyPointerButton.assert_not_called()
+
+    def test_portal_not_ready_warns_and_declines(self):
+        driver = make_driver(portal_ready=False)
+        with self.assertLogs('drivers.kde_wayland', level='WARNING') as logs:
+            self.assertFalse(driver.mouse_button(272, True))
+            self.assertFalse(driver.move_cursor(10, 20))
+            self.assertFalse(driver.move_relative(1, 1))
+            self.assertFalse(driver.scroll('down'))
+        self.assertTrue(any('not ready' in m for m in logs.output))
+        driver._portal.NotifyPointerButton.assert_not_called()
+
+    def test_failed_portal_call_warns_and_declines(self):
+        driver = make_driver()
+        driver._portal.NotifyPointerButton.side_effect = RuntimeError('boom')
+        with self.assertLogs('drivers.kde_wayland', level='WARNING') as logs:
+            self.assertFalse(driver.mouse_button(272, True))
+        self.assertTrue(any('failed' in m for m in logs.output))
+
+    def test_warns_only_once_per_reason(self):
+        driver = make_driver(portal_ready=False)
+        with self.assertLogs('drivers.kde_wayland', level='WARNING') as logs:
+            driver.mouse_button(272, True)
+        self.assertEqual(len(logs.output), 1)
+        # Repeats are demoted to DEBUG so long macros do not flood the log.
+        with self.assertLogs('drivers.kde_wayland', level='DEBUG') as logs2:
+            driver.mouse_button(272, True)
+        self.assertEqual(len(logs2.output), 1)
+
+
+class TestKdeWaylandVisibility(unittest.TestCase):
+    """Skip points must log a WARNING and register one UI notice."""
+
+    def test_portal_not_ready_warns_and_registers_ui_notice(self):
+        driver = make_driver(portal_ready=False)
+        notices = []
+        driver.warn_fn = notices.append
+        with self.assertLogs('drivers.kde_wayland', level='WARNING') as logs:
+            self.assertFalse(driver.move_cursor(10, 20))
+        self.assertTrue(any('not ready' in m for m in logs.output))
+        self.assertEqual(len(notices), 1)
+        self.assertIn('not ready', notices[0])
+        # Repeats of the same reason must not queue another notice.
+        self.assertFalse(driver.move_cursor(30, 40))
+        self.assertEqual(len(notices), 1)
+
+    def test_failed_mouse_call_warns_and_registers_ui_notice(self):
+        driver = make_driver()
+        driver._portal.NotifyPointerButton.side_effect = RuntimeError('boom')
+        notices = []
+        driver.warn_fn = notices.append
+        with self.assertLogs('drivers.kde_wayland', level='WARNING') as logs:
+            self.assertFalse(driver.mouse_button(272, True))
+        self.assertTrue(any('failed' in m for m in logs.output))
+        self.assertEqual(len(notices), 1)
+        self.assertIn('failed', notices[0])
+
+
+def make_kwin_driver(load_result=7, probe_payload='123,456',
+                     wait_result=True):
+    """Driver with the KWin cursor-read plumbing pre-wired to mocks
+    (no real D-Bus in tests): scripting interface, probe and script
+    path are MagicModels so every read path is exercised offline."""
+    driver = make_driver()
+    driver._bus = MagicMock()
+    driver._dbus_loop = MagicMock()
+    driver._kwin_ready = True
+    driver._kwin_scripting = MagicMock()
+    driver._kwin_scripting.loadScript.return_value = load_result
+    driver._kwin_script_path = '/tmp/fake.js'
+    # The read rewrites this file with a per-read nonce; stubbed here so
+    # the offline tests never touch the real filesystem.
+    driver._kwin_write_script = MagicMock(return_value=True)
+    driver._kwin_probe = MagicMock()
+    driver._kwin_probe.wait.return_value = wait_result
+    driver._kwin_probe.payload.return_value = probe_payload
+    return driver
+
+
+def mock_xdotool(x=5, y=6, failing=False):
+    """Patch the xdotool read to return a known position (bytes, as
+    subprocess.check_output would). failing=True makes the call raise,
+    which is how a missing xdotool or an XWayland-less session shows up."""
+    if failing:
+        return patch('drivers.kde_wayland.subprocess.check_output',
+                     side_effect=OSError('xdotool missing'))
+    return patch('drivers.kde_wayland.subprocess.check_output',
+                 return_value=f'x:{x} y:{y} screen:0 window:9'.encode())
+
+
+class TestKdeWaylandCursorRead(unittest.TestCase):
+    """KWin scripting read (kdotool mechanism): exact position source,
+    with xdotool as fallback. All D-Bus is mocked out."""
+
+    def test_kwin_read_parses_payload(self):
+        driver = make_kwin_driver(probe_payload='123,456')
+        self.assertEqual(driver._kwin_cursor_pos(), (123, 456))
+        driver._kwin_scripting.loadScript.assert_called_with(
+            '/tmp/fake.js', KWIN_SCRIPT_NAME, signature='ss')
+        driver._kwin_probe.reset.assert_called_once()
+        driver._kwin_probe.wait.assert_called_once_with(2.0)
+
+    def test_load_script_failure_falls_back_to_xdotool(self):
+        driver = make_kwin_driver(load_result=-1)
+        with mock_xdotool(5, 6):
+            self.assertEqual(driver.get_cursor_pos(), (5, 6))
+        # The -1 load must trigger the stale-script recovery unload.
+        self.assertTrue(driver._kwin_scripting.unloadScript.called)
+
+    def test_timeout_unloads_script_and_falls_back(self):
+        driver = make_kwin_driver(wait_result=False)
+        self.assertIsNone(driver._kwin_cursor_pos())
+        # Even on timeout the script must be unloaded (no leak).
+        driver._kwin_scripting.unloadScript.assert_called_with(
+            KWIN_SCRIPT_NAME)
+        with mock_xdotool(8, 9):
+            self.assertEqual(driver.get_cursor_pos(), (8, 9))
+
+    def test_kwin_absent_falls_back_and_never_raises(self):
+        # No plumbing at all (bus/loop absent): setup bails out.
+        driver = make_driver()
+        self.assertIsNone(driver._kwin_cursor_pos())
+        with mock_xdotool(1, 2):
+            self.assertEqual(driver.get_cursor_pos(), (1, 2))
+        # KWin scripting raising mid-read must also degrade cleanly.
+        driver = make_kwin_driver()
+        driver._kwin_scripting.loadScript.side_effect = RuntimeError('boom')
+        with mock_xdotool(3, 4):
+            self.assertEqual(driver.get_cursor_pos(), (3, 4))
+
+    def test_sequential_reads_do_not_collide_on_script_name(self):
+        driver = make_kwin_driver()
+        self.assertEqual(driver._kwin_cursor_pos(), (123, 456))
+        self.assertEqual(driver._kwin_cursor_pos(), (123, 456))
+        # Same name both times, and unloaded after each read, so the
+        # second load can never collide with a leftover script.
+        load_calls = driver._kwin_scripting.loadScript.call_args_list
+        self.assertEqual(len(load_calls), 2)
+        self.assertEqual(load_calls[0], load_calls[1])
+        self.assertEqual(
+            driver._kwin_scripting.unloadScript.call_count, 2)
+
+    def test_kwin_is_primary_over_xdotool(self):
+        driver = make_kwin_driver(probe_payload='40,50')
+        with mock_xdotool(5, 6) as mock_out:
+            self.assertEqual(driver.get_cursor_pos(), (40, 50))
+            mock_out.assert_not_called()
+
+    def test_sync_tracked_pos_uses_kwin(self):
+        driver = make_kwin_driver(probe_payload='11,22')
+        driver._sync_tracked_pos()
+        self.assertEqual((driver._cur_x, driver._cur_y), (11, 22))
+        self.assertTrue(driver._pos_initialized)
+
+    def test_live_read_feeds_the_dead_reckoning_origin(self):
+        # move_cursor computes its delta from _cur, so a successful read
+        # must also update it. Without this, a driver that never went
+        # through sync_for_playback keeps its (0, 0) origin and every
+        # absolute move lands at (dx, dy) from the screen corner.
+        driver = make_kwin_driver(probe_payload='400,300')
+        self.assertEqual((driver._cur_x, driver._cur_y), (0, 0))
+        pos = driver.get_cursor_pos()
+        self.assertEqual(pos, (400, 300))
+        self.assertEqual((driver._cur_x, driver._cur_y), (400, 300))
+        self.assertTrue(driver._pos_initialized)
+
+    def test_absolute_move_anchors_a_cold_origin(self):
+        # First absolute move with no prior read: the driver must not
+        # dead-reckon from (0, 0), or the pointer lands at real+target.
+        driver = make_kwin_driver(probe_payload='500,500')
+        driver.screen_width, driver.screen_height = 1600, 900
+        driver._portal_ready = True
+        driver._session_handle = '/s'
+        driver._portal = MagicMock()
+        driver._pos_initialized = False
+        driver.move_cursor(600, 550)
+        delta = driver._portal.NotifyPointerMotion.call_args[0][2:4]
+        self.assertEqual(delta, (100, 50))
+
+    def test_failed_anchor_leaves_the_origin_cold(self):
+        # A read that finds no position must not mark the tracked
+        # position initialised, or the next move can never anchor.
+        driver = make_kwin_driver(load_result=-1)
+        with mock_xdotool(failing=True):
+            driver._lazy_init_tracked_pos()
+        self.assertFalse(driver._pos_initialized)
+        # Still retryable: a working source anchors on the next call.
+        with mock_xdotool(70, 80):
+            driver._lazy_init_tracked_pos()
+        self.assertTrue(driver._pos_initialized)
+        self.assertEqual((driver._cur_x, driver._cur_y), (70, 80))
+
+    def test_read_then_absolute_move_lands_on_target(self):
+        # End-to-end on the mocked IPC: read once, then warp. This is
+        # the sequence playback performs when a macro starts mid-session.
+        driver = make_kwin_driver(probe_payload='500,500')
+        driver.screen_width, driver.screen_height = 1600, 900
+        driver._portal_ready = True
+        driver._session_handle = '/s'
+        driver._portal = MagicMock()
+        driver.get_cursor_pos()
+        driver.move_cursor(600, 550)
+        delta = driver._portal.NotifyPointerMotion.call_args[0][2:4]
+        self.assertEqual(delta, (100, 50))
+
+    def test_xdotool_fallback_also_feeds_origin(self):
+        # No KWin: the fallback source must still leave _cur usable.
+        driver = make_kwin_driver(load_result=-1)
+        with mock_xdotool(31, 47):
+            self.assertEqual(driver.get_cursor_pos(), (31, 47))
+        self.assertEqual((driver._cur_x, driver._cur_y), (31, 47))
+
+    def test_unreadable_position_keeps_last_known_origin(self):
+        # Both sources dead: _cur must not be reset to anything, so
+        # subsequent deltas stay anchored where the driver last was.
+        driver = make_kwin_driver(load_result=-1)
+        with mock_xdotool(None, None):
+            self.assertEqual(driver.get_cursor_pos(), (0, 0))
+        driver._cur_x, driver._cur_y = 77, 88
+        with mock_xdotool(None, None):
+            self.assertEqual(driver.get_cursor_pos(), (77, 88))
+
+    def test_setup_partial_failure_is_retryable(self):
+        # Scripting stage fails after the probe/temp file were built:
+        # the next attempt must reuse them (no re-registration error)
+        # and fail clean again instead of raising or half-succeeding.
+        driver = make_driver()
+        driver._bus = MagicMock()
+        driver._dbus_loop = MagicMock()
+        driver._bus.request_name.return_value = (
+            dbus.bus.REQUEST_NAME_REPLY_PRIMARY_OWNER)
+        with patch('drivers.kde_wayland._KwinCursorProbe'), \
+                patch('drivers.kde_wayland.dbus.Interface'):
+            driver._bus.get_object.side_effect = RuntimeError('no KWin')
+            self.assertFalse(driver._kwin_read_setup())
+            self.assertFalse(driver._kwin_ready)
+            self.assertFalse(driver._kwin_read_setup())
+        self.assertEqual(driver._bus.request_name.call_count, 1)
+        driver._kwin_cleanup()  # unlink the temp file the setup created
+
+    def test_temp_script_write_failure_leaves_no_orphan(self):
+        # ENOSPC / fdopen failure in the temp-script stage: setup is
+        # retried on every read, so the mkstemp file must be unlinked
+        # (and its fd closed when fdopen itself raised) instead of
+        # leaking one file per cursor read.
+        driver = make_driver()
+        driver._bus = MagicMock()
+        driver._dbus_loop = MagicMock()
+        driver._bus.request_name.return_value = (
+            dbus.bus.REQUEST_NAME_REPLY_PRIMARY_OWNER)
+        real_mkstemp = tempfile.mkstemp
+        seen = {}
+
+        def tracking_mkstemp(*args, **kwargs):
+            fd, path = real_mkstemp(*args, **kwargs)
+            seen['fd'], seen['path'] = fd, path
+            return fd, path
+
+        with patch('drivers.kde_wayland.tempfile.mkstemp',
+                   side_effect=tracking_mkstemp), \
+                patch('drivers.kde_wayland.os.fdopen',
+                      side_effect=OSError('no space left on device')), \
+                patch('drivers.kde_wayland._KwinCursorProbe'):
+            self.assertFalse(driver._kwin_read_setup())
+        self.assertFalse(driver._kwin_ready)
+        # No orphan temp file and no leaked descriptor.
+        self.assertFalse(os.path.exists(seen['path']))
+        with self.assertRaises(OSError):
+            os.fstat(seen['fd'])
+        self.assertIsNone(driver._kwin_script_path)
+        # The read must fall back instead of raising; the probe stage
+        # bails fast again, so no new temp file appears.
+        driver._kwin_probe = None
+        driver._bus.request_name.return_value = (
+            dbus.bus.REQUEST_NAME_REPLY_IN_QUEUE)
+        with mock_xdotool(7, 8):
+            self.assertEqual(driver.get_cursor_pos(), (7, 8))
+
+    def test_repeated_timeouts_degrade_and_recover(self):
+        # After 3 consecutive timeouts every read would otherwise stall
+        # the full 2 s wait; the driver must skip KWin for 8 reads, then
+        # probe once (a failed probe restarts the window), and a success
+        # must re-enable normal KWin reads.
+        driver = make_kwin_driver(wait_result=False)
+        for _ in range(3):
+            self.assertIsNone(driver._kwin_cursor_pos())
+        self.assertEqual(driver._kwin_probe.wait.call_count, 3)
+        # Skip window: no KWin attempt, so no 2 s stall.
+        for _ in range(8):
+            self.assertIsNone(driver._kwin_cursor_pos())
+        self.assertEqual(driver._kwin_probe.wait.call_count, 3)
+        # Window over: one probe attempt, which fails -> new window.
+        self.assertIsNone(driver._kwin_cursor_pos())
+        self.assertEqual(driver._kwin_probe.wait.call_count, 4)
+        for _ in range(8):
+            self.assertIsNone(driver._kwin_cursor_pos())
+        self.assertEqual(driver._kwin_probe.wait.call_count, 4)
+        # Success resets the streak and re-enables KWin immediately.
+        driver._kwin_probe.wait.return_value = True
+        self.assertEqual(driver._kwin_cursor_pos(), (123, 456))
+        self.assertEqual(driver._kwin_probe.wait.call_count, 5)
+        driver._kwin_probe.wait.return_value = False
+        self.assertIsNone(driver._kwin_cursor_pos())
+        self.assertEqual(driver._kwin_probe.wait.call_count, 6)
+
+    def test_request_name_not_primary_fails_fast(self):
+        # Name owned by another process: setup must bail out without
+        # queueing (no 2 s stall on every read).
+        driver = make_driver()
+        driver._bus = MagicMock()
+        driver._dbus_loop = MagicMock()
+        driver._bus.request_name.return_value = (
+            dbus.bus.REQUEST_NAME_REPLY_IN_QUEUE)
+        self.assertFalse(driver._kwin_read_setup())
+        self.assertFalse(driver._kwin_ready)
+        driver._bus.get_object.assert_not_called()
+
+    def test_kwin_failure_warns_once_via_warn_fn(self):
+        driver = make_kwin_driver()
+        driver._kwin_scripting.loadScript.side_effect = RuntimeError('boom')
+        notices = []
+        driver.warn_fn = notices.append
+        with mock_xdotool(5, 6):
+            self.assertEqual(driver.get_cursor_pos(), (5, 6))
+            self.assertEqual(driver.get_cursor_pos(), (5, 6))
+        self.assertEqual(len(notices), 1)
+        self.assertIn('falling back to xdotool', notices[0])
+
+    def test_all_sources_fail_returns_tracked_tuple_never_none(self):
+        # KWin absent AND xdotool dead: the recorder relies on a real
+        # tuple (guards `is None` separately), so this must never be None.
+        driver = make_driver()  # no bus/loop: KWin setup bails out
+        driver._pos_initialized = False
+        with patch('drivers.kde_wayland.subprocess.check_output',
+                   side_effect=OSError('no xdotool')):
+            pos = driver.get_cursor_pos()
+        self.assertIsInstance(pos, tuple)
+        self.assertEqual(len(pos), 2)
+
+    def test_cleanup_unlinks_temp_script_file(self):
+        driver = make_kwin_driver()
+        fd, path = tempfile.mkstemp(suffix='.js', prefix='test_cursor_')
+        with os.fdopen(fd, 'w') as f:
+            f.write('// test')
+        driver._kwin_script_path = path
+        driver._kwin_cleanup()
+        self.assertFalse(os.path.exists(path))
+
+
+class TestKwinProbeTrust(unittest.TestCase):
+    """The probe object is a public bus endpoint: who may answer matters.
+
+    Every process in the user's session can call
+    org.linuxtask.cursorprobe.result(); without the sender and nonce
+    filters, one of them could set the position the driver dead-reckons
+    from and steer a replayed click anywhere.
+    """
+
+    def _probe(self):
+        return _KwinCursorProbe(MagicMock())
+
+    def test_reply_from_another_sender_is_ignored(self):
+        probe = self._probe()
+        probe.trust_sender(':1.7')
+        probe.reset(100)
+        with self.assertLogs('drivers.kde_wayland', level='WARNING'):
+            probe.result('100,10,20', sender=':1.99')
+        self.assertIsNone(probe.payload())
+        self.assertFalse(probe.wait(0.01))
+        self.assertEqual(probe.rejected, 1)
+        # The driver reads this flag to re-resolve the KWin name (KWin
+        # restarts get a new one, and the cached value would else stay
+        # wrong for the rest of the session).
+        self.assertTrue(probe.saw_rejection)
+
+    def test_stale_nonce_is_ignored(self):
+        probe = self._probe()
+        probe.trust_sender(':1.7')
+        probe.reset(101)
+        # A reply from the read that already timed out must not be taken
+        # for this read's answer.
+        probe.result('100,1,2', sender=':1.7')
+        self.assertIsNone(probe.payload())
+        self.assertFalse(probe.wait(0.01))
+        probe.result('101,3,4', sender=':1.7')
+        self.assertEqual(probe.payload(), '3,4')
+        self.assertTrue(probe.wait(0.01))
+
+    def test_open_probe_accepts_any_sender_until_one_is_trusted(self):
+        """Fail open before the name is known: refusing everything would
+        turn a reachable KWin into a dead read path."""
+        probe = self._probe()
+        probe.reset(None)
+        probe.result('7,8', sender=':1.42')
+        self.assertEqual(probe.payload(), '7,8')
+
+    def test_write_script_embeds_the_nonce(self):
+        driver = make_driver()
+        fd, path = tempfile.mkstemp(suffix='.js', prefix='test_nonce_')
+        os.close(fd)
+        try:
+            driver._kwin_script_path = path
+            self.assertTrue(driver._kwin_write_script(1234))
+            with open(path, encoding='utf-8') as script_file:
+                content = script_file.read()
+            self.assertIn('"1234,"', content)
+            self.assertIn('org.linuxtask.cursorprobe', content)
+        finally:
+            os.unlink(path)
+
+    def test_write_script_failure_is_reported(self):
+        driver = make_driver()
+        driver._kwin_script_path = None
+        self.assertFalse(driver._kwin_write_script(1))
+
+
+class TestPortalResponseTrust(unittest.TestCase):
+    """A Response signal must come from the portal, not from a neighbour."""
+
+    def _captured_callback(self, driver):
+        driver._bus.add_signal_receiver.side_effect = None
+        with patch.object(driver, '_predict_request_path',
+                          return_value='/org/freedesktop/portal/desktop/'
+                                       'request/x/ht_1'):
+            driver._portal_call(MagicMock(), {}, timeout=0.01)
+        args, kwargs = driver._bus.add_signal_receiver.call_args
+        return args[0], kwargs
+
+    def test_signal_registration_asks_for_the_sender(self):
+        driver = make_driver()
+        driver._bus = MagicMock()
+        driver._portal_sender = ':1.5'
+        _, kwargs = self._captured_callback(driver)
+        self.assertEqual(kwargs.get('sender_keyword'), 'sender')
+
+    def test_response_from_another_connection_is_dropped(self):
+        driver = make_driver()
+        driver._bus = MagicMock()
+        driver._portal_sender = ':1.5'
+        callback, _ = self._captured_callback(driver)
+        with self.assertLogs('drivers.kde_wayland', level='WARNING'):
+            callback(0, {}, sender=':1.666')
+        self.assertFalse(driver._portal_sender)  # cache invalidated
+
+    def test_response_from_the_portal_is_accepted(self):
+        driver = make_driver()
+        driver._bus = MagicMock()
+        driver._portal_sender = ':1.5'
+        callback, _ = self._captured_callback(driver)
+        callback(0, {'session_handle': '/s'}, sender=':1.5')
+        self.assertTrue(driver._portal_sender)  # cache kept
+
+
+class TestKdeLayoutDetection(unittest.TestCase):
+    """Multi-monitor geometry (#6, #7): the clamp box is the whole layout.
+
+    The two open reports are one dual-display setup and one 2560x1440
+    screen; both came from clipping against a single detected output.
+    """
+
+    def _driver(self, check_output):
+        with patch.object(KdeWaylandDriver, '_portal_init'), \
+                patch('drivers.kde_wayland.subprocess.check_output',
+                      side_effect=check_output):
+            return KdeWaylandDriver()
+
+    def test_json_layout_union_is_used(self):
+        payload = json.dumps([
+            {"output": {"name": "DP-1", "enabled": True, "primary": True,
+                        "mode": {"size": {"width": 2560, "height": 1440}},
+                        "pos": {"x": 0, "y": 0}}},
+            {"output": {"name": "HDMI-1", "enabled": True,
+                        "mode": {"size": {"width": 1920, "height": 1080}},
+                        "pos": {"x": 2560, "y": -180}}},
+        ]).encode()
+        driver = self._driver([payload])
+        self.assertEqual((driver.screen_width, driver.screen_height),
+                         (2560, 1440))
+        self.assertEqual(driver.bounds, (0, -180, 4480, 1440))
+        self.assertEqual(driver._clamp(4000, 700), (4000, 700))
+
+    def test_json_disabled_output_is_excluded(self):
+        payload = json.dumps({
+            "outputs": [
+                {"output": {"enabled": True,
+                             "mode": {"size": {"width": 1920, "height": 1080}},
+                             "pos": {"x": 0, "y": 0}}},
+                {"output": {"enabled": False,
+                            "mode": {"size": {"width": 3840, "height": 2160}},
+                            "pos": {"x": 1920, "y": 0}}},
+            ]
+        }).encode()
+        driver = self._driver([payload])
+        self.assertEqual(driver.bounds, (0, 0, 1920, 1080))
+
+    def _plasma_output(self, name, width, height, x, y, priority, mode_id):
+        """One output in the shape Plasma 6.8.1 reports (issue #7).
+
+        Abridged from the reporter's `kscreen-doctor --json`: there is no
+        'mode'/'currentMode' key, the size sits on the output itself, the
+        active mode is named by 'currentModeId', and the primary output is
+        marked by 'priority': 1 rather than a 'primary' flag.
+        """
+        return {
+            "name": name, "id": priority, "connected": True, "enabled": True,
+            "currentModeId": mode_id, "priority": priority,
+            "pos": {"x": x, "y": y},
+            "size": {"width": width, "height": height},
+            "sizeMM": {"width": 597, "height": 336},
+            "rotation": 1, "scale": 1, "overscan": 0, "brightness": 1,
+            "clones": [], "replicationSource": 0, "followPreferredMode": False,
+            "preferredModes": [mode_id], "iccProfilePath": "", "icon": "",
+            "modes": [
+                {"id": mode_id, "name": f"{width}x{height}@60",
+                 "refreshRate": 60,
+                 "size": {"width": width, "height": height}},
+                {"id": "99", "name": "1280x1024@60", "refreshRate": 60,
+                 "size": {"width": 1280, "height": 1024}},
+            ],
+        }
+
+    def _plasma_payload(self, outputs, width, height):
+        return json.dumps({
+            "outputs": outputs,
+            "screen": {"id": 0, "currentSize": {"width": width,
+                                                "height": height},
+                       "maxSize": {"width": 64000, "height": 64000},
+                       "minSize": {"width": 0, "height": 0},
+                       "maxActiveOutputsCount": 2},
+            "tabletModeAvailable": False, "tabletModeEngaged": False,
+        }).encode()
+
+    def test_json_size_on_the_output_is_read(self):
+        """The reporter's layout: 2560x1440 primary + 1600x1200 to its right.
+
+        kscreen itself declares currentSize 4160x1440, so a reader that
+        understands this shape must reach x=4000 on the secondary panel.
+        """
+        payload = self._plasma_payload([
+            self._plasma_output("HDMI-A-2", 1600, 1200, 2560, 0, 2, "1"),
+            self._plasma_output("DP-3", 2560, 1440, 0, 0, 1, "8"),
+        ], 4160, 1440)
+        driver = self._driver([payload])
+        self.assertEqual((driver.screen_width, driver.screen_height),
+                         (2560, 1440))
+        self.assertEqual(driver.bounds, (0, 0, 4160, 1440))
+        self.assertEqual(driver._clamp(4000, 1300), (4000, 1300))
+
+    def test_json_priority_one_is_the_primary_not_the_first_listed(self):
+        """Priority decides, even when the primary is neither first nor at 0,0.
+
+        The secondary sits at the origin here, so a reader that falls back
+        to "the output at (0,0)" reports 1600x1200 as the resolution.
+        """
+        payload = self._plasma_payload([
+            self._plasma_output("HDMI-A-2", 1600, 1200, 0, 0, 2, "1"),
+            self._plasma_output("DP-3", 2560, 1440, 1600, 0, 1, "8"),
+        ], 4160, 1440)
+        driver = self._driver([payload])
+        self.assertEqual((driver.screen_width, driver.screen_height),
+                         (2560, 1440))
+        self.assertEqual(driver.bounds, (0, 0, 4160, 1440))
+
+    def test_json_size_shape_logs_the_layout_line(self):
+        """The line #7 asks the reporter to paste must name both boxes."""
+        payload = self._plasma_payload([
+            self._plasma_output("HDMI-A-2", 1600, 1200, 2560, 0, 2, "1"),
+            self._plasma_output("DP-3", 2560, 1440, 0, 0, 1, "8"),
+        ], 4160, 1440)
+        with self.assertLogs('drivers.kde_wayland', level='INFO') as logs:
+            self._driver([payload])
+        self.assertTrue(
+            any('Resolution (kscreen-json): 2560x1440, layout 4160x1440+0+0'
+                in line for line in logs.output),
+            logs.output,
+        )
+
+    def test_text_listing_still_works_without_positions(self):
+        """Older kscreen-doctor: no --json, only the '*'-marked mode."""
+        driver = self._driver([
+            OSError('no --json'),
+            b'Output: 2 DP-1 enabled  (primary)\n'
+            b'    1: 1600x900@59.95\n    5: 2560x1440@59.95*\n',
+        ])
+        self.assertEqual((driver.screen_width, driver.screen_height),
+                         (2560, 1440))
+        self.assertEqual(driver.bounds, (0, 0, 2560, 1440))
+
+    def test_xrandr_offsets_are_used_as_a_last_resort(self):
+        driver = self._driver([
+            OSError('no kscreen'), OSError('no kscreen text'),
+            (b'Screen 0: minimum 0 x 0, current 4480 x 1260\n'
+             b'DP-4 connected primary 2560x1440+0+0 (normal left inverted)\n'
+             b'  2560x1440 59.95*\n'
+             b'HDMI-0 connected 1920x1080+2560-180\n'
+             b'  1920x1080 60.00*\n'),
+        ])
+        self.assertEqual((driver.screen_width, driver.screen_height),
+                         (2560, 1440))
+        self.assertEqual(driver.bounds, (0, -180, 4480, 1440))
+
+    def test_everything_failing_keeps_the_fallback_box(self):
+        driver = self._driver([OSError('a'), OSError('b'), OSError('c')])
+        self.assertEqual((driver.screen_width, driver.screen_height),
+                         (1920, 1080))
+        self.assertEqual(driver.bounds, (0, 0, 1920, 1080))
+
+
+if __name__ == '__main__':
+    unittest.main()
