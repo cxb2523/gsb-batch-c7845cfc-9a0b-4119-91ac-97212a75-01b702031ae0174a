@@ -7,7 +7,20 @@ import { CookieJar } from 'tough-cookie';
 import UserAgent from 'user-agents';
 
 const cookieJar = new CookieJar(); // Automatically parse and store cookies
-const challengeInProgress = {};
+const challengeInProgress = {}; // Captcha solving in progress, keyed by host
+// In-flight (or recently settled) js-challenge solve promises, keyed by host.
+// Concurrent requests to the same host await the shared promise instead of
+// each starting their own solve; different hosts never block each other.
+const jsChallengeSolvers = new Map();
+
+// Retry a request through the instance. got v16 rejects `url` inside options
+// objects, so it is passed as the first argument instead
+const retryRequest = (options, overrides = {}) => {
+  const url = overrides.url ?? options.url;
+  const rest = { ...options, ...overrides };
+  delete rest.url;
+  return instance(url, rest);
+};
 
 // Got instance to handle cloudflare bypass
 // Custom hooman options (cloudflareRetry, notFoundRetry, captchaRetry, onCaptcha,
@@ -38,6 +51,18 @@ const instance = got.extend({
   hooks: {
     beforeRequest: [
       async (options) => {
+        // In case a js-challenge is being solved for this host, hold the
+        // request and reuse that result instead of firing a duplicate solve
+        const pendingSolve = jsChallengeSolvers.get(options.url.host);
+        if (pendingSolve) {
+          try {
+            await pendingSolve;
+          } catch {
+            // Solving failed, the request continues and the afterResponse
+            // hook hands back the original 503 response
+          }
+        }
+
         // In case the host is in challenge progress wait
         while (challengeInProgress[options.url.host]) {
           await delay(1000);
@@ -62,27 +87,58 @@ const instance = got.extend({
         ) {
           // Solve js challange
           const host = response.request.options.url.host;
-          if (challengeInProgress[host]) {
+          const inFlight = jsChallengeSolvers.get(host);
+          if (inFlight) {
+            // Another request is already solving for this host, wait for that
+            // shared solve and reuse its result instead of solving again
             log.info('Waiting for js-challenge to be solved: ' + host);
-            while (challengeInProgress[host]) {
-              await delay(1000);
+            try {
+              await inFlight;
+            } catch {
+              // Solving failed, wake up and hand back the original 503
+              log.info('js-challenge solving failed, returning original response: ' + host);
+              return response;
             }
             log.info('JS-Challenge were solved and waiting is over, refreshing: ' + host);
-            return instance({ ...response.request.options });
+            return retryRequest(response.request.options, {
+              context: { ...context, cloudflareRetry: context.cloudflareRetry - 1 },
+            });
           }
 
           log.info('Solving js-challenge: ' + response.url);
-          challengeInProgress[host] = true;
-          const data = await solveChallenge(response.url, response.body).finally(() => {
+          const solver = solveChallenge(response.url, response.body);
+          jsChallengeSolvers.set(host, solver);
+          // Keep the settled promise around briefly so late arrivals still
+          // reuse the result, then clear so future challenges can be solved
+          const clearSolver = () => {
             setTimeout(() => {
-              if (challengeInProgress[host]) {
+              if (jsChallengeSolvers.get(host) === solver) {
                 log.info('Clear js-challenge in progress: ' + host);
-                delete challengeInProgress[host];
+                jsChallengeSolvers.delete(host);
               }
             }, 2000);
+          };
+          solver.then(clearSolver, clearSolver);
+
+          let data;
+          try {
+            data = await solver;
+          } catch (error) {
+            // Parsing/solving failed, return the original 503 response
+            // instead of leaking an unhandled rejection
+            log.info('Failed to solve js-challenge: ' + response.url);
+            log.error(error && error.message ? error.message : String(error));
+            return response;
+          }
+          if (!data) {
+            log.info('Unable to parse js-challenge: ' + response.url);
+            return response;
+          }
+
+          return retryRequest(response.request.options, {
+            ...data,
+            context: { ...context, cloudflareRetry: context.cloudflareRetry - 1 },
           });
-          context.cloudflareRetry--;
-          return instance({ ...response.request.options, ...data });
         } else if (
           // Handle redirect issue for cloudflare
           response.statusCode === 404 &&
