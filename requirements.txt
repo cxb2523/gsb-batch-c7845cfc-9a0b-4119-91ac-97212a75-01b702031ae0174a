@@ -1,0 +1,24 @@
+# Core
+pandas
+requests
+
+# Async
+aiohttp
+aiofiles
+
+# Dashboard
+streamlit
+
+# Export
+openpyxl
+pyarrow
+
+# REST API
+fastapi
+uvicorn
+
+# System & Analytics
+psutil
+duckdb
+defusedxml
+
