@@ -14,9 +14,10 @@ load_dotenv()
 db = os.getenv(
     "DB", "postgresql+psycopg2://test:testpassword@localhost:5432/xp_db"
 )
+# Note: no eager engine.connect() here. Connecting at import time made every
+# module that imports this one (models, scrapers, tests) fail whenever the
+# database was unreachable; connections are now opened lazily on first use.
 engine = create_engine(db)
-engine.connect()
-print(engine)
 Session = sessionmaker(bind=engine)
 
 Base = declarative_base()

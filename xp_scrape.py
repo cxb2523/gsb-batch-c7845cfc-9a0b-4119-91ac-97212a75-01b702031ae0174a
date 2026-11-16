@@ -1,55 +1,43 @@
 # -*- coding: utf-8 -*-
+"""XP leaderboard entry point.
+
+The scraping pipeline itself lives in ``umg_scrape.py`` and is importable and
+testable on its own; this script only wires it to the real database session.
+Run it as before:
+
+    python xp_scrape.py
 """
-@author: Ken Mwaura 
-"""
 
-import requests
-from bs4 import BeautifulSoup
+import sys
 
-from db.base_sql import Session, engine, Base
-from db.player_sql import Player
 
-# 1 generate database schema
-Base.metadata.create_all(engine)
+def main():
+    from db.base_sql import Session, engine
+    from db.player_sql import Player
+    from umg_scrape import scrape_xp
 
-# 2 Create a new session
-session = Session()
-
-# get the data
-data = requests.get("https://www.umggaming.com/leaderboards")
-
-# load data into bs4
-soup = BeautifulSoup(data.text, "html.parser")
-
-leaderboard = soup.find("table", {"id": "leaderboard-table"})
-tbody = leaderboard.find("tbody")
-
-for tr in tbody.find_all("tr"):
-    place = tr.find_all("td")[0].text.strip()
-    username = tr.find_all("td")[1].find_all("a")[1].text.strip()
-    xp = tr.find_all("td")[4].text.strip()
-    # print('position','username','xp', sep='\t')
-    print("Place", "Username", "XP", sep="  ")
-    print(place, username, xp, sep="  ")
-    # leaderboard-table > tbody:nth-child(2) > tr:nth-child(1) > td:nth-child(5)
-
-    # create players
-    player = Player(username=username, place=place, xp=xp)
-    # Check if player exists
-    players = session.query(Player).all()
+    # 1 generate database schema
+    # 2 Create a new session
     try:
-        pl = session.query(Player).filter(Player.username == username).first()
-        if pl:
-            session.delete(pl)
-            session.commit()
-    except Exception as e:
-        session.rollback()
-        print(e)
-    else:
-        session.add(player)
-    session.commit()
+        Player.metadata.create_all(engine)
+        session = Session()
+    except Exception as exc:
+        print(f"Scraping failed: could not connect to the database: {exc}")
+        return 1
+    try:
+        result = scrape_xp(session)
+    finally:
+        session.close()
 
-session.close()
+    if not result.ok:
+        print(f"Scraping failed: {result.error}")
+        return 1
+    for failure in result.failed:
+        print(f"skipped {failure}")
+    print(f"Done: {result.inserted} rows inserted, {result.failed_count} rows skipped.")
+    return 0
+
 
 if __name__ == "__main__":
     print("Scraping data")
+    sys.exit(main())

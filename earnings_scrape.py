@@ -1,57 +1,43 @@
+# -*- coding: utf-8 -*-
+"""Earnings leaderboard entry point.
+
+The scraping pipeline itself lives in ``umg_scrape.py`` and is importable and
+testable on its own; this script only wires it to the real database session.
+Run it as before:
+
+    python earnings_scrape.py
 """
-@author: Ken Mwaura 
-"""
 
-import requests
-from bs4 import BeautifulSoup
-
-from db.base_sql import Session, engine, Base
-from db.top_earning_players_sql import Earning_Player
-
-# 1 generate database schema
-Base.metadata.create_all(engine)
+import sys
 
 
-# 2 Create a new session
-session = Session()
+def main():
+    from db.base_sql import Session, engine
+    from db.top_earning_players_sql import Earning_Player
+    from umg_scrape import scrape_earnings
 
-# get the data
-data = requests.get("https://umggaming.com/leaderboards/earnings")
-
-# load data into bs4
-soup = BeautifulSoup(data.text, "html.parser")
-
-leaderboard = soup.find("table", {"id": "leaderboard-table"})
-tbody = leaderboard.find("tbody")
-
-for tr in tbody.find_all("tr"):
-    place = tr.find_all("td")[0].text.strip()
-    username = tr.find_all("td")[1].find_all("a")[1].text.strip()
-    earnings = tr.find_all("td")[4].text.strip()[1:]
-    # print('position','username','earnings', sep='\t')
-    print("Place", "Username", "Earnings", sep="  ")
-    print(place, username, earnings, sep="   ")
-    # create players
-    player = Earning_Player(username=username, place=place, earnings=float(earnings))
-    players = session.query(Earning_Player).all()
+    # 1 generate database schema
+    # 2 Create a new session
     try:
-        if session.query(Earning_Player).filter(Earning_Player.id > 0).all():
-            # Check if player exists
-            pl = session.query(Earning_Player).filter(Earning_Player.username == username).first()
-            if pl:
-                # print(pl.username, pl.place, pl.earnings)
-                session.delete(pl)
-                session.commit()
-                
-    except Exception as e:
-        session.rollback()
-        print(e)
-    else:
-        session.add(player)
+        Earning_Player.metadata.create_all(engine)
+        session = Session()
+    except Exception as exc:
+        print(f"Scraping failed: could not connect to the database: {exc}")
+        return 1
+    try:
+        result = scrape_earnings(session)
+    finally:
+        session.close()
 
-        session.commit()
+    if not result.ok:
+        print(f"Scraping failed: {result.error}")
+        return 1
+    for failure in result.failed:
+        print(f"skipped {failure}")
+    print(f"Done: {result.inserted} rows inserted, {result.failed_count} rows skipped.")
+    return 0
 
-session.close()
 
 if __name__ == "__main__":
- print("Scraping data")
+    print("Scraping data")
+    sys.exit(main())

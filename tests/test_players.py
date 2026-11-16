@@ -33,7 +33,10 @@ def test_player2(session, player_func2):
 
 @pytest.fixture(scope="module")
 def connection():
-    connection = engine.connect()
+    try:
+        connection = engine.connect()
+    except Exception as exc:
+        pytest.skip(f"no reachable Postgres: {exc}")
     yield connection
     connection.close()
 

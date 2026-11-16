@@ -86,3 +86,24 @@ To run the tests run the following command at the root of the project.
 ```shell
 pytest . 
 ```
+
+## Scraping pipeline
+
+Both entry points are thin wrappers around `umg_scrape.py`, which implements
+the shared fetch/parse/persist flow for the two leaderboards:
+
+* `scrape_xp(session, ...)` -> `players` table (`xp` is an integer)
+* `scrape_earnings(session, ...)` -> `paid_players` table (`earnings` is a float)
+
+The SQLAlchemy session is passed in, and the page can be injected via
+`html=` or a custom `fetcher=`, so the pipeline is fully testable without
+network or Postgres. Each row is parsed and committed independently: a row
+with missing columns or an illegal number is skipped and reported in
+`ScrapeResult.failed` with a readable reason, while the remaining rows are
+still stored. If the request fails or the page has no
+`<table id="leaderboard-table">`, the result is `ScrapeResult(ok=False)` and
+nothing is written.
+
+Duplicate usernames: both boards now use one policy — an existing row with
+the same username is replaced by the newly scraped values (delete-then-insert),
+so the tables never contain duplicate usernames.

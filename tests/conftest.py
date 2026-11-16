@@ -17,7 +17,10 @@ Session = sessionmaker()
 
 @pytest.fixture(scope="module")
 def connection():
-    connection = engine.connect()
+    try:
+        connection = engine.connect()
+    except Exception as exc:
+        pytest.skip(f"no reachable Postgres at {engine.url!r}: {exc}")
     yield connection
     connection.close()
 
