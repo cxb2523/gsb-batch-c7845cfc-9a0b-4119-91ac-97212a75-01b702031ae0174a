@@ -36,9 +36,9 @@ This file configures the behavior of the `HttpTransport` when running in `online
 
 It contains a list of `domains`. Each domain object has the following keys:
 -   `domain`: The domain name this rule applies to (e.g., `eastmoney.com`). A `default` domain can be set to provide fallback settings.
--   `concurrency`: The maximum number of concurrent requests to make to this domain.
--   `rate`: The maximum number of requests per second.
--   `retry`: The maximum number of times to retry a failed request.
+-   `concurrency`: The maximum number of concurrent requests. The `HttpTransport.fetch` thread-pool size is taken from the `default` domain's `concurrency`.
+-   `rate`: The maximum number of requests per second. Each task consumes a token from the bucket for its own `source_domain`, falling back to the `default` bucket when the domain is not configured.
+-   `retry`: The maximum number of attempts for a failed request. Read per `source_domain`, falling back to `default`.
 -   `policy`: The name of the proxy policy to use (for future use).
 
 ---

@@ -35,9 +35,10 @@ The pipeline is fully functional in both offline (`replay`) and online modes. Th
 
 ### Key Features of `HttpTransport`:
 1.  **Proxy Integration**: Reads Bright Data credentials from environment variables (`BRD_USERNAME_BASE`, `BRD_PASSWORD`) and automatically rotates proxy sessions for each request to prevent IP bans.
-2.  **Resumable Downloads (Checkpointing)**: The transport layer tracks successfully downloaded tasks in `manifests/checkpoints.parquet`. If a run is interrupted, it will automatically resume from where it left off, skipping already completed tasks.
-3.  **Domain-Specific Rate Limiting**: A thread-safe token bucket system enforces the rate limits defined in `config/rate_limits.yaml` on a per-domain basis, ensuring compliance with source-specific rules even under concurrent fetching.
-4.  **Robust Retries**: Failed requests are automatically retried with exponential backoff. The error handling is designed to distinguish between network-level failures and other issues.
+2.  **Resumable Downloads (Checkpointing)**: The transport layer tracks successfully downloaded tasks in `manifests/checkpoints.parquet`. If a run is interrupted, it will automatically resume from where it left off, skipping already completed tasks. Only `success` tasks are checkpointed; a corrupted checkpoint file is reported and treated as empty so the batch continues.
+3.  **Per-Task Settlement Records**: `fetch` returns a `FetchReport` containing one settlement record per manifest task (`task_id`, `interface_id`, `source_domain`, `status` = `success` / `failed` / `skipped`, and a readable `reason`), so operators can determine exactly which tasks need a rerun without reading logs.
+4.  **Domain-Specific Rate Limiting and Retries**: A thread-safe token bucket enforces the rate limits defined in `config/rate_limits.yaml` on a per-domain basis (falling back to `default`), and the retry budget is also read per domain. Concurrency always uses the `default` domain's `concurrency`.
+5.  **Robust Retries**: Failed requests are automatically retried with exponential backoff. The error handling distinguishes between network-level failures and other issues; the final error becomes the settlement `reason`.
 
 ### How to Run:
 - **Offline Mode (Default):**

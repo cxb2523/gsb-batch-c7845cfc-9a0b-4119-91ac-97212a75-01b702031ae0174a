@@ -6,6 +6,16 @@ The `Orchestrator` selects which transport to use based on the `mode` parameter 
 
 ---
 
+**Settlement states used by the online transport:**
+
+| Status | Meaning |
+| :--- | :--- |
+| `success` | Data was fetched, written to `data_raw/`, and the task ID was checkpointed. |
+| `failed` | The task was attempted this run and did not succeed (network error, exhausted retries, write error). It is **not** checkpointed and will be retried on the next run. |
+| `skipped` | The task was not attempted because its ID is already in the checkpoint, or it duplicates an earlier `task_id` in the same manifest. |
+
+---
+
 ## Class: `ReplayTransport`
 
 -   **Purpose**: This is the default transport layer, used in `replay` mode. It supports the "offline-first" development principle by "fetching" data from local files instead of making live network requests.
@@ -31,18 +41,28 @@ The `Orchestrator` selects which transport to use based on the `mode` parameter 
 ### Key Features
 
 -   **Resumable Downloads (Checkpointing)**: This is the most critical feature for robust data collection. The transport reads a `manifests/checkpoints.parquet` file at the start of a run to identify and skip any tasks that have already been successfully completed. This ensures that if a long-running job is interrupted, it can be resumed from where it left off.
--   **Domain-Specific Rate Limiting**: To avoid being blocked, the transport enforces rate limits on a per-domain basis. It uses a thread-safe `TokenBucket` mechanism to ensure that the number of requests per second to any given domain (e.g., `eastmoney.com`) does not exceed the limits defined in `config/rate_limits.yaml`.
--   **Secure Proxy Rotation**: The transport loads Bright Data proxy credentials securely from environment variables. For each request, it generates a new random session ID to ensure a different proxy IP is used, which is essential for large-scale fetching.
--   **Concurrency and Retries**: The main `fetch` method uses a `ThreadPoolExecutor` to make multiple API calls concurrently. Failed requests are automatically retried with an exponential backoff delay.
+    -   Only tasks that settle as `success` are written to the checkpoint, so a rerun naturally retries failures.
+    -   Checkpoint updates are serialized by a lock and backed by an in-memory set, so concurrent workers can neither lose records nor write duplicate `task_id` values.
+    -   The file itself is written atomically (temp file + `os.replace`) and, if it was changed by another writer since the last read, the on-disk records are merged in before writing.
+    -   A missing checkpoint means "nothing completed yet". A corrupted/unreadable checkpoint is logged as a warning and treated as empty so the batch continues instead of aborting.
+-   **Per-Task Settlement Records**: Every task in the manifest settles in exactly one state — `success`, `failed` (this run) or `skipped` (already checkpointed, or a duplicate `task_id` within the manifest). Each settlement carries `task_id`, `interface_id`, `source_domain`, `status` and a human-readable `reason`. Failed tasks are never checkpointed.
+-   **Domain-Specific Rate Limiting**: To avoid being blocked, the transport enforces rate limits on a per-domain basis. Each task takes the token bucket for its own `source_domain`, falling back to the `default` bucket when the domain has no configured rule. It uses a thread-safe `TokenBucket` mechanism so the number of requests per second to any given domain does not exceed the limits defined in `config/rate_limits.yaml`.
+-   **Domain-Specific Retries**: The retry budget for a task is read from its `source_domain`'s `retry` setting, again falling back to `default`. Retries use exponential backoff; the last error is preserved as the settlement `reason`.
+-   **Secure Proxy Rotation**: The transport loads Bright Data proxy credentials from environment variables. For each request, it generates a new random session ID to ensure a different proxy IP is used.
+-   **Concurrency**: The `ThreadPoolExecutor` size is always taken from the `default` domain's `concurrency` setting.
 -   **`akshare` Integration**: It maps the `interface_id` from the configuration to the actual callable function in the `akshare` library.
 
-### `fetch(self, tasks_df: pd.DataFrame) -> List[Dict[str, Any]]`
+### `fetch(self, tasks_df: pd.DataFrame) -> FetchReport`
 
 -   **Inputs**:
     -   `tasks_df`: The manifest DataFrame. For online mode, this will contain `params` for the API calls instead of a `replay_path`.
 -   **Logic**:
-    1.  It first loads the set of already completed task IDs from `manifests/checkpoints.parquet`.
-    2.  It filters the incoming `tasks_df` to exclude these completed tasks.
-    3.  It submits the remaining pending tasks to a thread pool.
-    4.  Each worker thread acquires a token from the appropriate domain's rate limiter, fetches the data, and upon success, saves the resulting DataFrame to `data_raw/` and appends the task ID to the checkpoint file.
--   **Output**: A list of dictionaries, where each dictionary contains the `task` metadata and the `raw_file_path` of the newly downloaded data.
+    1.  It loads the set of already completed task IDs from `manifests/checkpoints.parquet` (treating a corrupted file as empty, with a warning).
+    2.  It settles already-completed and duplicate tasks as `skipped`, and submits the rest to a thread pool sized by the `default` domain's concurrency.
+    3.  Each worker acquires a token from its domain's rate limiter, fetches the data with the domain's retry budget, and on success saves the DataFrame to `data_raw/` and records the task ID in the checkpoint. Any failure (network error, exhausted retries, save/checkpoint error) produces a `failed` settlement with the reason and never touches the checkpoint.
+-   **Output**: A `FetchReport` — a list of settlement records in manifest order, therefore one record per input task. It also exposes:
+    -   `report.summary` / `report.counts`: `{"total", "success", "failed", "skipped"}`.
+    -   `report.successes` / `report.fetch_results`: the successful fetch results (`task` + `raw_file_path`) in the shape consumed by `Normalizer.process`.
+    -   `report.failed_records`, `report.skipped_records`, `report.get_record(task_id)` and `report.to_dataframe()`.
+
+    Callers (e.g. the `Orchestrator`) can therefore produce a complete retry list from a single run instead of parsing logs.

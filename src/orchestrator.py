@@ -103,8 +103,33 @@ class Orchestrator:
 
         # In online mode, we just fetch and save the raw data.
         # Normalization and further steps would be a separate run.
-        fetched_results = transport.fetch(tasks_df)
+        report = transport.fetch(tasks_df)
 
+        summary = getattr(report, "summary", None)
+        failed_records = getattr(report, "failed_records", [])
+        if summary:
+            logger.info(
+                f"Online fetch settled {summary['total']} task(s): "
+                f"{summary['success']} success, {summary['failed']} failed, "
+                f"{summary['skipped']} skipped."
+            )
+        for record in failed_records:
+            logger.error(
+                f"  - FAILED {record['task_id'][:10]} "
+                f"[{record['interface_id']} @ {record['source_domain']}]: {record['reason']}"
+            )
+
+        # Persist the settlement list so operators have a concrete retry list
+        # instead of having to reconstruct it from the logs.
+        if hasattr(report, "to_dataframe"):
+            try:
+                settlement_path = os.path.join(self.MANIFEST_DIR, "settlements.parquet")
+                report.to_dataframe().to_parquet(settlement_path, index=False)
+                logger.info(f"Settlement records written to {settlement_path}.")
+            except Exception as e:
+                logger.warning(f"Could not write settlement records: {e}")
+
+        fetched_results = getattr(report, "successes", report)
         if fetched_results:
             logger.info(f"Successfully fetched and checkpointed {len(fetched_results)} new raw data files.")
             # The normalization step is now decoupled. A production system might
