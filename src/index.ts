@@ -5,6 +5,7 @@ export { TSVReader } from './readers/tsv-reader';
 export { NDJsonReader } from './readers/nd-json-reader';
 export { SQLReader } from './readers/sql-reader';
 export { HttpReader } from './readers/http-reader';
+export type { HttpReaderOptions, PageErrorDecision } from './readers/http-reader';
 export { XlsxReader } from './readers/xlsx-reader';
 export { MemoryReader } from './readers/memory-reader';
 export { ParquetReader } from './readers/parquet-reader';
