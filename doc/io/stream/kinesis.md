@@ -169,10 +169,13 @@ checkpointing past every event. Record decoding and translation retain their log
 The setting is a constructor argument; the CLI and `kinesis_relay` wrapper do
 not expose a policy option.
 
-With `ignore`, a failed event returns normally to the consumer and checkpoint
-progress can advance past it. The failed operation is not retried and can be
-permanently skipped. A refresh or commit failure can occur after the event's
-SQL write has already taken effect.
+With `ignore`, a failed event returns normally to the consumer and the relay
+keeps consuming subsequent events. Checkpoint progress, however, is frozen at
+the last successfully written and committed position: the failed event and
+every event behind it are replayed from the stream on the next restart instead
+of being permanently skipped. A refresh or commit failure can occur after the
+event's SQL write has already taken effect, which is why writes should use
+upsert or idempotent semantics.
 
 ### Persistent checkpoints
 
@@ -213,12 +216,15 @@ from the last checkpointed sequence number.
 :::{rubric} Delivery guarantee
 :::
 
-With the default `on_error="raise"`, checkpointed delivery is **at-least-once**.
-Opting into `ignore` permits checkpoint advancement past failed writes, so this
-guarantee does not apply to those operations. Records between the last flushed
-checkpoint and a crash will be replayed on restart. Relay SQL writes should
-use upsert or idempotent semantics (`INSERT ... ON CONFLICT`) to handle
-duplicate delivery gracefully.
+Checkpointed delivery is **at-least-once** under either error policy. A
+checkpoint only ever reflects events whose SQL write, table refresh and commit
+all succeeded: when an event fails, advances for its shard are suppressed, so
+restarting replays the failed event rather than opening a data gap. With
+`ignore` the relay still consumes the events behind the failure in the same
+run; with `raise` the failure stops the relay immediately. Records between the
+last flushed checkpoint and a crash are likewise replayed on restart. Relay
+SQL writes should use upsert or idempotent semantics
+(`INSERT ... ON CONFLICT`) to handle duplicate delivery gracefully.
 
 :::{rubric} Maintenance
 :::

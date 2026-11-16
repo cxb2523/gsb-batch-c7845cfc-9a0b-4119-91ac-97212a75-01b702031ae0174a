@@ -9,8 +9,15 @@
   aborting, including when using `ctk load mongodb+cdc://...`. A lost
   connection to CrateDB still stops the relay.
 - I/O: The Kinesis relay accepts `on_error="ignore"|"raise"`, defaulting to
-  `raise`. Opting into `ignore` permits checkpoint progress past failed writes,
-  but not past a lost connection to CrateDB.
+  `raise`. A lost connection to CrateDB always stops the relay, regardless of
+  the setting.
+- I/O: Fixed a Kinesis relay data-loss bug where a failed event write could
+  still be checkpointed and therefore skipped permanently on restart. A
+  checkpointer is now wrapped in a gate that freezes per-shard progress when an
+  execute, `REFRESH TABLE`, or commit step fails, so the checkpoint only ever
+  advances to the last contiguous event written and committed successfully;
+  the failed event is replayed on restart. This applies to both `ignore` and
+  `raise` and leaves the no-checkpointer consumption path unchanged.
 - Testing: S3 snapshot tests use Floci. The `test` extra adds `boto3` and drops
   the MinIO dependency.
 - Breaking change: Removed `ExtendedMinioContainer` from

@@ -14,6 +14,7 @@ from yarl import URL
 
 from cratedb_toolkit.io.exception import SkipAdapterException
 from cratedb_toolkit.io.kinesis.adapter import KinesisAdapterBase, KinesisStreamAdapter
+from cratedb_toolkit.io.kinesis.gate import GatedCheckPointer
 from cratedb_toolkit.io.kinesis.model import RecipeDefinition
 from cratedb_toolkit.model import DatabaseAddress
 from cratedb_toolkit.util.database import DatabaseAdapter, is_connection_error
@@ -66,6 +67,10 @@ class KinesisRelay:
 
         self.connection: sa.engine.Connection
         self.progress_bar: tqdm
+        # Gate guarding the checkpointer, if one is configured. ``None`` means
+        # plain consumption without checkpointing (e.g. file adapter or streams
+        # without a checkpointer parameter), which must keep working unchanged.
+        self.checkpoint_gate: t.Union[GatedCheckPointer, None] = None
 
     def _setup_checkpointer(self) -> None:
         """
@@ -96,6 +101,12 @@ class KinesisRelay:
             checkpointer = MemoryCheckPointer(name=self.kinesis_adapter.checkpointer_name)
         else:
             raise ValueError(f"Unsupported checkpointer type: {checkpointer_type!r}. Supported: memory, cratedb")
+
+        # Wrap the checkpointer so a failed event can freeze checkpoint advances;
+        # without this the consumer would checkpoint past the failure and skip
+        # the event permanently on the next restart.
+        self.checkpoint_gate = GatedCheckPointer(checkpointer)
+        checkpointer = self.checkpoint_gate
 
         logger.info(f"Using {checkpointer_type} checkpointer (name={self.kinesis_adapter.checkpointer_name})")
         self.kinesis_adapter.set_checkpointer(checkpointer)
@@ -177,6 +188,12 @@ class KinesisRelay:
             self.connection.commit()
         except (ProgrammingError, OperationalError) as ex:
             logger.exception("Executing query failed")
+            # The event was not written (or not committed), so it must not be
+            # acknowledged. Freeze checkpoint advances: the consumer's implicit
+            # checkpoint for this sequence (and any later one) is suppressed,
+            # keeping the restart position at or before the failed event.
+            if self.checkpoint_gate is not None:
+                self.checkpoint_gate.freeze()
             # An unreachable database is not a per-event failure: skipping would drop every event.
             if self.on_error == "raise" or is_connection_error(ex):
                 raise

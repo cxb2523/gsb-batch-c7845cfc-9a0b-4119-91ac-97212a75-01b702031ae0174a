@@ -11,6 +11,7 @@ from kinesis import Consumer
 from kinesis.checkpointers import MemoryCheckPointer
 from sqlalchemy.exc import OperationalError, ProgrammingError
 
+from cratedb_toolkit.io.kinesis.gate import GatedCheckPointer
 from cratedb_toolkit.io.kinesis.relay import KinesisRelay
 
 pytestmark = pytest.mark.kinesis
@@ -166,9 +167,14 @@ def test_kinesis_relay_checkpoint_after_write_error(relay_factory, policy):
 
     async def consume():
         checkpointer = MemoryCheckPointer(name="on-error")
-        consumer = Consumer(stream_name="demo", checkpointer=checkpointer, idle_timeout=0.01)  # ty: ignore[invalid-argument-type]
+        # The consumer sees the gate; the gate owns the real checkpointer, and
+        # the relay freezes it through the same object when the write fails.
+        gated = GatedCheckPointer(checkpointer)
+        relay.checkpoint_gate = gated
+        consumer = Consumer(stream_name="demo", checkpointer=gated, idle_timeout=0.01)  # ty: ignore[invalid-argument-type]
         consumer.shards = [{"ShardId": "shard-0"}]
-        await checkpointer.allocate("shard-0")
+        # Allocate through the gate, mirroring how the production consumer does it.
+        await gated.allocate("shard-0")
         # Exercise the real consumer queue and checkpoint path without a network fetcher.
         consumer.fetch_task = asyncio.create_task(asyncio.sleep(60))
         await consumer.queue.put({"id": "bad"})
@@ -194,4 +200,7 @@ def test_kinesis_relay_checkpoint_after_write_error(relay_factory, policy):
         return checkpointer.get_all_checkpoints()
 
     checkpoints = asyncio.run(consume())
-    assert checkpoints["shard-0"]["sequence"] == ("2" if policy == "ignore" else None)
+    # A failed write must never be acknowledged: with "ignore" the relay keeps
+    # consuming, but the frozen checkpoint stays before the failed event and can
+    # never reach "2". With "raise" the error aborts before any later checkpoint.
+    assert checkpoints["shard-0"]["sequence"] is None
