@@ -17,12 +17,41 @@ Installing
 Scraping
 --------
 
-scraperwiki.scrape(url[, params][,user_agent])
-  Returns the downloaded string from the given url.
+scraperwiki.scrape(url[, params][, user_agent][, timeout])
+  Returns the downloaded content from the given url as ``bytes``.
 
   ``params`` are sent as a POST if set.
 
   ``user_agent`` sets the user-agent string if provided.
+
+  ``timeout`` is the number of seconds to wait for the connection and the
+  response. The default, ``None``, keeps the standard library's behaviour of
+  waiting indefinitely.
+
+  Failures are raised as subclasses of ``scraperwiki.Error``, so a scraper can
+  catch them uniformly. Every exception message includes the URL.
+
+  * ``scraperwiki.ScrapeHTTPError`` — the server returned a non-2xx status.
+    The status code is available as ``status_code`` and in the message.
+  * ``scraperwiki.ScrapeNetworkError`` — the connection failed (for example
+    DNS failure, connection refused, or connection reset).
+  * ``scraperwiki.ScrapeTimeoutError`` — the request timed out.
+
+  All three derive from ``scraperwiki.ScrapeError``, which in turn derives from
+  ``scraperwiki.Error`` and exposes the failing URL as ``url``. For example::
+
+    import scraperwiki
+
+    try:
+        data = scraperwiki.scrape("https://example.com/data", timeout=30)
+    except scraperwiki.ScrapeHTTPError as e:
+        print("HTTP", e.status_code, "for", e.url)
+    except scraperwiki.ScrapeError as e:
+        print("download failed for", e.url, e)
+
+  Exceptions raised by ``urllib`` (``HTTPError``, ``URLError``, timeouts) are
+  not propagated directly; they are chained as the ``__cause__`` of the
+  ScraperWiki exception.
 
 Saving data
 -----------

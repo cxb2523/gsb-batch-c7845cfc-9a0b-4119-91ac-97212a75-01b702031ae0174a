@@ -5,16 +5,33 @@ https://scraperwiki.com/docs/python/python_help_documentation/
 
 import os
 import shutil
+import socket
 import tempfile
+import urllib.error
 import urllib.parse
 import urllib.request
 import warnings
 
+from .errors import ScrapeHTTPError, ScrapeNetworkError, ScrapeTimeoutError
 
-def scrape(url, params=None, user_agent=None):
+
+def scrape(url, params=None, user_agent=None, timeout=None):
     """
     Scrape a URL optionally with parameters.
-    This is effectively a wrapper around urllib.request.urlopen.
+
+    This is effectively a wrapper around urllib.request.urlopen, except that
+    failures are reported as subclasses of :class:`scraperwiki.Error`:
+
+    * a non-2xx HTTP response raises :class:`scraperwiki.ScrapeHTTPError`
+      (which carries the status code),
+    * a connection failure raises :class:`scraperwiki.ScrapeNetworkError`,
+    * a timeout raises :class:`scraperwiki.ScrapeTimeoutError`.
+
+    ``timeout`` is the number of seconds to wait for the connection and the
+    response. ``None`` (the default) keeps the standard library's behaviour,
+    which is to wait indefinitely.
+
+    On success the raw body is returned as ``bytes``.
     """
 
     headers = {}
@@ -28,10 +45,21 @@ def scrape(url, params=None, user_agent=None):
 
     req = urllib.request.Request(url, data=data, headers=headers)
 
-    with urllib.request.urlopen(req) as f:
-        text = f.read()
-
-    return text
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as f:
+            return f.read()
+    except urllib.error.HTTPError as e:
+        raise ScrapeHTTPError(url, e.code, e.reason) from e
+    except urllib.error.URLError as e:
+        # socket.timeout is an alias of TimeoutError on Python 3.10+.
+        if isinstance(e.reason, (TimeoutError, socket.timeout)):
+            raise ScrapeTimeoutError(url, timeout) from e
+        raise ScrapeNetworkError(url, e.reason) from e
+    except TimeoutError as e:
+        raise ScrapeTimeoutError(url, timeout) from e
+    except OSError as e:
+        # Connection resets and similar errors raised while reading the body.
+        raise ScrapeNetworkError(url, e) from e
 
 
 def pdftoxml(pdfdata, options=""):
