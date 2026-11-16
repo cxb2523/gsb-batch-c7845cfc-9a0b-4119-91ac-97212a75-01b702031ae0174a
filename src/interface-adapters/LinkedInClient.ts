@@ -2,16 +2,16 @@ import { SearchJobs } from '../use-cases/SearchJobs.js';
 import { IHttpClient } from '../interfaces/IHttpClient.js';
 import { IHtmlParser } from '../interfaces/IHtmlParser.js';
 import { ICache } from '../interfaces/ICache.js';
-import { Job, QueryOptions, QueryConfig } from '../types/index.js';
+import { QueryOptions, QueryConfig, SearchResult } from '../types/index.js';
 
 export class LinkedInClient {
   private searchJobsUseCase: SearchJobs;
 
-  constructor(httpClient: IHttpClient, htmlParser: IHtmlParser, cache: ICache<Job[]>) {
+  constructor(httpClient: IHttpClient, htmlParser: IHtmlParser, cache: ICache<SearchResult>) {
     this.searchJobsUseCase = new SearchJobs(httpClient, htmlParser, cache);
   }
 
-  async search(queryObject: QueryOptions): Promise<Job[]> {
+  async search(queryObject: QueryOptions): Promise<SearchResult> {
     // Input Sanitization & Validation
     const sanitizedQuery = this._sanitize(queryObject);
 
@@ -47,7 +47,10 @@ export class LinkedInClient {
   }
 
   private _generateCacheKey(query: QueryOptions): string {
-    return `${this._buildUrl(query, 0)}_limit:${query.limit}`;
+    // The key must cover both the starting offset (page) and the limit:
+    // identical base URLs with different start pages return different sets.
+    const startPage = (Number(query.page) || 0) * 25;
+    return `${this._buildUrl(query, 0)}_start:${startPage}_limit:${query.limit}`;
   }
 
   private _buildUrl(query: QueryOptions, start: number): string {

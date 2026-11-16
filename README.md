@@ -99,6 +99,34 @@ interface Job {
 }
 ```
 
+### Completeness metadata
+
+The resolved array is a plain `Job[]` and can be consumed exactly as before,
+but it also carries three non-enumerable fields describing how the search
+ended. They do not affect `length`, iteration, or `JSON.stringify` output:
+
+```typescript
+interface SearchResultMeta {
+  complete: boolean;        // false when a page failed after all retries
+  failedStart?: number;     // `start` offset of the page that failed
+  failureReason?: string;   // human-readable reason for the early stop
+}
+```
+
+When a page keeps failing after the retry budget, the jobs collected from the
+preceding pages are still returned with `complete === false` instead of being
+discarded. Jobs are de-duplicated by URL, so retrying the same page never
+produces duplicates. Only complete result sets are written to the cache;
+partial results are never cached.
+
+```typescript
+const jobs = await linkedInJobSearch(queryOptions);
+
+if (!jobs.complete) {
+  console.warn(`Incomplete results: page at start=${jobs.failedStart} failed: ${jobs.failureReason}`);
+}
+```
+
 ## Disclaimer & Legal
 
 This package is intended for **educational and research purposes only**.
