@@ -13,7 +13,8 @@ def _print(res, as_json: bool) -> None:
     for s in res.songs:
         print(f"{s.rank:>3}. {s.artist} — {s.title}  [{s.duration}]")
         print(f"     {s.download}")
-    print(f"\n{res.count} tracks · {res.took_ms} ms")
+    note = "" if res.complete else f" · incomplete ({res.pages_ok}/{res.pages_total} pages)"
+    print(f"\n{res.count} tracks · {res.took_ms} ms{note}")
 
 
 def main() -> None:

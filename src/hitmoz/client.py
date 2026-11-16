@@ -63,10 +63,45 @@ class Result:
     query: str | None = None
     cached: bool = False
     took_ms: int = 0
+    # Completeness of a paginated fetch: every requested page answered?
+    complete: bool = True
+    # pages that answered vs. pages requested (`pages_total == 0` = not paginated)
+    pages_ok: int = 0
+    pages_total: int = 0
+
+    def __post_init__(self) -> None:
+        # Keep the marker honest whenever the caller supplied page counters.
+        if self.pages_total:
+            self.complete = self.pages_ok >= self.pages_total
 
     @property
     def count(self) -> int:
         return len(self.songs)
+
+    @property
+    def partial(self) -> bool:
+        """True when some requested page failed and the result is incomplete."""
+        return not self.complete
+
+    def _clone(
+        self,
+        *,
+        songs: list[Song] | None = None,
+        cached: bool | None = None,
+        took_ms: int | None = None,
+    ) -> Result:
+        """Copy with the same completeness info (used when slicing or serving from cache)."""
+        return Result(
+            self.mode,
+            self.source,
+            self.songs if songs is None else songs,
+            self.query,
+            cached=self.cached if cached is None else cached,
+            took_ms=self.took_ms if took_ms is None else took_ms,
+            complete=self.complete,
+            pages_ok=self.pages_ok,
+            pages_total=self.pages_total,
+        )
 
     def to_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {"success": True, "mode": self.mode}
@@ -77,9 +112,22 @@ class Result:
             count=self.count,
             cached=self.cached,
             took_ms=self.took_ms,
+            complete=self.complete,
+            pages_ok=self.pages_ok,
+            pages_total=self.pages_total,
             songs=[s.to_dict() for s in self.songs],
         )
         return d
+
+
+@dataclass(slots=True)
+class _Pages:
+    """Outcome of one multi-page batch: successful HTML pages in request order + the pinned mirror."""
+
+    texts: list[str]
+    base: str
+    ok: int
+    total: int
 
 
 def _secs(t: str) -> int:
@@ -166,41 +214,69 @@ class HitMoz:
 
     # ------------------------------------------------------------------ http
 
-    async def _get(self, path: str) -> str:
-        """GET with mirror failover. Remembers the mirror that answered (after redirects)."""
-        order = [self.base] + [m.rstrip("/") for m in self.mirrors if m.rstrip("/") != self.base]
+    async def _fetch(self, path: str, base: str | None = None) -> tuple[str, str]:
+        """GET with mirror failover. Returns ``(html, base_that_answered)``.
+
+        Deliberately does not write ``self.base``: a batch of concurrent pages must all be
+        rendered against the same mirror, otherwise each response could move the base under
+        the others and download/link/source URLs would mix domains.
+        """
+        primary = (base or self.base).rstrip("/")
+        order = [primary] + [m.rstrip("/") for m in self.mirrors if m.rstrip("/") != primary]
         last: Exception | None = None
-        for base in order:
+        for candidate in order:
             try:
                 async with self._sem:
-                    r = await self._http.get(base + path)
+                    r = await self._http.get(candidate + path)
                 if r.status_code == 200 and "<html" in r.text[:3000].lower():
-                    self.base = f"{r.url.scheme}://{r.url.host}"
-                    return r.text
-                last = httpx.HTTPStatusError(f"{r.status_code} from {base}", request=r.request, response=r)
+                    return r.text, f"{r.url.scheme}://{r.url.host}"
+                last = httpx.HTTPStatusError(f"{r.status_code} from {candidate}", request=r.request, response=r)
             except httpx.HTTPError as e:
                 last = e
-            self._resolved = False
         raise ConnectionError(f"All mirrors failed: {last}")
 
-    async def _pages(self, paths: list[str]) -> list[str]:
-        if not self._resolved:  # first call discovers the live mirror, then everything goes in parallel
-            first = await self._get(paths[0])
-            self._resolved = True
-            rest = await asyncio.gather(*(self._get(p) for p in paths[1:]), return_exceptions=True)
-            return [first] + [x for x in rest if isinstance(x, str)]
-        got = await asyncio.gather(*(self._get(p) for p in paths), return_exceptions=True)
-        if not isinstance(got[0], str):
+    async def _get(self, path: str) -> str:
+        """GET with mirror failover. Remembers the mirror that answered (after redirects)."""
+        try:
+            text, base = await self._fetch(path)
+        except ConnectionError:
+            self._resolved = False  # rediscover the live mirror on the next request
+            raise
+        self.base, self._resolved = base, True
+        return text
+
+    async def _pages(self, paths: list[str]) -> _Pages:
+        """Fetch pages concurrently, tolerating failures of everything but the first page.
+
+        The first page also discovers the live mirror; its domain is pinned as the base for
+        the whole batch, so every successfully fetched page is rendered against one domain.
+        """
+        total = len(paths)
+        if not self._resolved:  # discover the live mirror first, then everything goes in parallel
+            try:
+                first, base = await self._fetch(paths[0])
+            except ConnectionError:
+                self._resolved = False  # rediscover the live mirror on the next request
+                raise
+            self.base, self._resolved = base, True
+            rest = await asyncio.gather(*(self._fetch(p, base) for p in paths[1:]), return_exceptions=True)
+            ok = [x for x in rest if isinstance(x, tuple)]
+            return _Pages([first, *(text for text, _ in ok)], base, 1 + len(ok), total)
+        got = await asyncio.gather(*(self._fetch(p, self.base) for p in paths), return_exceptions=True)
+        if isinstance(got[0], BaseException):  # the first page is not optional
+            self._resolved = False  # rediscover the live mirror on the next request
             raise got[0]
-        return [x for x in got if isinstance(x, str)]
+        self.base = got[0][1]  # pin the domain the first page actually landed on
+        self._resolved = True
+        ok = [x for x in got if isinstance(x, tuple)]
+        return _Pages([text for text, _ in ok], self.base, len(ok), total)
 
     # ------------------------------------------------------------------ cache
 
     async def _cached(self, key: str, factory) -> Result:
         hit = self._cache.get(key)
         if hit and hit[0] > time.monotonic():
-            res = hit[1]
-            return Result(res.mode, res.source, res.songs, res.query, cached=True, took_ms=0)
+            return hit[1]._clone(cached=True, took_ms=0)
         if key in self._inflight:  # coalesce identical concurrent requests
             return await asyncio.shield(self._inflight[key])
         fut = asyncio.get_running_loop().create_future()
@@ -209,7 +285,8 @@ class HitMoz:
             t = time.perf_counter()
             res = await factory()
             res.took_ms = int((time.perf_counter() - t) * 1000)
-            if res.songs and self.cache_ttl > 0:
+            # only a complete result may be reused later; partial charts stay request-scoped
+            if res.songs and res.complete and self.cache_ttl > 0:
                 self._cache[key] = (time.monotonic() + self.cache_ttl, res)
             fut.set_result(res)
             return res
@@ -236,6 +313,26 @@ class HitMoz:
                     return songs
         return songs
 
+    @staticmethod
+    def _result(
+        mode: str,
+        source: str,
+        raw_pages: list[list[dict]],
+        limit: int,
+        ok: int,
+        total: int,
+        query: str | None = None,
+    ) -> Result:
+        return Result(
+            mode,
+            source,
+            HitMoz._build(raw_pages, limit),
+            query=query,
+            complete=ok == total,
+            pages_ok=ok,
+            pages_total=total,
+        )
+
     async def top(self, limit: int = 100) -> Result:
         """Today's chart. limit up to ~500."""
         limit = max(1, min(limit, 500))
@@ -243,18 +340,25 @@ class HitMoz:
 
         async def run() -> Result:
             paths = ["/songs/top-today"] + [f"/songs/top-today/start/{PAGE_SIZE * i}" for i in range(1, pages)]
-            html_pages = await self._pages(paths)
-            raw = [parse_page(p, self.base) for p in html_pages]
-            return Result("top-today", self.base + "/songs/top-today", self._build(raw, pages * PAGE_SIZE))
+            got = await self._pages(paths)
+            raw = [parse_page(p, got.base) for p in got.texts]
+            return self._result(
+                "top-today",
+                got.base + "/songs/top-today",
+                raw,
+                pages * PAGE_SIZE,
+                got.ok,
+                got.total,
+            )
 
         # any fresh chart that is big enough answers smaller requests instantly
         now = time.monotonic()
         for key, (exp, res) in list(self._cache.items()):
-            if key.startswith("top:") and exp > now and res.count >= limit:
-                return Result(res.mode, res.source, res.songs[:limit], cached=True)
+            if key.startswith("top:") and exp > now and res.complete and res.count >= limit:
+                return res._clone(songs=res.songs[:limit], cached=True, took_ms=0)
         res = await self._cached(f"top:{pages * PAGE_SIZE}", run)
         if res.count > limit:
-            res = Result(res.mode, res.source, res.songs[:limit], cached=res.cached, took_ms=res.took_ms)
+            res = res._clone(songs=res.songs[:limit])
         return res
 
     async def search(self, query: str, limit: int = 48) -> Result:
@@ -271,13 +375,18 @@ class HitMoz:
             starts = [int(x) for x in _LAST_PAGE.findall(first)]
             last = max(starts, default=0)
             want = min(last // PAGE_SIZE + 1, -(-limit // PAGE_SIZE))
-            if want > 1 and raw[0]:
-                more = await asyncio.gather(
-                    *(self._get(f"/search/start/{PAGE_SIZE * i}?q={q}") for i in range(1, want)),
+            more = want > 1 and bool(raw[0])  # an empty first page means there is nothing to paginate
+            ok, total = 1, want if more else 1
+            if more:
+                fetched = await asyncio.gather(
+                    *(self._fetch(f"/search/start/{PAGE_SIZE * i}?q={q}", self.base) for i in range(1, want)),
                     return_exceptions=True,
                 )
-                raw += [parse_page(p, self.base) for p in more if isinstance(p, str)]
-            return Result("search", f"{self.base}/search?q={q}", self._build(raw, limit), query=query)
+                for x in fetched:
+                    if isinstance(x, tuple):
+                        raw.append(parse_page(x[0], self.base))
+                        ok += 1
+            return self._result("search", f"{self.base}/search?q={q}", raw, limit, ok, total, query=query)
 
         return await self._cached(f"search:{query.lower()}:{limit}", run)
 

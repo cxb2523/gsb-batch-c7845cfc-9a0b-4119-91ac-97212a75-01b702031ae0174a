@@ -12,7 +12,7 @@ from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import ORJSONResponse, RedirectResponse
 
 from . import __version__
-from .client import HitMoz
+from .client import HitMoz, Result
 
 hm: HitMoz | None = None
 
@@ -54,6 +54,14 @@ def _cache_headers(resp: Response, seconds: int = 300) -> None:
     resp.headers["Cache-Control"] = f"public, max-age={seconds}, stale-while-revalidate=600"
 
 
+def _cache_headers_for(resp: Response, res: Result, seconds: int) -> None:
+    """Partial charts are fine to return but must not be cached as if they were the full chart."""
+    if res.complete:
+        _cache_headers(resp, seconds)
+    else:
+        resp.headers["Cache-Control"] = "no-store"
+
+
 @app.get("/", include_in_schema=False)
 async def root():
     return RedirectResponse(app.root_path + "/docs")
@@ -70,7 +78,7 @@ async def top(response: Response, limit: int = Query(100, ge=1, le=500)):
         res = await hm.top(limit)
     except ConnectionError as e:
         raise HTTPException(502, str(e))
-    _cache_headers(response)
+    _cache_headers_for(response, res, 300)
     return res.to_dict()
 
 
@@ -82,7 +90,7 @@ async def search(response: Response, q: str = Query(..., min_length=1, max_lengt
         raise HTTPException(502, str(e))
     if not res.songs:
         return ORJSONResponse({"success": False, "query": q, "error": "Nothing found", "songs": []}, status_code=404)
-    _cache_headers(response, 1800)
+    _cache_headers_for(response, res, 1800)
     return res.to_dict()
 
 

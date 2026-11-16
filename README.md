@@ -19,6 +19,7 @@ curl "https://bakha.me/hitmoz/search?q=Jony&limit=1"
 ```json
 {
   "success": true, "mode": "search", "query": "Jony", "count": 1, "cached": false, "took_ms": 393,
+  "complete": true, "pages_ok": 1, "pages_total": 1,
   "songs": [{
     "rank": 1, "id": "82169781", "title": "Журавли", "artist": "Клава Кока, JONY",
     "duration": "03:18", "seconds": 198,
@@ -139,6 +140,21 @@ Tools: `search_music`, `top_chart`. Then just ask: *"find 5 tracks by JONY and g
 
 For educational purposes. All music belongs to its rights holders. Respect the source site's terms and
 don't hammer it — the built-in cache exists for a reason.
+
+### Partial charts
+
+The chart is fetched 48 tracks per page, all pages in parallel. If some page fails, the request no
+longer fails: the pages that answered are merged, deduplicated and ranked as usual, and the response
+says so:
+
+| Field | Meaning |
+|---|---|
+| `complete` | `true` only when every requested page answered |
+| `pages_ok` | number of pages that answered |
+| `pages_total` | number of pages requested |
+
+A failed **first** page still raises `ConnectionError` (there is nothing to return). Only complete
+charts are cached, so a partial response is always re-fetched next time.
 
 ## License
 
