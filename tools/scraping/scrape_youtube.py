@@ -26,7 +26,9 @@ def get_new_ids(video_ids, path, subpath, ignore_discarded=False):
         if subpath and os.path.isdir(f"{path}/{subpath}"):
             all_video_ids += [os.path.splitext(f)[0] for f in os.listdir(f"{path}/{subpath}")]
         if not ignore_discarded and os.path.isdir(f"{path}/discarded"):
-            all_video_ids += [os.path.splitext(f)[0] for f in os.listdir(f"{path}/discarded")]
+            # Temporary failures are recorded, but must not count as permanently discarded:
+            # the video will be retried on the next run.
+            all_video_ids += [os.path.splitext(f)[0] for f in os.listdir(f"{path}/discarded") if not is_temporary_discarded_id(os.path.splitext(f)[0], path)]
         ALL_IDS[path] = all_video_ids
     res = [id for id in video_ids if id not in all_video_ids]
     for id in res:
@@ -40,12 +42,28 @@ def get_new_ids(video_ids, path, subpath, ignore_discarded=False):
 #     return lang == l
 
 
-def register_discarded_id(video_id, path, reason=""):
+def register_discarded_id(video_id, path, reason="", temporary=False):
     path = f"{path}/discarded"
     if not os.path.isdir(path):
         os.makedirs(path)
+    reason = str(reason)
+    if temporary:
+        reason = f"{ERROR_TEMPORARY}: {reason}"
     with open(f"{path}/{video_id}.txt", "w") as f:
-        f.write(str(reason) + "\n")
+        f.write(reason + "\n")
+
+
+def is_temporary_discarded_id(video_id, path):
+    """Whether a discarded record only reports a temporary (proxy/network) failure."""
+    filepath = f"{path}/discarded/{video_id}.txt"
+    if not os.path.isfile(filepath):
+        return False
+    try:
+        with open(filepath, encoding="utf8", errors="replace") as f:
+            first_line = f.readline()
+    except OSError:
+        return False
+    return first_line.startswith(ERROR_TEMPORARY)
 
 
 def unregister_discarded_id(video_id, path):
@@ -53,6 +71,38 @@ def unregister_discarded_id(video_id, path):
     if os.path.isfile(f"{path}/{video_id}.txt"):
         print(f"Video {video_id} now accepted :)")
         os.remove(f"{path}/{video_id}.txt")
+
+
+def forget_video_id(video_id, path):
+    """Drop a video from the in-process cache so a later run in the same process retries it."""
+    if path in ALL_IDS and video_id in ALL_IDS[path]:
+        ALL_IDS[path].remove(video_id)
+
+
+NOT_TRANSCRIPT_DIRS = {"discarded", "mp4", "queries"}
+
+
+def has_local_transcript(video_id, path, if_lang=None):
+    """Whether subtitles for this video are already stored on disk (for the requested language, if given)."""
+    if not os.path.isdir(path):
+        return False
+    if if_lang:
+        candidates = [if_lang, f"{if_lang}_auto"]
+    else:
+        candidates = [entry for entry in os.listdir(path) if entry not in NOT_TRANSCRIPT_DIRS]
+    return any(os.path.isfile(f"{path}/{entry}/{video_id}.csv") for entry in candidates)
+
+
+def record_failure(video_id, path, if_lang, reason, temporary):
+    """Record why a video produced no subtitles, unless subtitles are already on disk.
+
+    Paid early (not only once every proxy has been tried), so that an interrupted run keeps
+    a usable trace of what happened. A video never gets both subtitles and a discarded record.
+    """
+    if has_local_transcript(video_id, path, if_lang):
+        return False
+    register_discarded_id(video_id, path, reason=reason, temporary=temporary)
+    return True
 
 
 def is_automatic(language):
@@ -69,7 +119,21 @@ def norm_language_code(language_code):
 
 
 ERROR_WHEN_NOT_AVAILABLE = "Subtitles disabled for video"
+ERROR_VIDEO_UNAVAILABLE = "Video unavailable"
 ERROR_PROXY = "Proxy error"
+# Prefix used to flag a discarded record that only reports a temporary failure
+# (proxy / network). Such records must not be treated as permanent exclusions.
+ERROR_TEMPORARY = "Temporary failure"
+
+
+def is_temporary_failure(reason):
+    """Whether a failure reason denotes a temporary (proxy / network) error."""
+    return isinstance(reason, str) and (reason.startswith(ERROR_TEMPORARY) or reason.startswith(ERROR_PROXY))
+
+
+def is_permanent_failure(reason):
+    """Whether a failure reason denotes a definite unavailability (no need to retry with other proxies)."""
+    return isinstance(reason, str) and not is_temporary_failure(reason)
 
 
 def get_transcripts_if(vid, if_lang="fr", proxy=None, all_auto=False, verbose=True, max_retrial=float("inf")):
@@ -85,7 +149,7 @@ def get_transcripts_if(vid, if_lang="fr", proxy=None, all_auto=False, verbose=Tr
             print(msg)
         return msg
     except VideoUnavailable as err:
-        msg = str(err)
+        msg = f"{ERROR_VIDEO_UNAVAILABLE} {vid}: {err}"
         if verbose:
             print(msg)
         return msg
@@ -115,8 +179,8 @@ def get_transcripts_if(vid, if_lang="fr", proxy=None, all_auto=False, verbose=Tr
             print(msg)
         return msg
 
-    has_auto = max([norm_language_code(t.language_code) == if_lang and is_automatic(t.language) for t in transcripts])
-    has_language = max([norm_language_code(t.language_code) == if_lang and (all_auto or not is_automatic(t.language)) for t in transcripts])
+    has_auto = max([norm_language_code(t.language_code) == if_lang and is_automatic(t.language) for t in transcripts], default=False)
+    has_language = max([norm_language_code(t.language_code) == if_lang and (all_auto or not is_automatic(t.language)) for t in transcripts], default=False)
     only_has_language = has_language and len(transcripts) == 1
     discarded = not has_language
     if not all_auto:
@@ -139,6 +203,12 @@ def get_transcripts_if(vid, if_lang="fr", proxy=None, all_auto=False, verbose=Tr
             # This can fail with "xml.etree.ElementTree.ParseError: not well-formed (invalid token): line XXX, column XXX"
             res[lang] = t.fetch()
 
+    except (YouTubeRequestFailed, requests.exceptions.RequestException) as err:
+        # Downloading the transcript failed because of the network / the proxy: worth retrying.
+        msg = f"{ERROR_PROXY}: {err}"
+        if verbose:
+            print(msg)
+        return msg
     except Exception:
         msg = f"Video {vid} discarded. Error when getting transcript:\n{traceback.format_exc()}"
         print(msg)
@@ -256,6 +326,7 @@ def extract_audio_yt(vid, output_audio_dir, skip_if_exists=True, verbose=True):
     if skip_if_exists and os.path.isfile(output_video_file):
         if verbose:
             print(f"Video {vid} skipped (already extracted)")
+        return
 
     try:
         video = YouTube(f"https://www.youtube.com/watch?v={vid}")
@@ -300,6 +371,17 @@ def scrape_transcriptions(
     extract_audio=False,
     verbose=True,
 ):
+    """Fetch subtitles for the given videos, settling each video exactly one way.
+
+    A video either gets its subtitles written to ``{path}/{language}/{video_id}.csv`` or a single
+    record in ``{path}/discarded/{video_id}.txt`` explaining why it was discarded -- never both.
+
+    Definite unavailability (subtitles disabled, video missing, unsupported language, ...) is
+    recorded without trying further proxies, and the video is skipped on later runs.
+    Temporary failures (proxy / network / rate limit) are flagged with ``ERROR_TEMPORARY``, are
+    retried with the other proxies in the same run, and are retried again on later runs
+    (even with ``skip_if_discarded=True``) until they succeed or fail definitely.
+    """
     # Save videos_ids in a file
     n = len(video_ids)
     if skip_if_exists:
@@ -307,7 +389,9 @@ def scrape_transcriptions(
     print(f"Got {len(video_ids)} new video ids / {n}")
 
     for vid in tqdm(video_ids):
-        has_been_register_as_failed = False
+        failure_recorded = False
+        is_temporary = False
+        attempted = False
         num_proxies_tried = 0
 
         for proxy in get_proxies_generator(proxies):
@@ -315,6 +399,7 @@ def scrape_transcriptions(
                 break
 
             if check_proxy(proxy):
+                attempted = True
                 if proxy:
                     num_proxies_tried += 1
                     if verbose:
@@ -325,23 +410,30 @@ def scrape_transcriptions(
 
                 # If no transcription is available
                 if not isinstance(transcripts, dict) or not transcripts:
-                    if not has_been_register_as_failed:
-                        register_discarded_id(vid, path, reason=transcripts)
-                        has_been_register_as_failed = True
-                    if isinstance(transcripts, str) and not transcripts.startswith(ERROR_WHEN_NOT_AVAILABLE) and not transcripts.startswith(ERROR_PROXY):
+                    if is_permanent_failure(transcripts):
+                        # Definite unavailability (subtitles disabled, video missing, wrong language, ...):
+                        # record it and do not bother trying other proxies.
+                        reason = transcripts if isinstance(transcripts, str) else f"Video {vid} discarded. No transcript."
+                        if failure_recorded and is_temporary:
+                            # Replace the temporary trace by the definite outcome.
+                            register_discarded_id(vid, path, reason=reason, temporary=False)
+                        elif not failure_recorded:
+                            failure_recorded = record_failure(vid, path, if_lang, reason, temporary=False)
+                        is_temporary = False
                         break
 
-                    # if transcripts.startswith(ERROR_PROXY):
-                    #     # if proxies == "auto":
-                    #     #     CHECKED_PROXIES[proxy] = False
-                    #     # Recheck proxy status
-                    #     check_proxy(proxy, force=True)
-
-                    # Continue trying with other proxies (?) if not a transcription
+                    # Temporary failure (proxy / network): record it once (so an interrupted run keeps a
+                    # trace), flag it as temporary, then keep trying other proxies in this run.
+                    if not failure_recorded:
+                        reason = transcripts if isinstance(transcripts, str) else f"{ERROR_PROXY}: unknown error"
+                        failure_recorded = record_failure(vid, path, if_lang, reason, temporary=True)
+                    is_temporary = True
                     continue
 
-                if not skip_if_exists or has_been_register_as_failed:
-                    unregister_discarded_id(vid, path)
+                # The video is now accepted: drop any stale discarded record (temporary or not),
+                # so that a video never has both subtitles and a discarded entry.
+                unregister_discarded_id(vid, path)
+                is_temporary = False
 
                 if verbose:
                     print(f"Video {vid} accepted. Languages: {', '.join(transcripts.keys())}")
@@ -351,8 +443,8 @@ def scrape_transcriptions(
                     if not os.path.isdir(output_dir):
                         os.makedirs(output_dir)
                     output_file = f"{output_dir}/{vid}.csv"
-                    with open(output_file, "w") as csvfile:
-                        csvwriter = csv.writer(csvfile, delimiter=";")
+                    with open(output_file, "w", encoding="utf8", newline="") as csvfile:
+                        csvwriter = csv.writer(csvfile, delimiter=";", lineterminator="\n")
                         # Add header
                         csvwriter.writerow(["text", "start", "duration"])
                         # Write content
@@ -362,6 +454,15 @@ def scrape_transcriptions(
                     extract_audio_yt(vid, path, skip_if_exists=skip_if_exists, verbose=verbose)
 
                 break
+
+        if not failure_recorded and not attempted:
+            # No proxy could even be used: this is a temporary (proxy / network) problem.
+            record_failure(vid, path, if_lang, f"{ERROR_PROXY}: no usable proxy", temporary=True)
+            is_temporary = True
+
+        if is_temporary and not has_local_transcript(vid, path, if_lang):
+            # A temporary failure must be retried on a later run, even with skip_if_discarded=True.
+            forget_video_id(vid, path)
 
 
 def generate_ngram(n, lan, min_match_count=10000, index_start=None):
