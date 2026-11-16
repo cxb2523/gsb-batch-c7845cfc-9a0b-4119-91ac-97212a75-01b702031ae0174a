@@ -44,6 +44,12 @@ def make_chain(
 
         result = info.result
         chain.append(result)
+
+        # External addresses are probed only once and never followed, so their redirect
+        # target (if any) is not part of the chain.
+        if info.external:
+            break
+
         redirect_url = result.redirect_url()
 
         if redirect_url is None:

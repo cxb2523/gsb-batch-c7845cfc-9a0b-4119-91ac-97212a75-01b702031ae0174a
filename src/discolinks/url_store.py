@@ -9,8 +9,15 @@ from .core import Link, Url
 class UrlInfo:
     result: outcome.Result
     links: Optional[Sequence[Link]]
+    external: bool = False
 
     def link_urls(self) -> frozenset[Url]:
+        # External addresses are only probed once (HEAD, falling back to GET on 405).
+        # Their content is never parsed and redirects they return must not be followed,
+        # so they never yield new URLs to crawl.
+        if self.external:
+            return frozenset()
+
         redirect_url = self.result.redirect_url()
 
         if redirect_url is not None:
@@ -40,6 +47,22 @@ class UrlStore:
         new_urls = info.link_urls() - self.seen_urls
         self.seen_urls.update(new_urls)
         return new_urls
+
+    def add_error(self, url: Url, msg: str) -> None:
+        """
+        Record a URL whose processing raised an unexpected error.
+
+        The URL is settled exactly once, marked as a failed request and never crawled
+        again.
+        """
+
+        if url in self.url_infos:
+            return
+
+        self.add_page(
+            url=url,
+            info=UrlInfo(result=outcome.RequestError(msg=msg), links=None),
+        )
 
     def count(self) -> int:
         return len(self.seen_urls)

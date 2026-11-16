@@ -2,6 +2,7 @@ import asyncio
 import functools
 import logging
 import signal
+import sys
 from typing import Optional
 from urllib.parse import urldefrag, urlparse
 
@@ -92,7 +93,10 @@ async def main_async(
     start_url: Url,
 ):
     requester = Requester(excluder=excluder)
+    # The "site" stays anchored to the URL the user provided: even if the starting page
+    # redirects to another host, that foreign address is external and must not be crawled.
     url = start_url
+    first_urls: frozenset[Url] = frozenset()
 
     while True:
         result = await requester.get(url)
@@ -101,6 +105,7 @@ async def main_async(
             url=url,
             info=UrlInfo(result=result, links=get_links(url=url, result=result)),
         )
+        first_urls = new_urls
 
         if next_url is None:
             break
@@ -110,6 +115,27 @@ async def main_async(
         if next_url not in new_urls:
             logger.error("Detected circular redirects. Aborting.")
             exit(1)
+
+        if next_url.netloc != start_url.netloc:
+            # The starting page redirected to another site. Per the same rule applied to
+            # links found during the crawl, this external address is probed exactly once
+            # (HEAD, falling back to GET on 405) without parsing or recursion. It is
+            # already settled here, so it must not be handed to the workers.
+            external_result = await requester.get(url=next_url, use_head=True)
+
+            if external_result.status_code() == 405:
+                external_result = await requester.get(url=next_url)
+
+            url_store.add_page(
+                url=next_url,
+                info=UrlInfo(
+                    result=external_result,
+                    links=None,
+                    external=True,
+                ),
+            )
+            first_urls = frozenset()
+            break
 
         url = next_url
 
@@ -127,8 +153,8 @@ async def main_async(
         requester=requester,
         url_store=url_store,
         monitor=monitor,
-        start_url=url,
-        first_urls=new_urls,
+        start_url=start_url,
+        first_urls=first_urls,
     )
 
 
@@ -214,15 +240,18 @@ def main(
                 )
             )
 
-            # Cancel main task when interrupted.
-            loop.add_signal_handler(
-                signal.SIGINT,
-                functools.partial(main_task.cancel, msg="SIGINT"),
-            )
-            loop.add_signal_handler(
-                signal.SIGTERM,
-                functools.partial(main_task.cancel, msg="SIGTERM"),
-            )
+            # Cancel main task when interrupted. Event-loop signal handlers are a
+            # POSIX-only feature: the default Windows loop raises NotImplementedError,
+            # so they can only be registered on platforms that support them.
+            if sys.platform != "win32":
+                loop.add_signal_handler(
+                    signal.SIGINT,
+                    functools.partial(main_task.cancel, msg="SIGINT"),
+                )
+                loop.add_signal_handler(
+                    signal.SIGTERM,
+                    functools.partial(main_task.cancel, msg="SIGTERM"),
+                )
 
             # Run main task.
             loop.run_until_complete(main_task)

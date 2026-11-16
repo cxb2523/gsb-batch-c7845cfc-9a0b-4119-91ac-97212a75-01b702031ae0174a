@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from typing import AbstractSet
 
 from .core import Url
@@ -6,6 +7,8 @@ from .link_extractor import get_links
 from .monitor import Monitor
 from .requester import Requester
 from .url_store import UrlInfo, UrlStore
+
+logger = logging.getLogger(__name__)
 
 
 async def investigate_url(
@@ -17,8 +20,10 @@ async def investigate_url(
     """
     Follow HTTP link and return new links if any are found.
 
-    For external websites this only does a `HEAD` to know if the link is broken or not, so
-    no new links are returned.
+    For external websites this only does a `HEAD` to know if the link is broken or not,
+    so no new links are returned. An address reached through a redirect from a page of the
+    starting site is treated like any other external address: it is probed exactly once,
+    its content is never parsed and the crawl does not recurse into it.
     """
 
     if url.netloc != start_url.netloc:
@@ -29,7 +34,7 @@ async def investigate_url(
 
         return url_store.add_page(
             url=url,
-            info=UrlInfo(result=result, links=None),
+            info=UrlInfo(result=result, links=None, external=True),
         )
 
     result = await requester.get(url=url)
@@ -54,12 +59,20 @@ async def work(
         task_url = await queue.get()
         monitor.on_task_start(queued=queue.qsize())
         try:
-            new_urls = await investigate_url(
-                requester=requester,
-                url_store=url_store,
-                start_url=start_url,
-                url=task_url,
-            )
+            try:
+                new_urls = await investigate_url(
+                    requester=requester,
+                    url_store=url_store,
+                    start_url=start_url,
+                    url=task_url,
+                )
+            except Exception as error:
+                # A failure on a single URL must not interrupt the whole crawl: settle it
+                # exactly once as a failed request and keep processing the other URLs.
+                logger.exception("Failed to process %s: %s", task_url, error)
+                url_store.add_error(url=task_url, msg=str(error))
+                new_urls = frozenset()
+
             for url in new_urls:
                 queue.put_nowait(url)
         finally:
