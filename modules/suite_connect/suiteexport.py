@@ -32,6 +32,13 @@ class SuiteExport:
         return dict(items)
 
     def load_to_s3(self):
+        if not self.results:
+            self.logger.info(
+                f'NO DATA: {self.filename}.csv not exported to {self.bucket_name} '
+                f'because there are no results'
+            )
+            return None
+
         filename = f'{self.filename}.csv'
         results = [self.flatten(d) for d in self.results]
         results_header = (col for col in results[0].keys())

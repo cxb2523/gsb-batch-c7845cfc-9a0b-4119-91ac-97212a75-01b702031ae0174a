@@ -9,6 +9,7 @@ from dags_config import Config as config
 from transformation import transform_staged_data
 from custom_operators import (
     NetSuiteToS3Operator,
+    NetSuiteExtractionSettlementOperator,
     S3ToPostgresTransferOperator
 )
 
@@ -49,7 +50,7 @@ def create_dag(
         )
 
         with TaskGroup(group_id='load_netsuite_to_s3_landing') as load_netsuite_to_s3_landing:
-            tasks = [
+            extract_tasks = [
                 NetSuiteToS3Operator(
                     task_id=f'extract_{type}',
                     search_types=config.SUPPORTED_RECORD_TYPES,
@@ -63,6 +64,20 @@ def create_dag(
                     dag=dag
                 ) for i, (type, id, subfilter) in enumerate(subsearches)
             ]
+
+            # Every subquery settles on its own (success / no data / failed).
+            # This node collects those settlements, reports the three-way
+            # outcome, and fails the group when any subquery failed so an
+            # incomplete extraction never advances to Postgres or the lake.
+            settle_extraction = NetSuiteExtractionSettlementOperator(
+                task_id='settle_subqueries',
+                subquery_task_ids=[task.task_id for task in extract_tasks],
+                trigger_rule='all_done',
+                dag=dag
+            )
+
+            for extract_task in extract_tasks:
+                extract_task >> settle_extraction
 
         truncate_postgres_staging = PostgresOperator(
             task_id=f'truncate_postgres_tables',
