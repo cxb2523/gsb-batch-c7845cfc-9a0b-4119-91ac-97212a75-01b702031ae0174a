@@ -1,0 +1,38 @@
+{
+  "generatedAt": "2026-11-15T23:22:48.784Z",
+  "timeoutMs": 10000,
+  "total": 4,
+  "successCount": 3,
+  "failureCount": 1,
+  "results": [
+    {
+      "url": "https://example.com/",
+      "ok": true,
+      "title": "Example Domain",
+      "firstLink": null
+    },
+    {
+      "url": "https://www.iana.org/help/example-domains",
+      "ok": true,
+      "title": "Example Domains",
+      "firstLink": "https://www.iana.org/"
+    },
+    {
+      "url": "https://nodejs.org/en/about/previous-releases",
+      "ok": true,
+      "title": "Node.js — Node.js Releases",
+      "firstLink": "https://nodejs.org/en/about/previous-releases#main"
+    },
+    {
+      "url": "https://example.com/this-page-does-not-exist-404-demo",
+      "ok": false,
+      "reason": "HTTP 状态码异常：404 Not Found"
+    }
+  ],
+  "failures": [
+    {
+      "url": "https://example.com/this-page-does-not-exist-404-demo",
+      "reason": "HTTP 状态码异常：404 Not Found"
+    }
+  ]
+}

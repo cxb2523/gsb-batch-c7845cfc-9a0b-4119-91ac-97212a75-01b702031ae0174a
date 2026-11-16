@@ -1,0 +1,8 @@
+{
+  "pages": [
+    "https://example.com/",
+    "https://www.iana.org/help/example-domains",
+    "https://nodejs.org/en/about/previous-releases",
+    "https://example.com/this-page-does-not-exist-404-demo"
+  ]
+}

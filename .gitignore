@@ -3,6 +3,8 @@
 .DS_Store
 *.log
 dist/
+out/
+.next/
 coverage/
 npm-debug.log*
 node_modules/
