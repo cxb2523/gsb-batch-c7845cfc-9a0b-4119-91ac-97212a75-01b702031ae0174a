@@ -68,24 +68,81 @@ if(_h){
 /* Insert body */
 document.body.innerHTML=_b;
 
-/* FIX4: re-execute scripts sequentially, preserving order */
+/* FIX4: re-execute scripts sequentially, preserving order.
+   External scripts run one at a time; a failure or timeout never blocks
+   the rest of the chain. Every script is accounted for in a settlement
+   report exposed at window.__SCRIPT_LOAD_REPORT__. */
+var _timeoutMs=(typeof window.__SCRIPT_LOAD_TIMEOUT_MS__==='number'&&window.__SCRIPT_LOAD_TIMEOUT_MS__>0)
+  ?window.__SCRIPT_LOAD_TIMEOUT_MS__:8000;
+var _report={timeoutMs:_timeoutMs,complete:false,scripts:[]};
+for(var _ri=0;_ri<vOVheu.length;_ri++){
+  _report.scripts.push({
+    index:_ri,
+    type:vOVheu[_ri][0]?'external':'inline',
+    source:vOVheu[_ri][0]?vOVheu[_ri][1]:'(inline)',
+    status:'pending',
+    reason:null
+  });
+}
+window.__SCRIPT_LOAD_REPORT__=_report;
+var _settleResolve;
+window.__SCRIPT_LOAD_SETTLED__=new Promise(function(_r){_settleResolve=_r;});
+window.getScriptLoadReport=function(){return _report;};
+
 var h3mp3z=0;
+function _finish(){
+  _report.complete=true;
+  _settleResolve(_report);
+  try{document.dispatchEvent(new CustomEvent('scriptload:settled',{detail:_report}));}catch(_e){}
+}
 function _next(){
-  if(h3mp3z>=vOVheu.length) return;
-  var PDOkqI=vOVheu[h3mp3z++];
+  if(h3mp3z>=vOVheu.length){_finish();return;}
+  var _idx=h3mp3z++;
+  var PDOkqI=vOVheu[_idx];
+  var _entry=_report.scripts[_idx];
   var ugW570=document.createElement('script');
   var dvNnBk=PDOkqI[2]||{};
   for(var L5hFVY in dvNnBk){
     try{ ugW570.setAttribute(L5hFVY,dvNnBk[L5hFVY]); }catch(_e){}
   }
   if(PDOkqI[0]){
+    var _settled=false;
+    var _timer=null;
+    var _done=function(_status,_reason){
+      if(_settled) return;
+      _settled=true;
+      if(_timer!==null){clearTimeout(_timer);_timer=null;}
+      _entry.status=_status;
+      _entry.reason=_reason;
+      _next();
+    };
+    ugW570.onload=function(){_done('success',null);};
+    ugW570.onerror=function(){_done('failed','failed to load external script: '+PDOkqI[1]);};
+    _timer=setTimeout(function(){
+      _done('timeout','load timed out after '+_timeoutMs+' ms: '+PDOkqI[1]);
+    },_timeoutMs);
     ugW570.src=PDOkqI[1];
     ugW570.async=false;
-    ugW570.onload=ugW570.onerror=function(){ _next(); };
     document.body.appendChild(ugW570);
   }else{
-    ugW570.textContent=PDOkqI[1];
-    document.body.appendChild(ugW570);
+    var _errMsg=null;
+    var _onErr=function(_ev){
+      _errMsg=(_ev&&_ev.message)?_ev.message:'inline script error';
+    };
+    window.addEventListener('error',_onErr);
+    try{
+      ugW570.textContent=PDOkqI[1];
+      document.body.appendChild(ugW570);
+    }catch(_e){
+      _errMsg=String((_e&&_e.message)||_e);
+    }
+    window.removeEventListener('error',_onErr);
+    if(_errMsg){
+      _entry.status='failed';
+      _entry.reason='inline script error: '+_errMsg;
+    }else{
+      _entry.status='success';
+    }
     _next();
   }
 }
