@@ -132,10 +132,15 @@ async def mass_poller_tick(ctx: Any) -> int:
     try:
         from src.radar.sources.ats_mass_poller import poll_all_mass_slugs
 
-        obs = await poll_all_mass_slugs()
+        obs, summary = await poll_all_mass_slugs()
     except Exception as exc:
         logger.debug(f"Mass ATS poller: {exc}")
         return 0
+    if summary.failures or summary.platform_errors:
+        logger.info(
+            f"Mass ATS poller round: {len(summary.failures)} failed boards "
+            f"(outcomes={summary.outcomes}, platform_errors={summary.platform_errors})"
+        )
     return await publish_urls(ctx, [o.url for o in obs], "mass_poller")
 
 
