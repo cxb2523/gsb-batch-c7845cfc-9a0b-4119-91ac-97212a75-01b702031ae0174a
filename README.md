@@ -47,6 +47,7 @@ Shopee Scraper is a **free and open-source** scraper that gets you **unlimited**
   "shipping": { "is_free_shipping": false, "estimated_delivery_days": 1, "ships_from": "SG" },
   "is_official_shop": true,
   "listed_at": "2026-07-16T09:35:17Z",
+  "shop_status": "ok",
   "shop": {
     "id": 1887840381,
     "name": "Pandora Official Store",
@@ -100,6 +101,7 @@ curl "http://localhost:8000/products/details?product=1887840381.45964140630"
     { "id": 100134, "name": "Material", "value": "Silver" },
     { "id": 100195, "name": "Necklace Length", "value": "Long" }
   ],
+  "shop_status": "ok",
   "shop": {
     "id": 1887840381,
     "name": "Pandora Official Store",
@@ -130,6 +132,25 @@ All 10 endpoints are now live at `http://localhost:8000`.
 | Categories | `/categories/list` | The full category tree with IDs and links |
 
 Every endpoint takes a `country` parameter: `sg`, `my`, `th`, `vn`, `ph`, `id`, `tw`, `br` or `mx`.
+
+### Product Details is product-first
+
+`/products/details` returns the product even when the shop profile cannot be
+read. The product page alone decides the outcome: an unknown product is still
+`404`, and a product page that cannot be fetched is still `500`. Only the shop
+step degrades — the response stays `200`, the product fields are complete, the
+`shop` block keeps `id` and `link` (every other shop field is `null`), and the
+top-level `shop_status` says why:
+
+| `shop_status` | Meaning |
+|---|---|
+| `ok` | Shop profile served in full |
+| `not_found` | The shop does not exist |
+| `unavailable` | Shop lookup was blocked / failed / retries exhausted — retry later |
+
+A degraded shop is not cached, so the next request tries the shop again; a
+successful shop record is cached and reused by both `/products/details` and
+`/shops/details`.
 
 ## 🔍 Exploring Parameters
 

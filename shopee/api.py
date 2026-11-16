@@ -11,8 +11,18 @@ Caching (cache.cached_call, keyed on the validated params):
 Shops are cached under their resolved numeric id: a username is resolved
 through the same record (get_shop_detail accepts either), so a shop reached
 by username and by id share one row after the first lookup.
+
+/products/details is product-first: the product page decides the response
+(unknown product -> 404, page fetch failure -> 500). A failure to read the
+shop profile after that does NOT fail the request — the product fields are
+served as usual, the `shop` block keeps only id and link (every other
+profile field null) and the top-level `shop_status` says why:
+`not_found` (the shop does not exist) or `unavailable` (blocked / transport
+failure / retries exhausted — retryable). `shop_status` is `ok` whenever the
+full shop block was served.
 """
 from cache import cached_call
+from scraper_errors import BadRequest, NotFound, UpstreamError
 from shopee import cache_config as ttl
 from shopee import parsers
 from shopee import refs
@@ -22,6 +32,18 @@ from shopee.fetch import (ShopeeNotFound, fetch_category_tree, fetch_daily_disco
                           fetch_shop_ratings, fetch_shop_vouchers, product_blob)
 from shopee.schemas import (FLASH_SALE_PER_PAGE, OFFICIAL_SHOPS_PER_PAGE, REVIEWS_PER_PAGE,
                             SHOP_CATEGORIES_PER_PAGE)
+
+# The `shop` block of /products/details: the profile fields, in response
+# order. id and link are always served (from the product record); the rest
+# are null when the shop profile could not be read.
+SHOP_BLOCK_FIELDS = (
+    "id", "name", "username", "link", "location", "is_official_shop", "is_shopee_verified",
+    "is_preferred_plus_seller", "rating", "followers_count", "items_count", "response_rate_percent",
+    "last_active_at", "joined_at")
+
+SHOP_STATUS_OK = "ok"
+SHOP_STATUS_NOT_FOUND = "not_found"          # the shop does not exist
+SHOP_STATUS_UNAVAILABLE = "unavailable"      # blocked / transport failure / retries exhausted
 
 FEED_LIMIT = 100   # the most the feed answers in one call (offset > 0 is empty)
 
@@ -129,19 +151,42 @@ def _product_record(country, product):
     return record
 
 
+def _shop_block(country, shop_id, shop=None):
+    """The `shop` slice of a product record: the profile fields when the shop
+    profile is available, otherwise id + link from the product page and null
+    everywhere else."""
+    block = {k: (shop.get(k) if shop else None) for k in SHOP_BLOCK_FIELDS}
+    block["id"] = shop_id
+    block["link"] = refs.shop_link(country, shop_id)
+    return block
+
+
+def _product_shop(country, shop_id):
+    """(shop block, shop_status) for a product's shop. Only this step may
+    degrade: a missing / unreadable shop leaves the product intact."""
+    try:
+        shop = _shop(country, str(shop_id))
+    except NotFound:
+        return _shop_block(country, shop_id), SHOP_STATUS_NOT_FOUND
+    except (BadRequest, UpstreamError):    # block / transport / retries exhausted: nothing to serve
+        return _shop_block(country, shop_id), SHOP_STATUS_UNAVAILABLE
+    return {k: shop.get(k) for k in SHOP_BLOCK_FIELDS}, SHOP_STATUS_OK
+
+
 def product_details(country, product):
     """The server-rendered product copy (title, description, images,
     variations, models, attributes, categories, services, shipping facts)
     plus the shop's profile. Price, stock, sold count, rating and review
-    count are null: Shopee only serves them to logged-in sessions."""
+    count are null: Shopee only serves them to logged-in sessions.
+
+    Product-first: the product page decides the outcome (unknown product ->
+    404, page fetch failure -> 500). A shop profile that cannot be read for
+    any other reason degrades to a partial `shop` block plus `shop_status`
+    (not_found / unavailable) instead of failing the request."""
     record = cached_call("shopee.product", {"country": country, "product": product}, _product_record,
                          ttl.PRODUCT_CACHE)
     record = dict(record)
-    shop = _shop(country, str(record["shop_id"]))
-    record["shop"] = {k: shop.get(k) for k in (
-        "id", "name", "username", "link", "location", "is_official_shop", "is_shopee_verified",
-        "is_preferred_plus_seller", "rating", "followers_count", "items_count", "response_rate_percent",
-        "last_active_at", "joined_at")}
+    record["shop"], record["shop_status"] = _product_shop(country, record["shop_id"])
     return record
 
 
