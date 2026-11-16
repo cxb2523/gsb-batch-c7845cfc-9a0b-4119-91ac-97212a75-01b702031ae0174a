@@ -103,9 +103,14 @@ class EFRDataManager:
 class UniquePatientID:
 
     def assign_patient_id(self, patient_name, all_patients_id):
-        if patient_name in all_patients_id and patient_name is not np.nan:
-            patient_id = all_patients_id[patient_name]
-        else:
-            patient_id = uuid.uuid4()
-            all_patients_id.update({patient_name: patient_id})
+        # A missing/NaN name cannot identify a patient: issue a fresh ID
+        # without registering it, so different anonymous reports are never
+        # merged into the same patient.
+        if patient_name is None or (isinstance(patient_name, float) and np.isnan(patient_name)):
+            return uuid.uuid4()
+        if patient_name in all_patients_id:
+            # Same patient (possibly across several reports/files): reuse ID.
+            return all_patients_id[patient_name]
+        patient_id = uuid.uuid4()
+        all_patients_id[patient_name] = patient_id
         return patient_id

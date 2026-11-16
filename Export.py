@@ -1,3 +1,4 @@
+import os
 import pandas as pd
 import xlsxwriter
 from tqdm import tqdm
@@ -8,11 +9,17 @@ class Export:
         pass
 
     def create_xlsx(self, df, path, sheet_name, all_lengths: dict, has_specific_len):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
         writer = pd.ExcelWriter(path, engine='xlsxwriter')
         df.to_excel(writer, sheet_name=sheet_name, index=False)
         worksheet = writer.sheets[sheet_name]
         columns = df.columns
-        column_widths = [max(df[col].astype(str).map(len).max(), len(col)) for col in columns]
+
+        # Empty DataFrame (e.g. no failures): fall back to the header length.
+        column_widths = [
+            max(df[col].astype(str).map(len).max() if not df.empty else 0, len(col))
+            for col in columns
+        ]
 
         # Define width column in Excel sheet:
         for i, width in enumerate(column_widths):
