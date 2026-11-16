@@ -151,6 +151,36 @@ OrbitPilot would not exist without the open-source pioneers who built the automa
 
 ---
 
+## ⚙️ Local Executor Skeleton (Runnable, Browser-Free)
+
+The repository now ships a **pure-Python executor skeleton** under `orbitpilot/`. It runs a YAML `strategy` sequence (click / read_text / navigate) against an **injectable page adapter** — no browser, no Selenium, no network. The default `StaticPageAdapter` operates only on the local static sample pages in `samples/pages/`; a real browser driver can later be dropped in behind the same `PageAdapter` interface.
+
+### Step outcome semantics
+
+Every step is recorded in the run manifest with its **name, action, status, and reason**:
+
+- **`success`** — the action completed (for `read_text`, the captured text is also recorded and stored under `store_as`).
+- **`skipped`** — the step was deliberately not executed:
+  - a `condition` (`text_match`) did not match the element's text — a mismatch is a *skip*, never a failure;
+  - a `when` expression evaluated to false — the action is never invoked;
+  - a `when` expression references a variable no earlier step has stored yet — the step is skipped with the reason recorded, instead of crashing.
+- **`failed`** — the action itself could not complete (missing selector, missing page, unknown action). **A failed step never aborts the run**: all later executable steps still run, and every result is preserved in the manifest.
+
+### Manifest and completeness
+
+After the run, a human-readable manifest lists each step's status. The run is marked **COMPLETE** only when no step failed — skipped steps do not affect completeness. When failures exist, the run is **INCOMPLETE** but the full list of executed results is kept. Re-running the same configuration against the same pages yields a **structurally identical manifest** (deterministic ordering, no timestamps, no randomness).
+
+### Try it
+
+```bash
+python run_orbit.py samples/orbit.yaml      # prints the manifest; exit 0 if COMPLETE
+python -m unittest discover -s tests -v     # local sample-based tests
+```
+
+The tests in `tests/test_executor.py` cover the happy path, `condition`/`when` skips (including undefined variables), single-step failure isolation, and manifest determinism — all against locally created sample pages.
+
+---
+
 ## 🗣️ Final Word from the Maintainer
 
 > "In the ancient art of navigation, the pilot who trusts only the wind is lost. The pilot who trusts only the compass is stranded. But the pilot who reads both and charts a new course — that pilot *defines* the journey. OrbitPilot is your compass. The wind is yours to command."

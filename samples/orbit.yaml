@@ -1,0 +1,32 @@
+# Sample OrbitPilot configuration.
+# Runs entirely against the local static pages in samples/pages/.
+session:
+  start_page: "home.html"
+
+strategy:
+  - name: "check_lobby_status"
+    action: "click"
+    selector: "#bet_button"
+    condition:
+      type: "text_match"
+      selector: "#status"
+      value: "Available"
+
+  - name: "read_balance"
+    action: "read_text"
+    selector: "#balance"
+    store_as: "balance_text"
+
+  - name: "read_round_state"
+    action: "read_text"
+    selector: "#round_state"
+    store_as: "round_state"
+
+  - name: "cashout_when_open"
+    action: "click"
+    selector: "#cashout_button"
+    when: "round_state == 'Round open'"
+
+  - name: "visit_help"
+    action: "navigate"
+    url: "help.html"
