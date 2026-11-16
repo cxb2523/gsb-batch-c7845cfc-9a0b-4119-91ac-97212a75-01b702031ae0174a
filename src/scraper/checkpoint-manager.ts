@@ -4,6 +4,7 @@ import { createResult, ok, type Result } from 'super-result'
 import { logger } from '../utils/logging/logger.js'
 import { z } from 'zod'
 import { ApiDiagnosticsWriter, zodErrorPaths } from '../utils/logging/api-diagnostics.js'
+import { errorMessageOf } from '../utils/extract-error-message.js'
 
 export interface ConversationMeta {
   id: string
@@ -55,6 +56,7 @@ export class CheckpointManager {
   async setDiscoveredConversations(
     newlyDiscoveredConversations: ConversationMeta[]
   ): Promise<Result<void, Error>> {
+    const previousState = this.cloneState()
     this.currentState.discoveredConversations = newlyDiscoveredConversations.map((newConv) => {
       const existingConversation = this.currentState.discoveredConversations.find(
         (existing) => existing.id === newConv.id
@@ -64,7 +66,16 @@ export class CheckpointManager {
         : newConv
     })
     this.currentState.discoveryPhaseComplete = true
-    return this.saveCheckpoint()
+    const saveResult = this.saveCheckpoint()
+    if (!saveResult.ok) {
+      // Never leave in-memory state ahead of what was persisted: a failed save
+      // must not make a conversation look discovered/processed within this run.
+      this.currentState = previousState
+      logger.warn(
+        `Failed to persist discovered conversations, rolling back in-memory state: ${errorMessageOf(saveResult.error)}`
+      )
+    }
+    return saveResult
   }
 
   isDiscoveryPhaseComplete(): boolean {
@@ -88,6 +99,7 @@ export class CheckpointManager {
     conversationId: string,
     updatedContentHash?: string
   ): Promise<Result<void, Error>> {
+    const previousState = this.cloneState()
     let hasStateChanged = false
 
     const isAlreadyProcessed = this.currentState.processedIds.includes(conversationId)
@@ -109,10 +121,20 @@ export class CheckpointManager {
       }
     }
 
-    if (hasStateChanged) {
-      return this.saveCheckpoint()
+    if (!hasStateChanged) {
+      return ok(undefined)
     }
-    return ok(undefined)
+
+    const saveResult = this.saveCheckpoint()
+    if (!saveResult.ok) {
+      // Roll back so the conversation remains pending in memory as well as on
+      // disk; the worker pool treats this as an unpersisted failure.
+      this.currentState = previousState
+      logger.warn(
+        `Failed to persist processed conversation ${conversationId}, rolling back in-memory state: ${errorMessageOf(saveResult.error)}`
+      )
+    }
+    return saveResult
   }
 
   getProcessingProgress(): ProgressState {
@@ -123,18 +145,45 @@ export class CheckpointManager {
   }
 
   async prepareForUpdateRun(): Promise<Result<void, Error>> {
+    const previousState = this.cloneState()
     this.currentState.processedIds = []
     this.currentState.discoveryPhaseComplete = false
-    return this.saveCheckpoint()
+    const saveResult = this.saveCheckpoint()
+    if (!saveResult.ok) {
+      this.currentState = previousState
+      logger.warn(
+        `Failed to persist update-run preparation, rolling back in-memory state: ${errorMessageOf(saveResult.error)}`
+      )
+    }
+    return saveResult
   }
 
   async resetCheckpoint(): Promise<Result<void, Error>> {
+    const previousState = this.cloneState()
     this.currentState = {
       discoveryPhaseComplete: false,
       discoveredConversations: [],
       processedIds: [],
     }
-    return this.saveCheckpoint()
+    const saveResult = this.saveCheckpoint()
+    if (!saveResult.ok) {
+      this.currentState = previousState
+      logger.warn(
+        `Failed to persist checkpoint reset, rolling back in-memory state: ${errorMessageOf(saveResult.error)}`
+      )
+    }
+    return saveResult
+  }
+
+  /** Deep copy of the checkpoint state so a failed save can roll back cleanly. */
+  private cloneState(): CheckpointData {
+    return {
+      discoveryPhaseComplete: this.currentState.discoveryPhaseComplete,
+      discoveredConversations: this.currentState.discoveredConversations.map((conversation) => ({
+        ...conversation,
+      })),
+      processedIds: [...this.currentState.processedIds],
+    }
   }
 
   private loadCheckpoint(): Result<CheckpointData, Error> {

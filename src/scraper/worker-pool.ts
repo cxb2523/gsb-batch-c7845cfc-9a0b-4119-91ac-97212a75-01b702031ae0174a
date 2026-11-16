@@ -23,6 +23,44 @@ type ContextRefreshErrorInstance = InstanceType<typeof ContextRefreshError>
 const MAX_RETRIES = 2
 const POLLING_INTERVAL_MS = 100
 
+/**
+ * A conversation that could not be completed this run. It is deliberately NOT
+ * marked as processed, so it stays in the checkpoint's pending list and will be
+ * picked up again on the next run.
+ */
+export interface FailedConversation {
+  conversationId: string
+  url: string
+  /** Number of attempts made this run (initial extraction + retries). */
+  attempts: number
+  reason: string
+  cause?: unknown
+}
+
+/**
+ * Verifiable outcome of a single processConversations run. Counters are tracked
+ * by the pool itself instead of being derived from checkpoint state, so a
+ * failed checkpoint save can never make a failed conversation look processed.
+ */
+export interface ProcessingSummary {
+  total: number
+  /** Successfully finished this run (written + already-up-to-date). */
+  processed: number
+  /** Written to disk because the hash was missing or had changed. */
+  written: number
+  /** Skipped because the content hash already matched the checkpoint. */
+  upToDate: number
+  /** Still pending after this run; never counted as processed. */
+  failed: number
+  failedConversations: FailedConversation[]
+  /**
+   * False when at least one checkpoint save failed. The markdown file may exist
+   * on disk in that case, but progress/hash was not persisted, so the affected
+   * conversations must be retried on the next run.
+   */
+  checkpointPersisted: boolean
+}
+
 interface ExtractionWorker {
   id: number
   extractor: ConversationExtractor
@@ -42,6 +80,11 @@ export class WorkerPool {
   private readonly resultFactory = createResult<Error>((error: unknown) =>
     error instanceof Error ? error : new Error(String(error))
   )
+
+  private failedConversations: FailedConversation[] = []
+  private writtenCount = 0
+  private upToDateCount = 0
+  private checkpointSaveFailures = 0
 
   constructor(
     private readonly config: Config,
@@ -70,7 +113,13 @@ export class WorkerPool {
 
   async processConversations(
     conversationsToProcess: ConversationMeta[]
-  ): Promise<Result<void, ContextRefreshErrorInstance>> {
+  ): Promise<Result<ProcessingSummary, ContextRefreshErrorInstance>> {
+    // Reset per-run bookkeeping so the same pool can be invoked more than once.
+    this.failedConversations = []
+    this.writtenCount = 0
+    this.upToDateCount = 0
+    this.checkpointSaveFailures = 0
+
     const queue: QueueItem[] = conversationsToProcess.map((meta) => ({ meta, attempts: 0 }))
     const activeTasks: Promise<Result<void, ContextRefreshErrorInstance>>[] = []
 
@@ -95,12 +144,9 @@ export class WorkerPool {
       }
     }
 
-    const failedCount =
-      conversationsToProcess.length - this.checkpointManager.getProcessingProgress().processed
-    if (failedCount > 0) {
-      logger.warn(`${failedCount} conversation(s) failed and will be retried on next run.`)
-    }
-    return ok(undefined)
+    const summary = this.buildSummary(conversationsToProcess.length)
+    this.logRunOutcome(summary)
+    return ok(summary)
   }
 
   async close(): Promise<void> {
@@ -126,7 +172,7 @@ export class WorkerPool {
         await this.handleFailure(worker, item, queue, extractResult.error)
         return err(new ContextRefreshError('Extraction failed'))
       }
-      await this.handleSuccess(worker, item.meta, extractResult)
+      await this.handleSuccess(worker, item, extractResult.value)
     } finally {
       this.rateLimiter.release()
     }
@@ -135,49 +181,80 @@ export class WorkerPool {
 
   private async handleSuccess(
     worker: ExtractionWorker,
-    meta: ConversationMeta,
-    result: Result<ExtractedConversation, unknown>
+    item: QueueItem,
+    conversation: ExtractedConversation
   ): Promise<void> {
+    const meta = item.meta
     const existingHash = this.checkpointManager.getContentHash(meta.id)
+    const isUpToDate = !!existingHash && existingHash === conversation.contentHash
 
-    if (!result.ok) {
-      errorBus.emitError('Extraction returned error', result.error)
+    if (isUpToDate) {
+      // Content unchanged: skip the disk write entirely, but still record the
+      // conversation as handled for this run.
+      const markResult = await this.checkpointManager.markAsProcessed(meta.id)
+      if (!markResult.ok) {
+        this.handleCheckpointSaveFailure(
+          meta,
+          item.attempts,
+          'mark as processed (up-to-date skip)',
+          markResult.error
+        )
+        return
+      }
+
+      this.upToDateCount++
+      const { processed, total } = this.checkpointManager.getProcessingProgress()
+      const progressLabel = `[${processed}/${total}]`
+      logger.info(
+        `${progressLabel} Up to date: ${safeLog(conversation.title)} (hash match, skipped write)`
+      )
+      worker.extractor.recoverTimeout()
       return
     }
 
-    const conversation = result.value
-
-    if (existingHash && existingHash === conversation.contentHash) {
-      const markResult = await this.checkpointManager.markAsProcessed(meta.id)
-      if (!markResult.ok) errorBus.emitError('Failed to mark as processed', markResult.error)
-      const { processed, total } = this.checkpointManager.getProcessingProgress()
-      const progressLabel = `[${processed}/${total}]`
-      logger.info(`${progressLabel} Up to date: ${safeLog(conversation.title)} (skipped write)`)
-    } else {
-      const writeResult = await this.writeConversationAsMarkdown(result)
-      if (!writeResult.ok) {
-        errorBus.emitError('Failed to write conversation', writeResult.error)
-        return
-      }
-      const markResult = await this.checkpointManager.markAsProcessed(
-        meta.id,
-        conversation.contentHash
+    const writeResult = await this.writeConversationAsMarkdown(conversation)
+    if (!writeResult.ok) {
+      errorBus.emitError('Failed to write conversation', writeResult.error, {
+        conversationId: meta.id,
+        url: meta.url,
+      })
+      this.recordFailure(
+        meta,
+        item.attempts,
+        `Markdown write failed: ${errorMessageOf(writeResult.error)}`,
+        writeResult.error
       )
-      if (!markResult.ok) errorBus.emitError('Failed to mark as processed', markResult.error)
-      const { processed, total } = this.checkpointManager.getProcessingProgress()
-      const progressLabel = `[${processed}/${total}]`
-      logger.info(`${progressLabel} Processed: ${safeLog(conversation.title)}`)
+      return
     }
 
+    // Only persist the content hash after the atomic write has succeeded, so a
+    // crash between the write and this save simply re-writes identical content
+    // on the next run instead of ever skipping a file that does not exist.
+    const markResult = await this.checkpointManager.markAsProcessed(
+      meta.id,
+      conversation.contentHash
+    )
+    if (!markResult.ok) {
+      this.handleCheckpointSaveFailure(
+        meta,
+        item.attempts,
+        'persist content hash after write',
+        markResult.error
+      )
+      return
+    }
+
+    this.writtenCount++
+    const { processed, total } = this.checkpointManager.getProcessingProgress()
+    const progressLabel = `[${processed}/${total}]`
+    logger.info(`${progressLabel} Processed: ${safeLog(conversation.title)}`)
     worker.extractor.recoverTimeout()
   }
 
   private async writeConversationAsMarkdown(
-    conversation: Result<ExtractedConversation, unknown>
+    conversation: ExtractedConversation
   ): Promise<Result<void, ContextRefreshErrorInstance>> {
-    if (!conversation.ok) return err(new ContextRefreshError('Missing conversation'))
-
-    const data = conversation.value as ExtractedConversation
+    const data = conversation
     const outputDir = this.config.exportDir
     const safeSpaceName = slugify(data.spaceName)
     const spaceSpecificDirectory = join(outputDir, safeSpaceName)
@@ -233,11 +310,103 @@ export class WorkerPool {
       return
     }
 
+    // Retries exhausted: leave the conversation unmarked (it stays pending in
+    // the checkpoint) and surface it in the run's failure list.
+    const totalAttempts = item.attempts + 1
     errorBus.emitError(`Failed to process ${item.meta.url} after ${MAX_RETRIES} retries`, error, {
       url: item.meta.url,
-      attempts: item.attempts,
+      attempts: totalAttempts,
       conversationId: item.meta.id,
     })
+    this.recordFailure(
+      item.meta,
+      totalAttempts,
+      `Extraction failed after ${totalAttempts} attempt(s): ${errorMessageOf(error)}`,
+      error
+    )
+  }
+
+  /**
+   * A checkpoint save must never fail silently. Record the persistence error so
+   * the run summary reports the conversation as not persisted (and therefore
+   * still pending), and emit it on the error bus for diagnostics.
+   */
+  private handleCheckpointSaveFailure(
+    meta: ConversationMeta,
+    attempts: number,
+    phase: string,
+    error: unknown
+  ): void {
+    this.checkpointSaveFailures++
+    errorBus.emitError(`Checkpoint save failed while trying to ${phase}`, error, {
+      conversationId: meta.id,
+      url: meta.url,
+    })
+    this.recordFailure(
+      meta,
+      attempts,
+      `Checkpoint not persisted (${phase}): ${errorMessageOf(error)}`,
+      error
+    )
+  }
+
+  private recordFailure(
+    meta: ConversationMeta,
+    attempts: number,
+    reason: string,
+    cause?: unknown
+  ): void {
+    // A conversation can reach here only once at terminal failure, but guard
+    // against duplicates so the printed list stays a 1:1 mapping of pending IDs.
+    if (this.failedConversations.some((failure) => failure.conversationId === meta.id)) return
+    this.failedConversations.push({
+      conversationId: meta.id,
+      url: meta.url,
+      attempts,
+      reason,
+      ...(cause === undefined ? {} : { cause }),
+    })
+  }
+
+  private buildSummary(total: number): ProcessingSummary {
+    const processed = this.writtenCount + this.upToDateCount
+    return {
+      total,
+      processed,
+      written: this.writtenCount,
+      upToDate: this.upToDateCount,
+      failed: this.failedConversations.length,
+      failedConversations: [...this.failedConversations],
+      checkpointPersisted: this.checkpointSaveFailures === 0,
+    }
+  }
+
+  private logRunOutcome(summary: ProcessingSummary): void {
+    if (summary.failed === 0) {
+      logger.info(
+        `Extraction run finished: ${summary.processed}/${summary.total} handled ` +
+          `(${summary.written} written, ${summary.upToDate} already up to date, 0 failed).`
+      )
+      return
+    }
+
+    logger.warn(
+      `Extraction run finished with ${summary.failed} failed conversation(s) ` +
+        `(not counted as processed; they remain pending for the next run):`
+    )
+    for (const failure of summary.failedConversations) {
+      // Each line is independently checkable and always carries ID + URL.
+      logger.warn(
+        `  failed id=${failure.conversationId} url=${failure.url} ` +
+          `attempts=${failure.attempts} reason=${failure.reason}`
+      )
+    }
+
+    if (!summary.checkpointPersisted) {
+      logger.warn(
+        'Checkpoint persistence failed for at least one conversation; its progress was not saved and it will be retried on the next run.'
+      )
+    }
   }
 
   private async refreshContext(): Promise<void> {
