@@ -110,9 +110,15 @@ MARKETS: Dict[str, MarketConfig] = {
 DEFAULT_MARKET = "tw"
 
 
+def normalize(market_code: str | None) -> str:
+    """把外部傳入的市場代碼正規化成已知市場；未知或缺省時回退台灣站。"""
+    code = (market_code or "").strip().lower()
+    return code if code in MARKETS else DEFAULT_MARKET
+
+
 def get(market_code: str) -> MarketConfig:
     """取得市場配置，不存在時 fallback 到台灣"""
-    return MARKETS.get(market_code, MARKETS[DEFAULT_MARKET])
+    return MARKETS.get(normalize(market_code), MARKETS[DEFAULT_MARKET])
 
 
 def search_url(market_code: str, keyword: str) -> str:

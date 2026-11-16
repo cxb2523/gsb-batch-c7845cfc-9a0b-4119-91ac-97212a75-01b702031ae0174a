@@ -7,14 +7,31 @@
 //          頁面執行環境不受 SW 生命週期限制。
 //
 // 流程：
-//   BG  → poll pending_ext → claim → chrome.tabs.create(url#selekt-task-ID)
-//   content.js → 偵測 hash → waitForCards → POST 後端 → sendMessage(CLOSE_TAB)
+//   BG  → poll pending_ext → claim → chrome.tabs.create(url#selekt-task-ID&market=XX)
+//   content.js → 偵測 hash（含 market）→ waitForCards → POST 後端 → sendMessage(CLOSE_TAB)
 //   BG  → 收到 CLOSE_TAB → chrome.tabs.remove
+//
+// ⚠️ market 必須一路傳到頁面：頁面端只看得到域名，若 hash 不帶 market，
+//    content.js 只能靠域名猜測，一旦 Shopee 跳轉/別名域名就會寫錯市場。
 
 const BACKEND     = 'http://localhost:8000/api';
 const POLL_MS     = 3000;
 let _pollTimer    = null;
 let _activePorts  = 0;
+
+// 市場代碼 → Shopee 域名（與後端 markets.py 一致）
+const MARKET_DOMAINS = {
+  tw: 'shopee.tw',     sg: 'shopee.sg',
+  my: 'shopee.com.my', id: 'shopee.co.id',
+  th: 'shopee.co.th',  ph: 'shopee.ph',
+  vn: 'shopee.vn',     br: 'shopee.com.br',
+};
+const DEFAULT_MARKET = 'tw';
+
+function normalizeMarket(code) {
+  const c = String(code || '').trim().toLowerCase();
+  return MARKET_DOMAINS[c] ? c : DEFAULT_MARKET;
+}
 
 // ── Alarm 備援（每分鐘）────────────────────────────────────────────
 chrome.runtime.onInstalled.addListener(() => {
@@ -80,17 +97,14 @@ async function processTask(task) {
     if (!(await r.json()).ok) return;
   } catch { return; }
 
-  console.log(`[SELEKT] ▶ Job#${task.id} "${task.keyword}" market=${task.market||'tw'} — 開啟採集 Tab`);
+  console.log(`[SELEKT] ▶ Job#${task.id} "${task.keyword}" market=${task.market || DEFAULT_MARKET} — 開啟採集 Tab`);
 
-  // 2. 依市場代碼決定域名，開啟對應 Shopee 搜索頁
-  const MARKET_DOMAINS = {
-    tw: 'shopee.tw',     sg: 'shopee.sg',
-    my: 'shopee.com.my', id: 'shopee.co.id',
-    th: 'shopee.co.th',  ph: 'shopee.ph',
-    vn: 'shopee.vn',     br: 'shopee.com.br',
-  };
-  const _domain = MARKET_DOMAINS[task.market || 'tw'] || 'shopee.tw';
-  const url = `https://${_domain}/search?keyword=${encodeURIComponent(task.keyword)}#selekt-task-${task.id}`;
+  // 2. 依市場代碼決定域名，並把 market 寫進 hash 一併傳給頁面
+  //    （hash 不參與請求，不會多發任何 Shopee 請求，也不影響搜索參數）
+  const _market = normalizeMarket(task.market);
+  const _domain = MARKET_DOMAINS[_market];
+  const url = `https://${_domain}/search?keyword=${encodeURIComponent(task.keyword)}`
+            + `#selekt-task-${task.id}&market=${_market}`;
   try {
     await chrome.tabs.create({ url, active: false });
     // ✅ 這裡直接 return，不等待任何事情，SW 可以安心休眠

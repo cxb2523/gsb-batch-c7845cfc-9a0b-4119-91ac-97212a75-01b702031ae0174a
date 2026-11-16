@@ -229,19 +229,52 @@ async def list_markets():
 
 @app.post("/api/collect/from-extension")
 async def collect_from_extension(req: ProductsFromExtension):
-    """接收 Chrome 擴充傳來的商品數據並存入資料庫"""
+    """接收 Chrome 擴充傳來的商品數據並存入資料庫
+
+    市場以「任務自己的 market」為準：頁面端只能按域名猜測，若任務派發到
+    別名域名或被跳轉，猜出來的值可能是錯的，不能讓它覆蓋任務市場。
+    頁面完全沒找到商品卡片時會帶 error 回來，此處結算為 failed，
+    而不是「成功採集 0 件」。
+    """
+    # 任務市場優先；沒有 task_id（手動同步）時才採用請求裡的 market。
+    market = mkt.normalize(req.market)
+
     if req.task_id:
         job_id = req.task_id
-        await db.save_products(job_id, req.keyword, req.products, market=req.market)
-        status = "done" if not req.error else ("done" if req.products else "failed")
+        job = await db.get_job(job_id)
+        if job:
+            job_market = mkt.normalize(job.get("market"))
+            if job_market != market:
+                logger.warning(
+                    f"Task#{job_id} 頁面回報 market={market}，以任務市場 "
+                    f"market={job_market} 為準"
+                )
+            market = job_market
+
+        await db.save_products(job_id, req.keyword, req.products, market=market)
+
+        if req.error and not req.products:
+            status = "failed"
+        elif req.error:
+            status = "done"   # 部分成功：有商品但附帶錯誤訊息
+            logger.warning(f"Task#{job_id} 部分成功，error={req.error}")
+        else:
+            status = "done" if req.products else "failed"
+
         await db.update_job(job_id, status, total=len(req.products))
-        logger.info(f"from-extension Task#{job_id} {status} {len(req.products)} 件 market={req.market}")
+        log_level = logger.warning if status == "failed" else logger.info
+        log_level(
+            f"from-extension Task#{job_id} {status} {len(req.products)} 件 "
+            f"market={market}" + (f" error={req.error}" if req.error else "")
+        )
     else:
-        job_id = await db.create_job(req.keyword, market=req.market)
+        job_id = await db.create_job(req.keyword, market=market)
         await db.update_job(job_id, "running")
-        await db.save_products(job_id, req.keyword, req.products)
-        await db.update_job(job_id, "done", total=len(req.products))
-    return {"job_id": job_id, "saved": len(req.products)}
+        await db.save_products(job_id, req.keyword, req.products, market=market)
+        status = "done" if req.products else "failed"
+        await db.update_job(job_id, status, total=len(req.products))
+    return {"job_id": job_id, "saved": len(req.products), "market": market,
+            "status": status}
 
 
 # ── 商品查詢 ──────────────────────────────────────────────────────────

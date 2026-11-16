@@ -59,6 +59,7 @@ async def init_db():
             verdict     TEXT,
             href        TEXT,
             image       TEXT,
+            market      TEXT    NOT NULL DEFAULT 'tw',
             saved_at    REAL    NOT NULL
         );
 
@@ -77,6 +78,13 @@ async def init_db():
         CREATE INDEX IF NOT EXISTS idx_products_kw     ON products(keyword);
         CREATE INDEX IF NOT EXISTS idx_products_score  ON products(score DESC);
         """)
+        # 舊庫遷移：favorites 早期沒有 market 欄位（收藏跨市場時幣種會顯示錯）
+        cur = await db.execute("PRAGMA table_info(favorites)")
+        fav_cols = {row[1] for row in await cur.fetchall()}
+        if "market" not in fav_cols:
+            await db.execute(
+                "ALTER TABLE favorites ADD COLUMN market TEXT NOT NULL DEFAULT 'tw'"
+            )
         await db.commit()
 
 
@@ -181,6 +189,13 @@ async def get_jobs(limit=20):
 
 # ── Products ────────────────────────────────────────────────────────
 async def save_products(job_id: int, keyword: str, products: list, market: str = "tw"):
+    """寫入商品。
+
+    price / sales 允許 NULL：擴充端解析不到本地幣種價格或銷量時會省略該欄位，
+    這裡必須如實存 NULL，不能替換成 0 —— 0 是合法價格／銷量，無法區分「真的 0」
+    與「沒解析到」，後續看板與匯入都會把 0 元當成廣告垃圾或 0 銷量商品。
+    market 以任務市場為準：產品自帶的 market 只在任務未指定時使用。
+    """
     async with aiosqlite.connect(DB_PATH) as db:
         now = time.time()
         await db.executemany(
@@ -190,12 +205,12 @@ async def save_products(job_id: int, keyword: str, products: list, market: str =
                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             [(
                 job_id, keyword,
-                p.get("name",""), p.get("price",0), p.get("sales",0),
+                p.get("name",""), p.get("price"), p.get("sales"),
                 p.get("rating",0), p.get("ratingCount") or p.get("rating_count",0),
                 p.get("score",0), p.get("verdict",""),
                 json.dumps(p.get("notes",[]), ensure_ascii=False),
                 p.get("image",""), p.get("href",""), now,
-                p.get("market", market)
+                market
             ) for p in products]
         )
         await db.commit()
@@ -280,11 +295,11 @@ async def add_favorite(product_id: int):
         row = dict(row)
         await db.execute(
             """INSERT OR IGNORE INTO favorites
-               (product_id,keyword,name,price,sales,rating,score,verdict,href,image,saved_at)
-               VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+               (product_id,keyword,name,price,sales,rating,score,verdict,href,image,market,saved_at)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
             (product_id, row["keyword"], row["name"], row["price"],
              row["sales"], row["rating"], row["score"], row["verdict"],
-             row["href"], row["image"], time.time())
+             row["href"], row["image"], row["market"], time.time())
         )
         await db.commit()
         return row

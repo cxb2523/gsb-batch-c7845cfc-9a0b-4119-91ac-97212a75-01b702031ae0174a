@@ -154,10 +154,13 @@ shopee-analyzer/
 │   │   └── requirements.txt
 │   └── shopee-collector/         采集扩展（MV3）
 │       ├── manifest.json
-│       ├── background.js         Service Worker：轮询 → 认领 → 开 Tab
+│       ├── market.js             市场 / 币种 / 数字惯例解析
+│       ├── background.js         Service Worker：轮询 → 认领 → 开 Tab（带 market）
 │       ├── content.js            DOM 采集 + 打分 + 回传
 │       ├── relay.js              端口保活，防止 SW 休眠
 │       └── popup/
+│
+├── selekt/tests/                 验收测试（node --test + pytest）
 │
 ├── .github/workflows/            Pylint
 └── README.md
@@ -177,6 +180,26 @@ shopee-analyzer/
 | 前端看板 | 原生 HTML/CSS/JS + Chart.js | 7 页单文件 SPA |
 | 数据格式 | CSV / XLSX / SQLite | 兼容 Excel / WPS |
 | 授权 | HMAC-SHA256 密钥 | 3 天试用 + 正式密钥 |
+
+---
+
+### 验收测试
+
+市场传递与价格解析的测试都在 `selekt/tests/`：
+
+```bash
+# 扩展端：市场识别、币种解析、派发 URL（零依赖）
+node --test selekt/tests/market.test.js
+
+# 扩展端：页面级 DOM 采集（需要 jsdom）
+cd selekt/tests && npm i jsdom --no-save && cd ../..
+node --test selekt/tests/content.test.js     # 未安装 jsdom 时自动跳过
+
+# 采集后端：market 以任务为准、缺失价格存 NULL、无卡片结算失败
+cd selekt && python -m pytest tests/test_from_extension.py -q
+```
+
+覆盖场景：8 个市场的本地币种价格（含印尼盾）、缺价条目的字段缺失标记、无卡片时任务失败、任务市场不被页面推断覆盖、接口价格 ÷100000 还原规则不变。
 
 ---
 
@@ -205,8 +228,8 @@ python license.py key <install_id> [有效天数]
 
 诚实列出，避免误用：
 
-1. **自动化采集目前只能跑台湾站。** 采集端 `pending-tasks` 已返回任务的 `market`，但派发端（`background.js`）尚未把 market 写进 URL，因此自动采集一律走 `shopee.tw`。手动采集的弹窗也只放行 `shopee.tw`。
-2. **扩展端的价格解析对部分市场失效。** `selekt/shopee-collector/content.js` 的价格正则匹配美元符号，印尼（Rp）、泰国（฿）、越南（₫）取不到价格；且它的价格分段写死为台湾区间，与后端 `markets.price_score()` 不一致。**多市场采集请优先用 `extension/`（Shopee Scout）。**
+1. **自动采集仍依赖页面 DOM。** 派发端会把任务的 `market` 写进地址 hash（`#selekt-task-{id}&market={code}`）并按市场打开对应域名；页面端优先采用传入市场，缺失时按域名推断，最后回退台湾站。后端 `from-extension` 以**任务自身的 market** 为准，不会被页面推断覆盖。若手动在弹窗里采集，则按当前域名判断市场（8 个站点均支持）。
+2. **扩展端价格按市场识别币种符号。** `selekt/shopee-collector/market.js` 支持 Rp / ฿ / ₫ / RM / ₱ / $ / NT$ / S$ / R$ 及各地千位/小数惯例，价格分段与后端 `markets.price_score()` 的 `price_tiers` 对齐。**解析不出价格的商品会标为字段缺失**（`price: null` + `missing: ["price"]` + 备注），不会静默写 0；分析端导入时单独统计为「价格缺失」而非广告垃圾。页面完全没有商品卡片时回传 `error`，任务结算为 `failed` 而非成功 0 件。
 3. **分析端的部分数据是演示值。** `dashboard/ai_insight`、`dashboard/ticker`、`competitors/summary`、`competitors/price_distribution`、`trend/*`、`radar/*` 均为硬编码 mock，尚未接入真实数据源。采集端 `shopee-backend` 的数据是真实的。
 4. **两个 SQLite 库不随仓库分发**（已在 `selekt/.gitignore` 中忽略），首次启动自动建表。
 5. **部署脚本是 Unix-only**，Windows 需按子目录 README 手动启动。
@@ -366,6 +389,26 @@ shopee-analyzer/
 
 ---
 
+### Acceptance tests
+
+Market plumbing and price-parsing tests live in `selekt/tests/`:
+
+```bash
+# Extension: market detection, currency parsing, dispatch URLs (no deps)
+node --test selekt/tests/market.test.js
+
+# Extension: page-level DOM capture (needs jsdom)
+cd selekt/tests && npm i jsdom --no-save && cd ../..
+node --test selekt/tests/content.test.js     # skipped automatically without jsdom
+
+# Capture backend: job market wins, missing price stored as NULL, no cards → failed
+cd selekt && python -m pytest tests/test_from_extension.py -q
+```
+
+Covers: local currency prices across 8 markets (incl. Indonesian rupiah), missing-field marking, jobs failing when a page has no cards, the job market never being overwritten by a page-side guess, and the unchanged ÷100000 API price scale.
+
+---
+
 ### SELEKT licensing
 
 `selekt/license.py` contains **no hard-coded secret**. It reads from the environment:
@@ -391,8 +434,8 @@ Licence data lives in `~/.selekt/`.
 
 Listed honestly so nothing gets misused:
 
-1. **Automated collection currently only works on the Taiwan site.** The capture backend's `pending-tasks` endpoint does return each job's `market`, but the dispatcher (`background.js`) does not yet write it into the URL, so automated runs always hit `shopee.tw`. The manual popup is also gated to `shopee.tw`.
-2. **The extension's price parsing fails on some markets.** The price regex in `selekt/shopee-collector/content.js` keys on the dollar sign, so Indonesia (Rp), Thailand (฿) and Vietnam (₫) yield no price; its price tiers are also hard-coded to Taiwan ranges and diverge from the backend's `markets.price_score()`. **For multi-market capture, prefer `extension/` (Shopee Scout).**
+1. **Automated collection still relies on page DOM.** The dispatcher writes each job's `market` into the URL hash (`#selekt-task-{id}&market={code}`) and opens the matching domain; the page prefers the passed-in market, falls back to hostname detection, then to the Taiwan site. The backend's `from-extension` endpoint always uses **the job's own market**, so a wrong page-side guess can never overwrite it. Manual captures from the popup detect the market from the current domain (all 8 sites supported).
+2. **The extension parses each market's local currency symbol.** `selekt/shopee-collector/market.js` handles Rp / ฿ / ₫ / RM / ₱ / $ / NT$ / S$ / R$ plus local thousands/decimal conventions, and its price tiers match the backend's `markets.price_score()` `price_tiers`. **Products whose price can't be parsed are flagged as missing fields** (`price: null` + `missing: ["price"]` + a note) rather than silently written as 0; the analysis-side importer counts them separately instead of lumping them with ad/badge junk. When a page has no product cards at all, the extension reports an `error` and the job settles as `failed` instead of "0 products, success".
 3. **Some analysis-side data is demo data.** `dashboard/ai_insight`, `dashboard/ticker`, `competitors/summary`, `competitors/price_distribution`, `trend/*` and `radar/*` are hard-coded mocks and not yet wired to real sources. Everything from the capture backend (`shopee-backend`) is real.
 4. **The two SQLite databases are not shipped** (ignored in `selekt/.gitignore`); tables are created on first run.
 5. **Deploy scripts are Unix-only**; on Windows start the services manually per the sub-directory READMEs.

@@ -1816,6 +1816,7 @@ async function importFromShopee(jobId){
     const parts = [];
     if(r.skipped) parts.push(`${r.skipped} 件已導入過`);
     if(r.junk)    parts.push(`${r.junk} 件為廣告/優惠角標已自動過濾`);
+    if(r.missing_price) parts.push(`${r.missing_price} 件價格缺失已跳過`);
     const suffix = parts.length ? `（${parts.join('，')}）` : '';
     if(r.imported > 0){
       toast(`✅ 已導入 ${r.imported} 件商品到分析資料庫${suffix}`,'ok');

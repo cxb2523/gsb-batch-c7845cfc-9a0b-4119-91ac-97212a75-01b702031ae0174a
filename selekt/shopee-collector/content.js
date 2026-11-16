@@ -9,45 +9,95 @@
 
   const _BACKEND = 'http://localhost:8000/api';
 
+  // ════════════════════════════════════════════════════════════════
+  // ██  市場解析（共用 market.js：域名 / 幣種符號 / 數字慣例 / 價格分段）
+  // ════════════════════════════════════════════════════════════════
+  // market.js 由 manifest.json 先行載入，掛在 window.SelektMarket。
+  const M = window.SelektMarket;
+  if (!M) {
+    console.error('[SELEKT] market.js 未載入，無法識別市場與價格，中止採集');
+    return;
+  }
+  const {
+    DEFAULT_MARKET,
+    normalizeMarketCode,
+    getMarketProfile,
+    resolveMarket,
+    parsePriceForMarket,
+    parseSalesForMarket,
+    parseRatingForMarket,
+  } = M;
+
+
+  // ── 商品卡片選擇器（waitForCards / 滾動累積共用）───────────────
+  const CARD_SELECTORS = [
+    'li.shopee-search-item-result__item',
+    'div[data-sqe="item"]',
+    'div.col-xs-2-4.shopee-search-item-result__item',
+    'li[class*="col-xs"]',
+  ];
+
+  function findCardElements() {
+    let best = null;
+    for (const sel of CARD_SELECTORS) {
+      const els = document.querySelectorAll(sel);
+      if (els.length > 2) return els;
+      if (els.length && (!best || els.length > best.length)) best = els;
+    }
+    if (best) return best;
+    const fallback = document.querySelectorAll('a[href*="/product/"]');
+    return fallback.length ? fallback : null;
+  }
+
   // ── 等待商品卡片（CSR 頁面非同步渲染）────────────────────────────
+  // 3 張以上視為渲染完成；只有 1–2 張時給 800ms 寬限，
+  // 寬限後仍只有少量卡片就照實回傳，避免小結果集被誤判為「無卡片」。
   function waitForCards(timeout = 12000) {
     return new Promise((resolve) => {
-      const SELECTORS = [
-        'li.shopee-search-item-result__item',
-        'div[data-sqe="item"]',
-        'div.col-xs-2-4.shopee-search-item-result__item',
-        'li[class*="col-xs"]',
-      ];
+      let done = false;
+      let observer = null;
+      let graceTimer = null;
 
-      function findCards() {
-        for (const sel of SELECTORS) {
-          const els = document.querySelectorAll(sel);
-          if (els.length > 2) return els;   // 至少 3 個才算真正渲染完成
-        }
-        const fallback = document.querySelectorAll('a[href*="/product/"]');
-        return fallback.length > 2 ? fallback : null;
+      function finish(cards) {
+        if (done) return;
+        done = true;
+        if (observer) observer.disconnect();
+        if (graceTimer) clearTimeout(graceTimer);
+        resolve(cards && cards.length ? cards : null);
       }
 
-      const existing = findCards();
-      if (existing) { resolve(existing); return; }
+      function armGrace() {
+        if (graceTimer || done) return;
+        graceTimer = setTimeout(() => finish(findCardElements()), 800);
+      }
+
+      const existing = findCardElements();
+      if (existing && existing.length > 2) { resolve(existing); return; }
+      if (existing) armGrace();
 
       const deadline = Date.now() + timeout;
-      const observer = new MutationObserver(() => {
-        const cards = findCards();
-        if (cards) { observer.disconnect(); resolve(cards); }
-        else if (Date.now() > deadline) { observer.disconnect(); resolve(null); }
+      observer = new MutationObserver(() => {
+        const cards = findCardElements();
+        if (cards && cards.length > 2) finish(cards);
+        else if (cards) armGrace();
+        if (Date.now() > deadline) finish(cards);
       });
-      observer.observe(document.body, { childList: true, subtree: true });
-      setTimeout(() => { observer.disconnect(); resolve(findCards()); }, timeout);
+      if (document.body) observer.observe(document.body, { childList: true, subtree: true });
+      setTimeout(() => finish(findCardElements()), timeout);
     });
   }
 
   // ── 選品打分 ─────────────────────────────────────────────────────
-  function scoreProduct(product) {
+  // 價格分段依市場讀取（與後端 markets.py 的 price_tiers 對齊）；
+  // 缺價 / 缺銷量時不計該維度分數並標註，而不是當成 0 元、0 銷量商品打分。
+  function scoreProduct(product, market) {
     let score = 0;
     const notes = [];
-    const sales = product.sales || 0;
-    if (sales >= 1000)     { score += 15; }
+
+    const salesMissing = product.sales == null;
+    const sales = salesMissing ? 0 : product.sales;
+    if (salesMissing)      {              notes.push('⚠ 銷量缺失，未計入銷量評分'); }
+    else if (sales >= 1000) { score += 15; }
     else if (sales >= 500) { score += 12; notes.push('銷量中等'); }
     else if (sales >= 100) { score += 8;  notes.push('銷量偏低'); }
     else if (sales >= 10)  { score += 4;  notes.push('銷量很低'); }
@@ -66,12 +116,14 @@
     score += hasVariant ? 10 : 5;
     if (!hasVariant) notes.push('建議增加組合規格');
 
-    const price = product.price || 0;
-    if (price >= 150 && price <= 499)      { score += 15; }
-    else if (price >= 99 && price < 150)   { score += 10; notes.push('低價區間競爭較激烈'); }
-    else if (price >= 500 && price <= 999) { score += 12; }
-    else if (price < 99)                   { score += 3;  notes.push('超低價紅海，利潤風險高'); }
-    else                                   { score += 8;  notes.push('高價品需強視覺支撐'); }
+    const [low, midLow, mid, high] = getMarketProfile(market).priceTiers;
+    const price = product.price;
+    if (price == null)                          { notes.push('⚠ 價格缺失，未計入價格評分'); }
+    else if (price >= midLow && price <= mid)   { score += 15; }
+    else if (price >= low && price < midLow)    { score += 10; notes.push('低價區間競爭較激烈'); }
+    else if (price > mid && price <= high)      { score += 12; }
+    else if (price < low)                       { score += 3;  notes.push('超低價紅海，利潤風險高'); }
+    else                                        { score += 8;  notes.push('高價品需強視覺支撐'); }
 
     score += 10;
     notes.push('圖片品質請人工確認');
@@ -107,9 +159,11 @@
   // ── DOM 解析 ─────────────────────────────────────────────────────
   // Shopee PC 商城用 Tailwind 動態 class，無法靠 class 名稱穩定定位欄位，
   // 改用：① 卡片 [role="group"][aria-label="Product card: 商品名"] 取真實商品名
-  //       ② 正則掃描卡片全文字找「$價格」「已售N」「評分(數量)」
-  function parseCards(cards) {
+  //       ② 依市場識別幣種符號與數字慣例，正則掃描卡片全文字
+  // 解析不到的欄位保留 null 並列入 missing，不以 0 冒充正常數據。
+  function parseCards(cards, market) {
     const results = [];
+    const marketCode = normalizeMarketCode(market) || DEFAULT_MARKET;
 
     cards.forEach((card, idx) => {
       try {
@@ -126,51 +180,89 @@
             '[data-sqe="name"]', '.Cve6sh', '._1NoI8_',
             'div[class*="name"]', 'span[class*="name"]', 'div[class*="ellipsis"]',
           ]);
-          name = nameEl ? nameEl.textContent.trim() : '';
+          if (nameEl) name = nameEl.textContent.trim();
+        }
+        if (!name) {
+          // 再退一層：任意帶 aria-label / title 的元素、圖片 alt
+          const labelled = card.querySelector('[aria-label]:not([aria-label=""])');
+          if (labelled) {
+            name = (labelled.getAttribute('aria-label') || '')
+              .replace(/^Product card:\s*/i, '')
+              .trim();
+          }
+          if (!name) {
+            const imgEl = card.querySelector('img[alt]');
+            if (imgEl) name = (imgEl.getAttribute('alt') || '').trim();
+          }
+          if (!name) {
+            const titled = card.querySelector('[title]:not([title=""])');
+            if (titled) name = (titled.getAttribute('title') || '').trim();
+          }
+        }
+
+        // ② 卡片全文字（壓縮多餘空白），依市場抓價格/銷量/評分
+        //    DOM 的 textContent 會把相鄰區塊直接拼在一起
+        //    （"Terjual 10" + "4,5 (8)" → "Terjual 104,5 (8)"），
+        //    所以先摘出評分片段，再用剩下的文字解析價格與銷量。
+        const text = (card.textContent || '').replace(/\s+/g, ' ').trim();
+        const ratingInfo = parseRatingForMarket(text, marketCode);
+        const rest = ratingInfo.matched ? text.replace(ratingInfo.matched, ' ') : text;
+
+        // 商品名最後兜底：取卡片內第一個「像商品名」的葉節點文字
+        // （只看無子元素的節點，避免把「名稱 + 價格 + 銷量」的整塊容器當成商品名；
+        //   再排除純價格 / 純銷量 / 純評分 / 純數字）
+        if (!name) {
+          const candidates = card.querySelectorAll('div, span, p, h3, h4, a, img');
+          for (const el of candidates) {
+            if (el.children && el.children.length) continue;   // 只取葉節點
+            let t = '';
+            if (el.tagName === 'IMG') {
+              t = (el.getAttribute('alt') || '').trim();
+            } else {
+              t = (el.textContent || '').replace(/\s+/g, ' ').trim();
+            }
+            if (t.length < 3 || t.length > 200) continue;
+            if (!/[A-Za-zÀ-ɏ一-鿿฀-๿Ā-ỹ]/.test(t)) continue;
+            if (/^[\d.,\s%+-]+$/.test(t)) continue;
+            if (/^[0-5][.,]\d$/.test(t)) continue;                      // 純評分
+            if (parsePriceForMarket(t, marketCode) != null) continue;   // 純價格
+            if (parseSalesForMarket(t, marketCode) != null) continue;   // 純銷量
+            name = t;
+            break;
+          }
         }
         if (!name) return;
 
-        // ② 卡片全文字（壓縮多餘空白），用正則抓價格/銷量/評分
-        const text = (card.textContent || '').replace(/\s+/g, ' ').trim();
+        const price = parsePriceForMarket(rest, marketCode);          // null = 解析不出
+        const sales = parseSalesForMarket(rest, marketCode);          // null = 解析不出
+        const { rating, ratingCount } = ratingInfo;
 
-        let price = 0;
-        const priceM = text.match(/\$\s?([\d,]+(?:\.\d+)?)/);
-        if (priceM) price = parseFloat(priceM[1].replace(/,/g, '')) || 0;
-
-        let sales = 0;
-        const salesM = text.match(/已售[出]?\s*([\d.,]+)\s*([kK萬万]?)/);
-        if (salesM) {
-          sales = parseFloat(salesM[1].replace(/,/g, '')) || 0;
-          const unit = (salesM[2] || '').toLowerCase();
-          if (unit === 'k') sales *= 1000;
-          if (unit === '萬' || unit === '万') sales *= 10000;
-          sales = Math.round(sales);
-        }
-
-        // 評分常見呈現："4.8" 或 "4.8(1.2k)"／"4.8 (123)"
-        let rating = 0, ratingCount = 0;
-        const ratingM = text.match(/([0-5]\.\d)\s*\(\s*([\d.,]+)\s*([kK萬万]?)\s*\)/);
-        if (ratingM) {
-          rating = parseFloat(ratingM[1]) || 0;
-          let rc = parseFloat(ratingM[2].replace(/,/g, '')) || 0;
-          const unit = (ratingM[3] || '').toLowerCase();
-          if (unit === 'k') rc *= 1000;
-          if (unit === '萬' || unit === '万') rc *= 10000;
-          ratingCount = Math.round(rc);
-        }
-
-        const linkEl = card.closest('a[href*="shopee."]') || card.querySelector('a[href*="shopee."]') || card.querySelector('a');
+        const linkEl = card.closest('a[href*="/product/"]')
+                    || card.closest('a[href*="shopee."]')
+                    || card.querySelector('a[href*="shopee."]')
+                    || card.querySelector('a[href]')
+                    || card.querySelector('a');
         const imgEl  = card.querySelector('img');
-        const href  = linkEl ? (linkEl.href || '') : '';
+        const href  = linkEl ? (linkEl.href || linkEl.getAttribute('href') || '') : '';
         const image = imgEl  ? (imgEl.src || imgEl.dataset.src || '') : '';
 
+        const missing = [];
+        if (price == null) missing.push('price');
+        if (sales == null) missing.push('sales');
+
         if (!_debugLogged && idx < 3) {
-          console.log('[SELEKT][DEBUG]', JSON.stringify({ name, price, sales, rating, ratingCount, text: text.slice(0, 200) }));
+          console.log('[SELEKT][DEBUG]', JSON.stringify({
+            market: marketCode, name, price, sales, rating, ratingCount, missing,
+            text: text.slice(0, 200),
+          }));
           if (idx === 2) _debugLogged = true;
         }
 
-        const product = { idx: idx + 1, name, price, sales, rating, ratingCount, href, image };
-        results.push({ ...product, ...scoreProduct(product) });
+        const product = {
+          idx: idx + 1, name, price, sales, rating, ratingCount,
+          href, image, market: marketCode, missing,
+        };
+        results.push({ ...product, ...scoreProduct(product, marketCode) });
       } catch (_) {}
     });
 
@@ -180,29 +272,16 @@
   // ════════════════════════════════════════════════════════════════
   // ██  後端採集模式（自主執行，不依賴 BG 的長時 await）
   // ════════════════════════════════════════════════════════════════
-  // BG 開啟此 Tab 時會在 URL hash 加入 #selekt-task-{id}
+  // BG 開啟此 Tab 時會在 URL hash 加入 #selekt-task-{id}&market={market}
   // content.js 偵測到後，自行完成：等待 → 解析 → POST 後端 → 通知 BG 關閉
   const _taskMatch = location.hash.match(/#selekt-task-(\d+)/);
   if (_taskMatch) {
     const _taskId  = parseInt(_taskMatch[1]);
     const _keyword = new URLSearchParams(location.search).get('keyword') || '';
-    // 從 hash 讀取市場代碼（BG 傳入），fallback 依域名偵測
-    const _hashMarket = location.hash.match(/market=([a-z]+)/)?.[1];
-    const _domainMarket = (() => {
-      const h = location.hostname;
-      if (h.endsWith('shopee.tw'))      return 'tw';
-      if (h.endsWith('shopee.sg'))      return 'sg';
-      if (h.endsWith('shopee.com.my'))  return 'my';
-      if (h.endsWith('shopee.co.id'))   return 'id';
-      if (h.endsWith('shopee.co.th'))   return 'th';
-      if (h.endsWith('shopee.ph'))      return 'ph';
-      if (h.endsWith('shopee.vn'))      return 'vn';
-      if (h.endsWith('shopee.com.br'))  return 'br';
-      return 'tw';
-    })();
-    const _market = _hashMarket || _domainMarket;
+    // 市場優先級：派發端傳入 → 域名推斷 → 台灣站（與手動模式共用 resolveMarket）
+    const _market = resolveMarket(location.hash, location.hostname);
 
-    console.log(`[SELEKT] 自主採集模式 Task#${_taskId} 關鍵字: ${_keyword}`);
+    console.log(`[SELEKT] 自主採集模式 Task#${_taskId} 關鍵字: ${_keyword} market=${_market}`);
 
     (async () => {
       let products = [];
@@ -213,33 +292,20 @@
         const cards = await waitForCards(12000);
 
         if (!cards || cards.length === 0) {
+          // 沒有任何商品卡片 → 回傳 error，讓任務結算為 failed（而非成功 0 件）
           error = 'no_cards_found';
-          console.warn(`[SELEKT] Task#${_taskId} 未找到商品卡片`);
+          console.warn(`[SELEKT] Task#${_taskId} 未找到商品卡片，任務將標記為失敗`);
         } else {
           // 滾動觸發 Shopee 無限滾動懶加載 + 每一步都立刻解析並累積
           // （Shopee 列表為虛擬滾動，滾走的卡片會被卸載，
           //  若只在最後查一次 DOM，最上面那批商品早就被卸載、抓不到）
           console.log(`[SELEKT] Task#${_taskId} 開始分段滾動加載更多商品...`);
 
-          const _SELECTORS = [
-            'li.shopee-search-item-result__item',
-            'div[data-sqe="item"]',
-            'div.col-xs-2-4.shopee-search-item-result__item',
-            'li[class*="col-xs"]',
-          ];
-          function queryAllCards() {
-            for (const sel of _SELECTORS) {
-              const els = document.querySelectorAll(sel);
-              if (els.length > 2) return els;
-            }
-            return null;
-          }
-
           const _seen = new Map(); // key: href || name+price，跨多次滾動去重
           function collectCurrentBatch() {
-            const els = queryAllCards() || cards;
-            for (const p of parseCards(els)) {
-              const key = p.href || `${p.name}__${p.price}`;
+            const els = findCardElements() || cards;
+            for (const p of parseCards(els, _market)) {
+              const key = p.href || `${p.name}__${p.price == null ? 'na' : p.price}`;
               if (!_seen.has(key)) _seen.set(key, p);
             }
           }
@@ -260,6 +326,11 @@
 
           products = Array.from(_seen.values());
           console.log(`[SELEKT] Task#${_taskId} 滾動後解析完成 ${products.length} 件`);
+
+          if (products.length === 0) {
+            // 卡片存在但全部解析失敗（例如卡片裡連商品名都取不到）
+            error = 'no_products_parsed';
+          }
         }
 
         // 直接 POST 後端（content script 有 localhost:8000 權限）
@@ -272,7 +343,7 @@
         if (!resp.ok) {
           console.error(`[SELEKT] Task#${_taskId} 回傳後端失敗 HTTP ${resp.status}`);
         } else {
-          console.log(`[SELEKT] Task#${_taskId} ✅ 完成，共 ${products.length} 件`);
+          console.log(`[SELEKT] Task#${_taskId} ✅ 完成，共 ${products.length} 件 market=${_market}`);
         }
       } catch (e) {
         console.error(`[SELEKT] Task#${_taskId} 例外錯誤`, e);
@@ -304,14 +375,15 @@
     if (msg.action === 'COLLECT') {
       (async () => {
         try {
+          const market = resolveMarket(location.hash, location.hostname);
           const cards = await waitForCards(8000);
           if (!cards || cards.length === 0) {
-            sendResponse({ ok: false, products: [], count: 0,
+            sendResponse({ ok: false, products: [], count: 0, market,
               error: '找不到商品卡片，請確認已在 Shopee 搜索結果頁' });
             return;
           }
-          const products = parseCards(cards);
-          sendResponse({ ok: true, products, url: location.href, count: products.length });
+          const products = parseCards(cards, market);
+          sendResponse({ ok: true, products, market, url: location.href, count: products.length });
         } catch (e) {
           sendResponse({ ok: false, products: [], count: 0, error: String(e) });
         }

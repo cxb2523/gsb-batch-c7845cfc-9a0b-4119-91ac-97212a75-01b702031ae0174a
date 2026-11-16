@@ -83,8 +83,9 @@ python license.py key <install_id> [有效天数]      # 生成密钥，省略�
 | 看板空白 / API 全部失败 | 确认 8002 已启动：`curl http://localhost:8002/api/health`（采集端）或 `http://localhost:8002/` |
 | 导入商品报 502 | 8000 未启动。导入需要两个后端**同时**运行 |
 | 扩展同步失败 | `curl http://localhost:8000/api/health` 应返回 `{"status":"ok"}` |
-| 扩展采集 0 件 | Shopee 页面结构可能已更新，检查 `content.js` 的选择器 |
-| 自动采集一直跑台湾站 | 已知限制，见根目录 README「已知限制」第 1 条 |
+| 扩展采集 0 件 | Shopee 页面结构可能已更新，检查 `content.js` 的选择器；页面无商品卡片时任务会直接结算为 `failed`（回传 `error=no_cards_found`） |
+| 自动采集跑错站点 | 派发端按任务 `market` 选域名并写入 `#selekt-task-{id}&market={code}`；后端以任务市场为准。若仍不符，检查 `background.js` 的 `MARKET_DOMAINS` 与浏览器是否拦截了跳转 |
+| 价格显示「價格缺失」 | 该商品卡片里没有可识别的本地币种价格（如广告位/角标卡片），已如实标为字段缺失而不是 0；可按需在 `content.js` 补选择器 |
 | 直接双击 index.html 打不开数据 | `file://` 的 Origin 是 `null`，不在 CORS 白名单。改用 `http://localhost:8002/ui`，或设 `SELEKT_ALLOWED_ORIGINS="null"` |
 
 ---

@@ -463,7 +463,7 @@ def import_from_shopee(body: ImportFromShopee = ImportFromShopee()):
         raise HTTPException(502, f"無法連接採集後端（埠 8000）：{e}")
 
     items = data.get("products", [])
-    imported, skipped, junk = 0, 0, 0
+    imported, skipped, junk, missing_price = 0, 0, 0, 0
 
     with get_conn() as c:
         for p in items:
@@ -478,7 +478,13 @@ def import_from_shopee(body: ImportFromShopee = ImportFromShopee()):
 
             name     = (p.get("name") or "未命名商品").strip()
             category = (p.get("keyword") or "未分類").strip() or "未分類"
-            price    = p.get("price") or 0
+            price    = p.get("price")
+
+            # 採集端解析不到本地幣種價格時 price 為 null（不是 0）：
+            # 這是「字段缺失」，單獨計數，不能混進廣告/優惠角標的 junk。
+            if price is None or price == "":
+                missing_price += 1
+                continue
 
             # 真正的商品必有售價；price<=0 多為廣告/優惠角標等誤抓資料，跳過不導入
             if price <= 0:
@@ -507,7 +513,8 @@ def import_from_shopee(body: ImportFromShopee = ImportFromShopee()):
             )
             imported += 1
 
-    return {"imported": imported, "skipped": skipped, "junk": junk, "total": len(items)}
+    return {"imported": imported, "skipped": skipped, "junk": junk,
+            "missing_price": missing_price, "total": len(items)}
 
 
 @app.post("/api/v1/import/cleanup-junk",

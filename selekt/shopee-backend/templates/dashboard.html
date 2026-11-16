@@ -376,6 +376,25 @@ const API = 'http://localhost:8000/api';
 let allProds = [];
 let charts = {};
 
+// 市場 → 幣種符號（與後端 markets.py 一致），用於價格顯示
+const MARKET_SYMS = {
+  tw: 'NT$', sg: 'S$', my: 'RM', id: 'Rp',
+  th: '฿', ph: '₱', vn: '₫', br: 'R$',
+};
+
+// 價格顯示：null = 擴充端沒解析到價格，如實顯示「價格缺失」而非 0
+function fmtPrice(p) {
+  if (p.price === null || p.price === undefined) return '價格缺失';
+  const sym = MARKET_SYMS[p.market] || 'NT$';
+  return `${sym}${p.price}`;
+}
+
+// 銷量顯示：null = 沒解析到
+function fmtSalesCell(p) {
+  if (p.sales === null || p.sales === undefined) return '銷量缺失';
+  return fmtSales(p.sales);
+}
+
 // ── Navigation ────────────────────────────────────────────────────
 function nav(page) {
   document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
@@ -483,8 +502,8 @@ function filterProducts() {
           </div>
         </div>
       </td>
-      <td>NT$${p.price||'—'}</td>
-      <td>${fmtSales(p.sales)}</td>
+      <td>${fmtPrice(p)}</td>
+      <td>${fmtSalesCell(p)}</td>
       <td>${p.rating ? '⭐ '+p.rating : '—'}</td>
       <td>
         <div class="score-inline">
@@ -524,8 +543,8 @@ async function loadFavorites() {
           <div style="font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:160px" title="${esc(f.name)}">${esc(f.name)}</div>
         </div>
       </td>
-      <td>NT$${f.price||'—'}</td>
-      <td>${fmtSales(f.sales)}</td>
+      <td>${f.price == null ? '價格缺失' : fmtPrice(f)}</td>
+      <td>${f.sales == null ? '銷量缺失' : fmtSales(f.sales)}</td>
       <td>${f.rating ? '⭐ '+f.rating : '—'}</td>
       <td><span class="badge ${verdictClass(f.verdict)}">${f.verdict}</span></td>
       <td>
@@ -677,9 +696,11 @@ function exportCSV() {
     (!kw || p.name.toLowerCase().includes(kw)) &&
     (!vd || p.verdict === vd) && p.score >= sc);
 
-  const headers = ['ID','商品名稱','售價(NT$)','銷量','評分','選品分','評級','連結'];
+  const headers = ['ID','商品名稱','售價(當地幣)','幣種','銷量','評分','選品分','評級','連結'];
   const rows = data.map(p => [p.id, `"${p.name.replace(/"/g,'""')}"`,
-    p.price||0, p.sales||0, p.rating||0, p.score, p.verdict, p.href||'']);
+    p.price == null ? '' : p.price,
+    (MARKET_SYMS[p.market] || 'NT$').replace('$','') || p.market,
+    p.sales == null ? '' : p.sales, p.rating||0, p.score, p.verdict, p.href||'']);
   const csv = '\uFEFF' + [headers,...rows].map(r=>r.join(',')).join('\n');
   const a = document.createElement('a');
   a.href = URL.createObjectURL(new Blob([csv],{type:'text/csv;charset=utf-8;'}));

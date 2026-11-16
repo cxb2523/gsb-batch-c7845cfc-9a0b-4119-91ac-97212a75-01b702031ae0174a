@@ -1,10 +1,38 @@
 // Shopee 選品採集工具 - Popup Script
 'use strict';
 
-// ── 狀態 ────────────────────────────────────────────────────────────
+// ── 市場輔助（market.js 由 popup.html 先行載入）─────────────────────
+const M = window.SelektMarket || null;
+const DEFAULT_MARKET = M ? M.DEFAULT_MARKET : 'tw';
+
+// 商品價格顯示：解析不到價格（null）時顯示「價格缺失」，不顯示 0
+// 優先採用商品自身市場（收藏可能來自別的市場），再退回當前頁面市場
+function priceText(p, market) {
+  const mkt = (p && M && M.normalizeMarketCode(p.market)) || market;
+  const sym = M ? M.getMarketSymbol(mkt) : 'NT$';
+  if (p.price == null) return '價格缺失';
+  return `${sym}${p.price}`;
+}
+
+function salesText(p) {
+  if (p.sales == null) return '銷量缺失';
+  return `${formatSales(p.sales)} 件售出`;
+}
+
 let allProducts = [];
 let savedProducts = [];
 let currentTab = 'collect';
+// popup 自身不是 Shopee 頁面，市場在 checkPage() 依 active tab 域名決定
+let activeMarket = DEFAULT_MARKET;
+
+const MARKET_LABELS = {
+  tw: '台灣', sg: '新加坡', my: '馬來西亞', id: '印尼',
+  th: '泰國', ph: '菲律賓', vn: '越南', br: '巴西',
+};
+
+function marketLabel(code) {
+  return MARKET_LABELS[code] || MARKET_LABELS[DEFAULT_MARKET];
+}
 
 // ── 初始化 ──────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', async () => {
@@ -24,12 +52,17 @@ async function checkPage() {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     if (!tab || !tab.url) throw new Error('no tab');
 
-    if (!tab.url.includes('shopee.tw')) {
+    // 支援全部 8 個市場域名（不再只放行 shopee.tw）
+    let tabHost = '';
+    try { tabHost = new URL(tab.url).hostname; } catch (_) { /* ignore */ }
+    const market = M ? M.detectMarketFromHostname(tabHost) : null;
+    if (!market) {
       dot.className  = 'status-dot error';
-      text.innerHTML = '請先前往 <strong>shopee.tw</strong> 搜索頁';
+      text.innerHTML = '請先前往 <strong>Shopee 搜索頁</strong>（支援 8 個市場）';
       btn.disabled   = true;
       return;
     }
+    activeMarket = market;
 
     // Bug Fix #4：從 URL query params 正確取得搜索關鍵字，而非路徑片段
     let displayName = 'Shopee';
@@ -46,13 +79,14 @@ async function checkPage() {
     try {
       await chrome.tabs.sendMessage(tab.id, { action: 'PING' });
       dot.className  = 'status-dot ready';
-      text.innerHTML = '已就緒 · <strong>' + esc(displayName) + '</strong>';
+      text.innerHTML = `已就緒 · <strong>${esc(displayName)}</strong> · ${marketLabel(market)}`;
       btn.disabled   = false;
     } catch {
-      // Content script not injected yet – inject manually
+      // Content script not injected yet – inject manually（market.js 需先載入）
+      await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['market.js'] });
       await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['content.js'] });
       dot.className  = 'status-dot ready';
-      text.innerHTML = '已就緒 · 點擊按鈕開始採集';
+      text.innerHTML = `已就緒 · 點擊按鈕開始採集 · ${marketLabel(market)}`;
       btn.disabled   = false;
     }
   } catch (e) {
@@ -76,9 +110,14 @@ async function collect() {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     const resp  = await chrome.tabs.sendMessage(tab.id, { action: 'COLLECT' });
 
-    if (!resp || !resp.ok) throw new Error('collect failed');
+    if (!resp || !resp.ok) {
+      // content.js 会回传具体原因（例如没有商品卡片），如实呈现给用户
+      throw new Error((resp && resp.error) || 'collect failed');
+    }
 
     allProducts = resp.products || [];
+    // content.js 回传它实际使用的市场；缺失时保留 checkPage() 已探测到的市场
+    activeMarket = (M && M.normalizeMarketCode(resp.market)) || activeMarket;
 
     dot.className  = 'status-dot ready';
     text.innerHTML = `採集完成 · 共 <strong>${allProducts.length}</strong> 件商品`;
@@ -93,7 +132,10 @@ async function collect() {
     switchTab('results');
   } catch (e) {
     dot.className  = 'status-dot error';
-    text.innerHTML = '採集失敗，請重新整理 Shopee 頁面後再試';
+    const reason = (e && e.message && e.message !== 'collect failed')
+      ? esc(e.message)
+      : '採集失敗，請重新整理 Shopee 頁面後再試';
+    text.innerHTML = reason;
     btn.disabled   = false;
   }
 }
@@ -130,8 +172,8 @@ function renderResults(products) {
         <div class="product-info">
           <div class="product-name" title="${esc(p.name)}">${esc(p.name)}</div>
           <div class="product-stats">
-            <div class="stat">💰 <span>NT$${p.price || '—'}</span></div>
-            <div class="stat">📦 <span>${formatSales(p.sales)}</span> 件售出</div>
+            <div class="stat">💰 <span>${esc(priceText(p, activeMarket))}</span></div>
+            <div class="stat">📦 <span>${esc(salesText(p))}</span></div>
             ${p.rating ? `<div class="stat">⭐ <span>${p.rating}</span></div>` : ''}
           </div>
         </div>
@@ -180,8 +222,8 @@ function renderSaved() {
         <div class="product-info">
           <div class="product-name" title="${esc(p.name)}">${esc(p.name)}</div>
           <div class="product-stats">
-            <div class="stat">💰 <span>NT$${p.price || '—'}</span></div>
-            <div class="stat">📦 <span>${formatSales(p.sales)}</span> 件售出</div>
+            <div class="stat">💰 <span>${esc(priceText(p, activeMarket))}</span></div>
+            <div class="stat">📦 <span>${esc(salesText(p))}</span></div>
             ${p.rating ? `<div class="stat">⭐ <span>${p.rating}</span></div>` : ''}
           </div>
         </div>
@@ -271,18 +313,22 @@ function applyFilters() {
 function exportCSV() {
   if (!allProducts.length) return;
 
-  const headers = ['排名', '商品名稱', '售價(NT$)', '銷量', '評分', '總分', '評級', '備註', '連結'];
+  // 價格欄位如實輸出：解析不到就留空（不是 0），並在表頭標明幣種
+  // 同一次採集可能混入不同市場商品，幣種欄逐列輸出
+  const headers = ['排名', '商品名稱', '售價', '幣種', '銷量', '評分', '總分', '評級', '備註', '連結', '缺失欄位'];
   const rows = allProducts.map((p, i) => [
     i + 1,
     `"${(p.name || '').replace(/"/g, '""')}"`,
-    p.price || 0,
-    p.sales || 0,
+    p.price == null ? '' : p.price,
+    (M ? M.getMarketSymbol(p.market || activeMarket) : 'NT$').replace('$', '') || (p.market || activeMarket),
+    p.sales == null ? '' : p.sales,
     p.rating || 0,
     p.score,
     p.verdict,
     `"${(p.notes || []).join(' | ').replace(/"/g, '""')}"`,
     // Bug Fix #7：href 也加引號保護，避免 URL 中的逗號破壞 CSV 格式
     `"${(p.href || '').replace(/"/g, '""')}"`,
+    `"${(p.missing || []).join('|')}"`,
   ]);
 
   const csv = [headers, ...rows].map(r => r.join(',')).join('\n');
@@ -412,7 +458,7 @@ async function syncToBackend() {
     const resp = await fetch(`${BACKEND}/collect/from-extension`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ keyword: kw, products: allProducts })
+      body: JSON.stringify({ keyword: kw, products: allProducts, market: activeMarket })
     });
     const data = await resp.json();
     btn.textContent = `✅ 已同步 ${data.saved} 件`;
