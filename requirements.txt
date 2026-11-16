@@ -1,8 +1,12 @@
 beautifulsoup4
 langchain
+langchain-text-splitters
+langchain-core
 langchain-ollama
 langchain-chroma
 chromadb
 ollama
 streamlit
 lxml
+requests
+pytest

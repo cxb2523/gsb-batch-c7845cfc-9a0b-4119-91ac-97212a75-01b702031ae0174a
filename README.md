@@ -54,6 +54,40 @@ Once you have OllamaRAG running, you can start interacting with your AI assistan
 
 3. **Iterate**: Refine your questions for better responses. You can ask follow-up questions to dig deeper.
 
+### 📥 在页面中采集站点
+
+聊天页顶部的「站点采集」面板提供了完整的采集入口，不再需要先手动运行 `scrape.py`：
+
+1. 点击 **开始采集**：从 `config.py` 的 `START_URL` 出发，只抓取同域链接，最多 200 页，
+   跳过 `.pdf` / `.jpg` / `.png` / `.zip` / `.svg` 等资源，单页请求超时 10 秒。
+2. 采集过程中实时显示 **已访问页数** 与 **当前 URL**，可随时点击 **停止采集**；
+   停止后已抓到的页面会保留。
+3. 点击 **继续采集** 会从断点继续：已访问集合、待访问队列和成功/失败清单都会延续，
+   已抓过的页面不会重复抓取或重复计数。
+4. 一轮采集结束（自然完成或用户停止）后，成功页会按 `ingest.py` 读取的 JSON 列表格式
+   写入 `SCRAPED_DATA_PATH`，页面显示成功数、失败数、总访问数，并逐条列出失败页的
+   URL 与原因。
+5. 若 `START_URL` 不可达或整轮没有任何成功页，页面会明确提示，并且不会覆盖已有的
+   `SCRAPED_DATA_PATH` 文件。
+6. 采集结束后可在同一页面点击 **将抓取结果入库到向量库** 执行入库；入库异常会在页面上
+   显示具体原因。
+
+命令行方式仍然可用：
+
+```bash
+python scrape.py   # 采集站点内容
+python ingest.py   # 写入向量库
+```
+
+### ✅ 运行测试
+
+```bash
+python -m pytest tests/ -q
+```
+
+测试使用本地伪造的 HTTP 响应与临时文件，不依赖真实外网。
+
+
 ## 📚 Additional Resources
 
 For further assistance and detailed documentation, feel free to check these resources:
