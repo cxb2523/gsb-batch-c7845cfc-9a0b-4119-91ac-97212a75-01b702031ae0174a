@@ -346,6 +346,63 @@
         "write": false
       },
       "native": {}
+    },
+    {
+      "_id": "status",
+      "type": "channel",
+      "common": {
+        "role": "",
+        "name": ""
+      },
+      "native": {}
+    },
+    {
+      "_id": "status.jetzt",
+      "type": "state",
+      "common": {
+        "name": "tvspielfilm Status Jetzt",
+        "desc": "Abrechnung des letzten Sammellaufs fuer den Jetzt-Feed (Erfolg/Fehlergrund)",
+        "type": "string",
+        "read": true,
+        "write": false
+      },
+      "native": {}
+    },
+    {
+      "_id": "status.heute2015",
+      "type": "state",
+      "common": {
+        "name": "tvspielfilm Status 20:15 Uhr",
+        "desc": "Abrechnung des letzten Sammellaufs fuer den 20:15-Uhr-Feed (Erfolg/Fehlergrund)",
+        "type": "string",
+        "read": true,
+        "write": false
+      },
+      "native": {}
+    },
+    {
+      "_id": "status.heute2200",
+      "type": "state",
+      "common": {
+        "name": "tvspielfilm Status 22:00 Uhr",
+        "desc": "Abrechnung des letzten Sammellaufs fuer den 22:00-Uhr-Feed (Erfolg/Fehlergrund)",
+        "type": "string",
+        "read": true,
+        "write": false
+      },
+      "native": {}
+    },
+    {
+      "_id": "status.filme",
+      "type": "state",
+      "common": {
+        "name": "tvspielfilm Status Filme",
+        "desc": "Abrechnung des letzten Sammellaufs fuer den Filme-Feed (Erfolg/Fehlergrund)",
+        "type": "string",
+        "read": true,
+        "write": false
+      },
+      "native": {}
     }
   ]
 }

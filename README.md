@@ -21,6 +21,11 @@ NodeJS v16 oder höher wird vorausgesetzt.
 -->
 
 ### **WORK IN PROGRESS**
+- Feeds are now fetched one after another instead of all at once; each feed is settled independently
+- A failed feed (request error, non-200 status, XML parse error or structural anomaly) no longer overwrites its existing `json.*` / `json.raw.*` states, so the last valid program guide is kept
+- New per-feed status states (`status.jetzt`, `status.heute2015`, `status.heute2200`, `status.filme`) record success/failure reason, HTTP status, item counts and anomalies of the last run
+- Entries missing a title or description are skipped and counted as anomalies instead of breaking the whole feed
+- Empty search term lists no longer produce any matches; regex special characters in search terms are treated literally
 - (copilot) Adapter requires node.js >= 22 now
 - (iobroker-bot) Adapter requires node.js >= 20 now.
 - (copilot) Adapter requires admin >= 7.7.22 now
