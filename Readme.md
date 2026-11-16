@@ -88,6 +88,7 @@
   - [Added in v2](#️-added-in-v2)
   - [`generate(options)`](#️-generateoptions)
   - [`headers(ua?)`](#-headersua)
+  - [`createSession(count, options?)`](#-createsessioncount-options)
 
 </td>
 <td valign="top" width="50%">
@@ -319,6 +320,7 @@ These kept their v1 names and signatures, so upgrading does not require code cha
 | `random()` | Any family, weighted by the dataset |
 | `generate(options?)` | A UA matching the given constraints |
 | `headers(ua?)` | Request header object containing `User-Agent` |
+| `createSession(count, options?)` | A session that rotates `count` distinct UAs round by round |
 
 ### 🎛️ `generate(options)`
 
@@ -358,6 +360,42 @@ headers();
 > 🛡️ `headers()` **validates the UA** it is given. Strings containing CR, LF or other control
 > characters, empty strings, and strings longer than 512 characters throw `TypeError`.
 > Rejection is deliberate: silently stripping a CRLF would hide a header‑injection attempt.
+
+### 🔁 `createSession(count, options?)`
+
+A scraping session rotates a fixed pool of **distinct** user agents round by round. Within one
+round every `next()` call returns a UA that has not been handed out yet; once the pool is
+exhausted the cursor wraps and a new round starts. Dispensing is synchronous, so concurrent
+callers each receive a UA not yet used in the current round — a UA is never repeated inside a
+round, and no round is skipped.
+
+```js
+import { createSession } from 'user-agents-generator';
+
+const session = createSession(5, { browser: 'chrome' });
+
+session.next();      // first distinct Chrome UA
+session.next();      // a different Chrome UA
+session.current();   // the UA last handed out, without advancing the cursor
+session.headers();   // ready-to-use request headers for the current UA
+// ...after 5 calls the pool is exhausted and round 2 replays it in order
+
+session.size;        // 5  — distinct UAs per round
+session.round;       // 1-based round currently being dispensed
+session.index;       // 0-based cursor position of the next next() call
+```
+
+> 💡 **Notes**
+>
+> - `count` must be a safe integer `>= 1`; anything else throws `TypeError`.
+> - `options` accepts the same `browser` / `os` / `device` constraints as
+>   [`generate()`](#-generateoptions), with identical semantics (a Safari UA never carries a
+>   Chromium token, caller strings are regex‑escaped, and so on).
+> - Constraints that cannot fill the whole pool **degrade to unconstrained draws** instead of
+>   throwing. The session stays usable; `size` reflects the pool actually built.
+> - `session.headers(ua?)` reuses the shared header validation: CR/LF, control characters, empty
+>   strings and UAs longer than 512 characters throw `TypeError`. An explicit argument is
+>   validated but does not change the rotation state.
 
 ---
 

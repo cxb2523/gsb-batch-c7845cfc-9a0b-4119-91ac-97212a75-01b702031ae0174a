@@ -60,6 +60,55 @@ export declare function generate(options?: GenerateOptions): string;
  */
 export declare function headers(userAgent?: string): Record<string, string>;
 
+/**
+ * A rotation session created by {@link createSession}.
+ *
+ * The session owns a fixed pool of distinct UA strings. `next()` walks the
+ * pool in order and wraps to a new round once every UA has been handed out
+ * once, so the same UA is never repeated within a round. Dispensing is
+ * synchronous, so concurrent callers each receive a UA not yet handed out in
+ * the current round.
+ */
+export interface UserAgentSession {
+  /**
+   * Hand out the next UA and advance the round cursor.
+   * Wraps to a new round after the last pool UA.
+   */
+  next(): string;
+  /** The UA most recently handed out by `next()` without advancing the cursor. */
+  current(): string;
+  /**
+   * Request headers for the current UA, or for an explicit validated UA.
+   * An explicit argument does not change the rotation state.
+   * @throws {TypeError} when `userAgent` contains CR, LF, control characters,
+   * is empty, or exceeds 512 characters.
+   */
+  headers(userAgent?: string): Record<string, string>;
+  /** Number of distinct UAs in one round. */
+  readonly size: number;
+  /** 1-based number of the round currently being dispensed. */
+  readonly round: number;
+  /** 0-based position of the next `next()` call inside a round. */
+  readonly index: number;
+}
+
+/**
+ * Create a session that rotates `count` distinct UAs per round.
+ *
+ * Constraints use the same semantics as {@link generate}. When they cannot be
+ * satisfied for the whole pool, the session degrades to unconstrained draws
+ * instead of throwing and remains usable.
+ *
+ * @param count desired number of distinct UAs per round; a safe integer >= 1.
+ * @param options optional browser/os/device constraints.
+ * @throws {TypeError} when `count` is not a safe integer >= 1, or `options`
+ * is not an object.
+ */
+export declare function createSession(
+  count: number,
+  options?: GenerateOptions,
+): UserAgentSession;
+
 export interface UserAgentsGenerator {
   chrome: typeof chrome;
   firefox: typeof firefox;
@@ -71,6 +120,7 @@ export interface UserAgentsGenerator {
   random: typeof random;
   generate: typeof generate;
   headers: typeof headers;
+  createSession: typeof createSession;
 }
 
 declare const api: UserAgentsGenerator;

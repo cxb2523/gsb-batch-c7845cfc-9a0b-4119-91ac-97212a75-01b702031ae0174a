@@ -3,6 +3,30 @@
 All notable changes to this project are documented here. This project follows
 [Semantic Versioning](https://semver.org/).
 
+## [2.1.0] - 2026-11-16
+
+Backward-compatible feature release.
+
+### Added
+
+- `createSession(count, options?)` returning a rotation session for scraping workloads. The
+  session owns a fixed pool of distinct UA strings: `next()` walks the pool in order and wraps
+  to a new round once it is exhausted, so the same UA is never repeated within a round.
+  Dispensing is synchronous state mutation, which makes concurrent `next()` calls atomic — each
+  caller receives a UA not yet handed out in the current round and rounds are never skipped.
+- Session members: `next()`, `current()`, `headers(ua?)`, and read-only `size`, `round` and
+  `index` introspection.
+- Session constraints (`browser`, `os`, `device`) reuse `generate()` semantics exactly,
+  including the Safari/Chromium family filters. Unsatisfiable constraints degrade to
+  unconstrained draws instead of throwing, and the session remains usable.
+- `session.headers(ua?)` reuses the shared header validation: CR/LF, control characters, empty
+  strings and UAs longer than 512 characters throw `TypeError`.
+- ESM named/default export and TypeScript declarations (`UserAgentSession`) for the new factory;
+  both module systems still point at the single CommonJS implementation.
+- `node:test` coverage (18 new tests) for ordered rotation, round wrap, constraint honouring,
+  unsatisfiable-constraint degradation, concurrent no-duplicate dispensing and header-injection
+  rejection.
+
 ## [2.0.0] - 2026-11-14
 
 First maintained release since 1.0.2. Major because the runtime requirement, the UA source and

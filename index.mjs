@@ -17,4 +17,5 @@ export const {
   random,
   generate,
   headers,
+  createSession,
 } = api;

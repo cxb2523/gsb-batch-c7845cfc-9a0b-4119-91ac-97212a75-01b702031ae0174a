@@ -1,7 +1,7 @@
 /*
  * @title user-agents-generator
  * @desc Generate realistic user agent strings for browsers and mobile devices.
- * @version 2.0.0
+ * @version 2.1.0
  * @license MIT
  */
 
@@ -249,6 +249,135 @@ function headers(value) {
   };
 }
 
+/**
+ * Upper bound on the number of draws used while filling one session pool.
+ * `generate()` degrades to an unconstrained draw on its own, so this only
+ * bounds how long we keep deduplicating; it can never make the pool empty.
+ */
+const SESSION_DRAW_BUDGET = 2000;
+
+/**
+ * Build the round pool for a session: distinct UAs drawn under `constraints`
+ * first, then (per the no-throw degradation contract) unconstrained draws for
+ * whatever the constrained set could not supply.
+ *
+ * Reusing `generate()` keeps the constraint semantics identical to the rest
+ * of the API: family filters (e.g. Safari never carrying a Chromium token),
+ * OS/device matching, literal regex escaping and the empty-result degradation
+ * all live in one place.
+ *
+ * @param {number} count requested pool size
+ * @param {object} constraints browser/os/device options, already validated
+ * @returns {string[]} one or more distinct UA strings
+ */
+function buildSessionPool(count, constraints) {
+  const hasConstraints =
+    typeof constraints.browser === 'string' ||
+    typeof constraints.os === 'string' ||
+    typeof constraints.device === 'string';
+  const pool = [];
+  const seen = new Set();
+
+  const collect = (options) => {
+    let draws = 0;
+    while (pool.length < count && draws < SESSION_DRAW_BUDGET) {
+      const candidate = generate(options);
+      draws += 1;
+      if (!seen.has(candidate)) {
+        seen.add(candidate);
+        pool.push(candidate);
+      }
+    }
+  };
+
+  if (hasConstraints) collect(constraints);
+  // Unsatisfiable or partially satisfiable constraints degrade silently:
+  // the remainder of the pool comes from unconstrained draws, and the
+  // session stays usable instead of throwing.
+  if (pool.length < count) collect({});
+  return pool;
+}
+
+/**
+ * Create a scraping session that rotates a fixed pool of distinct UAs round
+ * by round. Within a round every `next()` call hands out a UA that has not
+ * been handed out in that round yet; once the pool is exhausted the cursor
+ * wraps to the start and a new round begins.
+ *
+ * Dispensing is synchronous state mutation on a single event loop, so
+ * concurrent callers are served atomically: no UA can be handed out twice in
+ * the same round, and no round can be skipped while UAs remain in it.
+ *
+ * @param {number} count desired number of distinct UAs per round (>= 1)
+ * @param {{ browser?: string, os?: string, device?: string }} [options]
+ * @returns {UserAgentSession}
+ */
+function createSession(count, options) {
+  if (typeof count !== 'number' || !Number.isSafeInteger(count) || count < 1) {
+    throw new TypeError('createSession(count, options) expects count to be a safe integer >= 1');
+  }
+  assertOptions(options);
+  const opts = options || {};
+
+  const pool = buildSessionPool(count, opts);
+  let cursor = 0;
+  let round = 1;
+  let currentValue = pool[0];
+
+  return {
+    /**
+     * Hand out the next UA, advancing the round cursor. Wraps to a new round
+     * once every pool UA has been handed out once.
+     * @returns {string}
+     */
+    next() {
+      const value = pool[cursor];
+      currentValue = value;
+      cursor += 1;
+      if (cursor === pool.length) {
+        cursor = 0;
+        round += 1;
+      }
+      return value;
+    },
+
+    /**
+     * The UA most recently handed out by `next()` (or the first pool UA
+     * before `next()` has run). Does not advance the cursor.
+     * @returns {string}
+     */
+    current() {
+      return currentValue;
+    },
+
+    /**
+     * Turn a UA into a ready-to-use request header map, reusing the shared
+     * header validation. Defaults to the session's current UA; an explicit
+     * value is validated but does not change the rotation state.
+     * @param {string} [userAgent]
+     * @returns {Record<string, string>}
+     */
+    headers(userAgent) {
+      return headers(userAgent === undefined ? currentValue : userAgent);
+    },
+
+    /** Number of distinct UAs in one round. */
+    get size() {
+      return pool.length;
+    },
+
+    /** 1-based number of the round currently being dispensed. */
+    get round() {
+      return round;
+    },
+
+    /** 0-based cursor position of the next `next()` call inside a round. */
+    get index() {
+      return cursor;
+    },
+  };
+}
+
 module.exports = {
   chrome,
   firefox,
@@ -260,4 +389,5 @@ module.exports = {
   random,
   generate,
   headers,
+  createSession,
 };
