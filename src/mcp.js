@@ -27,7 +27,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 
-import { fetchWorld, fetchOutline, describeWorld, PORTAL_API, PORTAL_PAGE, PortalError } from './index.js';
+import { fetchWorld, fetchOutline, fetchOutlines, describeWorld, PORTAL_API, PORTAL_PAGE, PortalError } from './index.js';
 
 const endpoint = process.env.PORTAL_API || PORTAL_API;
 const page = process.env.PORTAL_PAGE || PORTAL_PAGE;
@@ -53,6 +53,34 @@ function fail(err) {
 		content: [{ type: 'text', text: `${code}: ${message}` }],
 		structuredContent: { error: code, error_description: message },
 		isError: true,
+	};
+}
+
+/** Reduce an outline to the compact shape the site_shape tool hands back. */
+function shapeOf(outline) {
+	return {
+		host: outline.host,
+		title: outline.title,
+		description: outline.description,
+		words: outline.words,
+		sections: outline.sections.map((s) => ({
+			heading: s.heading,
+			level: s.level,
+			words: s.words,
+			paragraphs: s.paragraphs,
+			code_blocks: s.codeBlocks,
+			links: s.links.length,
+			images: s.images.length,
+			summary: s.summary,
+		})),
+	};
+}
+
+/** The walkable and GLB links for a page, used inside batch result entries. */
+function linksFor(source) {
+	return {
+		walk_url: `${page}?url=${encodeURIComponent(source)}`,
+		glb_url: `${endpoint}?url=${encodeURIComponent(source)}&format=glb`,
 	};
 }
 
@@ -93,32 +121,57 @@ export function createServer() {
 		{
 			title: 'Read a page as structure',
 			description:
-				'The cheap read: a page reduced to its heading spine with the weight of each section (words, paragraphs, code blocks, links, images). No world, no links list. Use it to compare pages, find the thin sections of a site, or decide what to read in full.',
+				'The cheap read: a page reduced to its heading spine with the weight of each section (words, paragraphs, code blocks, links, images). No world, no links list. Use it to compare pages, find the thin sections of a site, or decide what to read in full. Pass "url" for one page or "urls" for a batch; in a batch, pages that fail come back per entry with their error code and never spoil the pages that succeeded.',
 			inputSchema: {
-				url: z.string().min(3).describe('The page to read.'),
+				url: z.string().min(3).optional().describe('The page to read. Give either url or urls, not both.'),
+				urls: z
+					.array(z.string().min(3))
+					.min(1)
+					.optional()
+					.describe('Many pages to read in one batch. Give either urls or url, not both.'),
 			},
 		},
-		async ({ url }) => {
+		async ({ url, urls }) => {
+			const usingBatch = Array.isArray(urls);
+			if ((url && usingBatch) || (!url && !usingBatch)) {
+				// The call itself cannot run: keep isError for whole-tool failures.
+				return {
+					content: [{ type: 'text', text: 'bad_arguments: Give exactly one of "url" (one page) or "urls" (a batch).' }],
+					structuredContent: {
+						error: 'bad_arguments',
+						error_description: 'Give exactly one of "url" (one page) or "urls" (a batch).',
+					},
+					isError: true,
+				};
+			}
 			try {
-				const { outline, cached } = await fetchOutline(url, { endpoint });
-				return ok({
-					source: url,
-					cached,
-					host: outline.host,
-					title: outline.title,
-					description: outline.description,
-					words: outline.words,
-					sections: outline.sections.map((s) => ({
-						heading: s.heading,
-						level: s.level,
-						words: s.words,
-						paragraphs: s.paragraphs,
-						code_blocks: s.codeBlocks,
-						links: s.links.length,
-						images: s.images.length,
-						summary: s.summary,
-					})),
+				if (!usingBatch) {
+					const { outline, cached } = await fetchOutline(url, { endpoint });
+					return ok({ source: url, cached, ...shapeOf(outline) });
+				}
+				const batch = await fetchOutlines(urls, { endpoint });
+				const results = batch.results.map((entry) => {
+					if (!entry.ok) {
+						return { source: entry.url, error: entry.code, error_description: entry.message };
+					}
+					return {
+						source: entry.url,
+						cached: entry.cached,
+						...shapeOf(entry.outline),
+						...linksFor(entry.url),
+					};
 				});
+				const structuredContent = {
+					mode: 'batch',
+					requested: urls.length,
+					succeeded: batch.succeeded,
+					failed: batch.failed,
+					results,
+				};
+				return {
+					content: [{ type: 'text', text: JSON.stringify(structuredContent, null, 2) }],
+					structuredContent,
+				};
 			} catch (err) {
 				return fail(err);
 			}

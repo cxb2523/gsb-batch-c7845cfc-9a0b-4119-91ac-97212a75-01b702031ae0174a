@@ -94,6 +94,78 @@ export async function fetchOutline(url, opts = {}) {
 	return { outline: body.outline, cached: !!body.cached, stale: !!body.stale };
 }
 
+function abortMessage(reason) {
+	if (reason instanceof Error && reason.message) return reason.message;
+	if (reason !== undefined && reason !== null) return String(reason);
+	return 'The operation was aborted.';
+}
+
+/**
+ * Read many pages' structures in one call. Every address is fetched and judged
+ * independently: one rate limit, one unreachable host, or one broken response
+ * never interrupts the other pages, and the structures already fetched are
+ * kept. Failures come back per address with the Portal's own machine-readable
+ * code, never as an empty outline.
+ *
+ * A signal already aborted before the batch starts rejects the whole call
+ * before any request is sent, so pages that were never requested are not
+ * booked as failures. An abort that lands while requests are in flight fails
+ * those requests individually; pages that already answered are still returned.
+ *
+ * @param {string[]} urls addresses to read; results come back in this order
+ * @param {{ endpoint?: string, fetch?: typeof fetch, signal?: AbortSignal }} [opts]
+ *   the same opts as fetchOutline
+ * @returns {Promise<{
+ *   results: Array<
+ *     | { url: string, ok: true, outline: object, cached: boolean, stale: boolean }
+ *     | { url: string, ok: false, code: string, message: string, status: number }
+ *   >,
+ *   succeeded: number,
+ *   failed: number,
+ * }>}
+ * @throws {PortalError} when `urls` is missing, not an array, empty, no fetch
+ *   implementation is available, or the shared signal was already aborted
+ */
+export async function fetchOutlines(urls, opts = {}) {
+	if (!Array.isArray(urls)) {
+		throw new PortalError('bad_urls', 'fetchOutlines needs an array of urls.', 0);
+	}
+	if (urls.length === 0) {
+		throw new PortalError('bad_urls', 'fetchOutlines needs at least one url.', 0);
+	}
+	const impl = opts.fetch || globalThis.fetch;
+	if (!impl) throw new PortalError('no_fetch', 'No fetch implementation available. Pass one as opts.fetch.', 0);
+	if (opts.signal?.aborted) {
+		// Nothing has been sent yet, so no address is recorded as a failed read.
+		throw new PortalError('aborted', abortMessage(opts.signal.reason), 0);
+	}
+	const results = await Promise.all(
+		urls.map(async (url) => {
+			try {
+				const { outline, cached, stale } = await fetchOutline(url, opts);
+				return { url: String(url), ok: true, outline, cached, stale };
+			} catch (err) {
+				if (err instanceof PortalError) {
+					return { url: String(url), ok: false, code: err.code, message: err.message, status: err.status };
+				}
+				// fetch itself rejected (DNS, reset, abort): there is no upstream
+				// code and no HTTP status, so give it a stable client-side code
+				// rather than pretending the server answered.
+				const aborted = err?.name === 'AbortError' || opts.signal?.aborted;
+				return {
+					url: String(url),
+					ok: false,
+					code: aborted ? 'aborted' : 'unreachable',
+					message: err?.message || (aborted ? 'The request was aborted.' : 'The Portal endpoint could not be reached.'),
+					status: 0,
+				};
+			}
+		}),
+	);
+	const failed = results.filter((entry) => !entry.ok).length;
+	return { results, succeeded: results.length - failed, failed };
+}
+
 /**
  * The same world as a glTF binary, ready for Blender, Unity, AR, or any viewer.
  * @param {string} url

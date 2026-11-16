@@ -11,10 +11,13 @@ description: Read a public web page as a heading spine with section weights, or 
 
 | Tool | Arguments | Use it for |
 |---|---|---|
-| `site_shape` | `url` | The cheap read: the heading spine with words, paragraphs, code blocks, links and images per section. Start here, and use it to compare pages. |
+| `site_shape` | `url`, or `urls` (an array, for a batch) | The cheap read: the heading spine with words, paragraphs, code blocks, links and images per section. Start here, and use it to compare pages. In a batch, a failed page comes back as an error entry with its machine-readable code; the others still return their shapes. |
 | `walk_site` | `url`, optional `include_links` (default true) | The world summary: districts, doors with targets and whether each is internal, billboards, plus a walkable three.ws link and a GLB URL. |
 
-`url` accepts a bare host such as `example.com` or a full URL.
+`url` accepts a bare host such as `example.com` or a full URL. Give either
+`url` or `urls`, never both. A batch result carries `succeeded`/`failed`
+counts and a `results` array; `isError` is set only when the call itself
+cannot run, not for individual page failures.
 
 ## CLI
 
@@ -29,7 +32,7 @@ npx @three-ws/portal example.com --open           # print the walkable link
 
 ## JS API
 
-`fetchWorld(url)`, `fetchOutline(url)`, `fetchWorldGlb(url)`, `describeWorld(world)`, `embedSnippet(url, { height, title })`, `mountPortal(element, { url })`, and the pure layout functions `buildWorld(outline, opts)`, `collidersFor(world)`. Failures throw `PortalError`.
+`fetchWorld(url)`, `fetchOutline(url)`, `fetchOutlines(urls)` (a batch where each failed address is returned as `{ url, ok: false, code, message, status }` instead of throwing), `fetchWorldGlb(url)`, `describeWorld(world)`, `embedSnippet(url, { height, title })`, `mountPortal(element, { url })`, and the pure layout functions `buildWorld(outline, opts)`, `collidersFor(world)`. Failures throw `PortalError`.
 
 ## Manners
 

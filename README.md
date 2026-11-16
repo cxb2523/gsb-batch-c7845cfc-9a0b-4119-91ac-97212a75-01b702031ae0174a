@@ -96,6 +96,7 @@ const solids = collidersFor(world);      // circles, for your own player control
 | --- | --- |
 | `fetchWorld(url, opts?)` | Build (or read from cache) `{ world, outline, cached, stale }` |
 | `fetchOutline(url, opts?)` | The structural read only: headings, weights, links, images |
+| `fetchOutlines(urls, opts?)` | Read many pages at once; per-page success or error, one failure never spoils the batch |
 | `fetchWorldGlb(url, opts?)` | The world as a glTF binary (`ArrayBuffer`) |
 | `mountPortal(el, { url, height? })` | Mount a live walkable world into an element |
 | `embedSnippet(url, opts?)` | The same thing as an HTML string |
@@ -125,6 +126,40 @@ try {
 Codes you can branch on: `invalid_url`, `robots_disallowed`, `blocked_host`,
 `not_html`, `no_structure`, `too_large`, `unreachable`, `upstream_status`,
 `rate_limited`.
+
+### Reading many pages at once
+
+`fetchOutlines` takes an array of addresses and the same `opts`
+(`endpoint`, `fetch`, `signal`). Every address is fetched independently, so a
+rate limit, an unreachable host, or a broken response on one page never
+interrupts the others — and a failure is reported per address with the
+Portal's own code, never as an empty outline:
+
+```js
+import { fetchOutlines } from '@three-ws/portal';
+
+const { results, succeeded, failed } = await fetchOutlines([
+  'example.com',
+  'example.com/docs',
+  'example.com/private',
+]);
+
+for (const entry of results) {
+  if (entry.ok) {
+    console.log(entry.url, entry.outline.sections.length, 'sections', entry.cached ? '(cached)' : '');
+  } else {
+    console.log(entry.url, 'failed:', entry.code, entry.message);
+  }
+}
+```
+
+Each successful entry is `{ url, ok: true, outline, cached, stale }`; each
+failed entry is `{ url, ok: false, code, message, status }` with the upstream
+machine-readable code (or `http_<status>` when the API gives none). A
+non-array argument or an empty array rejects with a `bad_urls` `PortalError`
+rather than silently returning success. If `signal` is already aborted before
+the call starts, it rejects with an `aborted` error before any request is
+sent; an abort that lands mid-flight only fails the requests still running.
 
 ## CLI
 
@@ -156,9 +191,13 @@ claude mcp add portal -- npx -y @three-ws/portal portal-mcp
 | Tool | Returns |
 | --- | --- |
 | `walk_site` | The world: districts, doors (with targets), billboards, plus a walkable link and a GLB URL |
-| `site_shape` | The heading spine with the weight of each section. The cheap read |
+| `site_shape` | The heading spine with the weight of each section. The cheap read. Pass `url` for one page, or `urls` for a batch where each failed page comes back as an error entry instead of spoiling the rest |
 
-Both accept any public URL and honour the same manners as the API.
+Both accept any public URL and honour the same manners as the API. In a
+`site_shape` batch, `isError` is set only when the call itself cannot run
+(neither `url` nor `urls`, or both); individual page failures appear in the
+per-page `results` with their machine-readable `error` code, alongside
+`succeeded`/`failed` counts.
 
 ## Manners
 
