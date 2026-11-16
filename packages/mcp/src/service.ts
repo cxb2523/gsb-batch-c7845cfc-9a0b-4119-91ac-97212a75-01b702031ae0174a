@@ -40,7 +40,7 @@ export class NtMcpService {
         nt_get: 'Single topic value (scalars/arrays/json; raw preview for bytes).',
         nt_get_multiple: 'Batch get (max 50).',
         nt_get_decoded: 'Decode struct/protobuf topics to JSON objects.',
-        nt_subscribe: 'Sample prefixes for N seconds; format=summary|samples.',
+        nt_subscribe: 'Sample prefixes for N seconds; format=summary|samples; returns a readable settlement.',
         nt_list_struct_types: 'Built-in + discovered struct type names.',
         nt_set_write_mode: 'Enable/disable session writes (confirm required to enable).',
         nt_set: 'Publish one topic (gated + allowlist).',
@@ -51,6 +51,7 @@ export class NtMcpService {
         'Default allowlist: /SmartDashboard/**, /Tuning/**, /MyTable/**, /Telemetry/**, /Tunables/** (override with NT_WRITE_ALLOWLIST).',
         'Set NT_REQUIRE_LOCALHOST=1 to refuse writes to non-local hosts.',
         'One sample is not root cause — prefer nt_subscribe summaries for live evidence.',
+        'A no-change nt_subscribe window is evidence only when complete=true; check connection and warnings first.',
       ],
       outOfScope: [
         'WPILOG / offline log analysis (use wpilog-mcp).',
@@ -249,7 +250,13 @@ export class NtMcpService {
         types[t.name] = t.type;
       }
       const result = await collectSamples(nt, { ...options, types: { ...types, ...options.types } });
-      return jsonResult({ connected: nt.isRobotConnected(), ...result });
+      let connected = result.connection.connectedAtEnd ?? false;
+      try {
+        connected = nt.isRobotConnected();
+      } catch {
+        // fall back to the window's final observed state
+      }
+      return jsonResult({ connected, ...result });
     } catch (err) {
       return jsonResult(
         {

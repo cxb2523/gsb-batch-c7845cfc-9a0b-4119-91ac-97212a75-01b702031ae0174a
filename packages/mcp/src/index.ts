@@ -4,4 +4,11 @@ export { TopicInventory, type TopicRecord } from './inventory.js';
 export { WriteGate, type WriteGateStatus } from './write-gate.js';
 export { matchGlob, jsonResult, toJsonSafe } from './response.js';
 export { BUILTIN_STRUCT_TYPE_NAMES, resolveTopic } from './router.js';
-export { collectSamples } from './sampler.js';
+export {
+  collectSamples,
+  type SampleConnectionReport,
+  type SamplePoint,
+  type SubscribeOptions,
+  type SubscribeResult,
+  type TopicSummary,
+} from './sampler.js';

@@ -58,9 +58,21 @@ Reload the MCP server in the host after changing the config. Point it at a runni
 3. `nt_list_topics` with a prefix such as `/MyTable/`.
 4. Use `nt_get` / `nt_get_multiple` for scalars, arrays, and JSON.
 5. Use `nt_get_decoded` for `struct:…` / protobuf topics (returns JSON).
-6. Use `nt_subscribe` for a short timed sample window (`summary` or `samples`).
+6. Use `nt_subscribe` for a short timed sample window (`summary` or `samples`), then read its settlement block before drawing conclusions.
 7. Enable writes only when needed (see below), then `nt_set` / `nt_set_multiple`.
 8. `nt_disconnect` when finished.
+
+## Reading `nt_subscribe` evidence
+
+A timed window always returns a settlement next to the samples, so "the value held steady" is distinguishable from "nothing was sampled":
+
+- `connection` — `stayedConnected`, `disconnects`, `reconnects`, `disconnectedMs`, `connectedAtStart` / `connectedAtEnd`. Link state comes from the client's connection listener plus a poll of `isRobotConnected()`, so a missed event cannot hide a drop.
+- Per topic — `count` is the points kept; `received` is updates delivered before filtering; `droppedDuplicate` is `change_only` de-duplication; `droppedInterval` is `sample_interval_ms` thinning; `droppedLimit` / `truncated` are the per-topic sample cap. These counters never overlap.
+- Top level — `complete` is true only for an unambiguous window; `warnings` lists every reason it is not (`truncated`, `omittedTopics`, `prefixErrors`, and disconnect/no-data cases).
+
+Values that cannot be decoded (custom structs without a built-in descriptor) are counted in `samplingErrors` and are not reported as samples; they do not clear `complete` on their own, since the capture and link were healthy.
+
+Disconnects never abort a window: samples collected before the drop are kept and post-reconnect updates accumulate into the same per-topic bucket. A `complete: true` window with one point and the remaining updates counted as `droppedDuplicate` is real "held steady" evidence; when `complete` is false, read `warnings` first.
 
 ## Tools
 
@@ -71,7 +83,7 @@ Reload the MCP server in the host after changing the config. Point it at a runni
 | `nt_list_topics`                                      | Inventory (prefix filter)                         |
 | `nt_get` / `nt_get_multiple`                          | Scalars / arrays / JSON                           |
 | `nt_get_decoded`                                      | Struct / protobuf → JSON                          |
-| `nt_subscribe`                                        | Timed sample window                               |
+| `nt_subscribe`                                        | Timed sample window + settlement                  |
 | `nt_list_struct_types`                                | Built-in + discovered struct names                |
 | `nt_set_write_mode`                                   | Enable/disable writes (`confirm: true` to enable) |
 | `nt_set` / `nt_set_multiple`                          | Gated publish                                     |

@@ -83,6 +83,45 @@ describe('Feature: MCP live NetworkTables tools', () => {
     expect(gyro!.count).toBeGreaterThanOrEqual(1);
   }, 15_000);
 
+  it('[MCP-8] subscribe settlement reports a clean window', async () => {
+    const r = await service.subscribe({
+      prefixes: ['/MyTable/'],
+      durationSeconds: 1,
+      format: 'summary',
+    });
+    expect(r.isError).toBeUndefined();
+    const sc = r.structuredContent;
+    expect(sc.durationSeconds).toBe(1);
+    expect(sc.format).toBe('summary');
+
+    const connection = sc.connection as { stayedConnected: boolean | null; disconnects: number };
+    expect(connection.stayedConnected).toBe(true);
+    expect(connection.disconnects).toBe(0);
+
+    const summaries = sc.summaries as {
+      topic: string;
+      count: number;
+      received: number;
+      droppedDuplicate: number;
+      droppedInterval: number;
+      droppedLimit: number;
+      truncated: boolean;
+    }[];
+    for (const s of summaries) {
+      expect(s.received).toBeGreaterThanOrEqual(s.count);
+      expect(s.droppedDuplicate + s.droppedInterval + s.droppedLimit + s.count).toBe(s.received);
+    }
+    const gyro = summaries.find((s) => s.topic === '/MyTable/Gyro');
+    expect(gyro).toBeDefined();
+    expect(gyro!.truncated).toBe(false);
+
+    expect(Array.isArray(sc.warnings)).toBe(true);
+    expect(typeof sc.complete).toBe('boolean');
+    // `complete` is derived from the warnings list; assert the invariant rather than a fixed
+    // value so the test stays meaningful whatever the sim robot's current mode publishes.
+    expect(sc.complete).toBe((sc.warnings as string[]).length === 0);
+  }, 15_000);
+
   it('[MCP-6] refuses set when writes disabled', async () => {
     service.setWriteMode(false, false);
     const r = await service.set('/MyTable/Gyro', 0, 'double');

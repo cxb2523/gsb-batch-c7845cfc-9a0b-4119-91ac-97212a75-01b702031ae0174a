@@ -95,6 +95,18 @@ Full guide (install, tools, write gate, workflow): [MCP server](https://ntcore.c
 
 Topic discovery uses **short-lived prefix snapshots**. Leaving a long-lived `prefix=/` subscription open on the same `@ntcore-ts/client` instance prevents later typed topic subscriptions from receiving values; the MCP layer avoids that by snapshot-then-unsubscribe and by decoding struct bytes from inventory for `nt_get_decoded`.
 
+### Reading an `nt_subscribe` result
+
+`nt_subscribe` reports **window settlement**, so a quiet result can be told apart from a lost connection:
+
+- `connection` — `stayedConnected`, `disconnects`, `reconnects`, `disconnectedMs`, `connectedAtStart`/`connectedAtEnd`.
+- Per topic (in `summaries`) — `count` (points kept), `received` (updates delivered before filtering), `droppedDuplicate` (`change_only`), `droppedInterval` (`sample_interval_ms`), `droppedLimit` (sample cap), `truncated`.
+- Top level — `complete` (the window is clean, unambiguous evidence), `warnings` (why it is not), `truncated`, `omittedTopics` (topics past the topic cap), `prefixErrors`, `samplingErrors`.
+
+Values that cannot be decoded (for example a custom struct with no built-in descriptor) are counted in `samplingErrors` and are not reported as samples. They do not clear `complete` — the link and capture were healthy, that topic just has no JSON representation — so check `samplingErrors` when the reported topic set looks short.
+
+A disconnect mid-window never aborts the window or clears samples: points collected before the drop are kept, the window keeps running, and post-reconnect updates land in the same per-topic bucket. Treat `complete: true` with `count: 1` and `droppedDuplicate` equal to the rest as a real "held steady" result; without `complete`, check `warnings` before concluding anything.
+
 The MCP process sets the client log level to **silent** so `tslog` never writes to stdout (which would corrupt the MCP JSON-RPC channel). Operational messages from this package go to stderr only, as single lines.
 
 ## Out of scope (for now)

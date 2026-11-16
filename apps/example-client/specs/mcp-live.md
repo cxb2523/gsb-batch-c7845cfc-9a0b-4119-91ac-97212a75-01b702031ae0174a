@@ -10,28 +10,30 @@ In-process `@ntcore-ts/mcp` `NtMcpService` against the live example-robot NT4 se
 
 ## Acceptance criteria
 
-| ID    | Description                                                                                           |
-| ----- | ----------------------------------------------------------------------------------------------------- |
-| MCP-1 | `nt_connect` to localhost:5810 reports connected                                                      |
-| MCP-2 | `nt_list_topics` includes `/MyTable/Gyro` with type `double`                                          |
-| MCP-3 | `nt_get` returns a finite Gyro value                                                                  |
-| MCP-4 | `nt_get_decoded` returns a Pose2d-shaped object for `/MyTable/PoseStruct`                             |
-| MCP-5 | `nt_subscribe` summary for `/MyTable/` includes Gyro with count ≥ 1                                   |
-| MCP-6 | `nt_set` fails while write gate is off                                                                |
-| MCP-7 | With write gate on, publishing `/MyTable/PoseStructFromClient` is echoed on `/MyTable/PoseStructEcho` |
+| ID    | Description                                                                                                                                                            |
+| ----- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| MCP-1 | `nt_connect` to localhost:5810 reports connected                                                                                                                       |
+| MCP-2 | `nt_list_topics` includes `/MyTable/Gyro` with type `double`                                                                                                           |
+| MCP-3 | `nt_get` returns a finite Gyro value                                                                                                                                   |
+| MCP-4 | `nt_get_decoded` returns a Pose2d-shaped object for `/MyTable/PoseStruct`                                                                                              |
+| MCP-5 | `nt_subscribe` summary for `/MyTable/` includes Gyro with count ≥ 1                                                                                                    |
+| MCP-6 | `nt_set` fails while write gate is off                                                                                                                                 |
+| MCP-7 | With write gate on, publishing `/MyTable/PoseStructFromClient` is echoed on `/MyTable/PoseStructEcho`                                                                  |
+| MCP-8 | `nt_subscribe` summary includes a settlement: `complete`, `warnings`, and per-topic `received`/drop counters, with connection `stayedConnected` true on a healthy link |
 
 ## Tests
 
-| Test                                              | Covers | Status      |
-| ------------------------------------------------- | ------ | ----------- |
-| `[MCP-1] connects to example-robot`               | MCP-1  | Implemented |
-| `[MCP-2] lists Gyro topic`                        | MCP-2  | Implemented |
-| `[MCP-3] gets Gyro value`                         | MCP-3  | Implemented |
-| `[MCP-4] decodes PoseStruct`                      | MCP-4  | Implemented |
-| `[MCP-5] subscribe summary includes Gyro`         | MCP-5  | Implemented |
-| `[MCP-6] refuses set when writes disabled`        | MCP-6  | Implemented |
-| `[MCP-7] gated write round-trips PoseStruct echo` | MCP-7  | Implemented |
+| Test                                                  | Covers | Status      |
+| ----------------------------------------------------- | ------ | ----------- |
+| `[MCP-1] connects to example-robot`                   | MCP-1  | Implemented |
+| `[MCP-2] lists Gyro topic`                            | MCP-2  | Implemented |
+| `[MCP-3] gets Gyro value`                             | MCP-3  | Implemented |
+| `[MCP-4] decodes PoseStruct`                          | MCP-4  | Implemented |
+| `[MCP-5] subscribe summary includes Gyro`             | MCP-5  | Implemented |
+| `[MCP-6] refuses set when writes disabled`            | MCP-6  | Implemented |
+| `[MCP-7] gated write round-trips PoseStruct echo`     | MCP-7  | Implemented |
+| `[MCP-8] subscribe settlement reports a clean window` | MCP-8  | Implemented |
 
 ## Coverage
 
-All MCP-1 through MCP-7 are covered by implemented tests.
+All MCP-1 through MCP-8 are covered by implemented tests.

@@ -153,7 +153,7 @@ export function createNtMcpServer(options?: CreateNtMcpServerOptions): McpServer
     {
       title: 'Timed subscribe / sample',
       description:
-        'Sample topic updates under prefixes for duration_seconds. Use format=summary for min/max/mean/last/rate (preferred evidence). format=samples returns capped point lists. Prefer over repeated nt_get for dynamics. Read-only.',
+        'Sample topic updates under prefixes for duration_seconds. Use format=summary for min/max/mean/last/rate (preferred evidence). format=samples returns capped point lists. Returns a settlement block: connection (stayedConnected/disconnects/reconnects/offline ms), per-topic received + droppedDuplicate/droppedInterval/droppedLimit/truncated, and complete + warnings so "no change" can be told apart from "nothing sampled". Data collected before a disconnect is kept. Prefer over repeated nt_get for dynamics. Read-only.',
       inputSchema: z.object({
         prefixes: z.array(z.string()).min(1).max(20).describe('Topic prefixes to sample (e.g. ["/MyTable/"])'),
         duration_seconds: z.number().positive().max(30).optional().describe('How long to sample (default 2, max 30)'),
