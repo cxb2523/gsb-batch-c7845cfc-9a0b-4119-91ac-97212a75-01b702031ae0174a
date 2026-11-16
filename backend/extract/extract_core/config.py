@@ -30,3 +30,6 @@ class Settings(BaseSettings):
 
     def get_repo_counts_path(self, run_datetime) -> str:
         return f"{self.github_data_prefix.rstrip('/')}/{run_datetime.strftime('%Y/%m/%d')}/repo_counts.json"
+
+    def get_settlement_path(self, run_datetime) -> str:
+        return f"{self.github_data_prefix.rstrip('/')}/{run_datetime.strftime('%Y/%m/%d')}/settlement.json"

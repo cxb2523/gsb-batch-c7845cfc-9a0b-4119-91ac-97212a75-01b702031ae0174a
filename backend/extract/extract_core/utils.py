@@ -10,6 +10,28 @@ import pyarrow.parquet as pq
 from dts_utils.s3_utils import get_json_object
 
 
+REPO_PARQUET_SCHEMA = pa.schema([
+    ("id", pa.int64()),
+    ("name", pa.string()),
+    ("languages_url", pa.string()),
+    ("size", pa.int64()),
+    ("stars", pa.int64()),
+    ("main_language", pa.string()),
+    ("forks", pa.int64()),
+    ("license", pa.string()),
+    ("open_issues", pa.int64()),
+    ("topics", pa.list_(pa.string())),
+    ("topic_queried", pa.string()),
+])
+
+LANGUAGE_PARQUET_SCHEMA = pa.schema([
+    ("repo_id", pa.int64()),
+    ("repo_name", pa.string()),
+    ("language", pa.string()),
+    ("bytes", pa.int64()),
+])
+
+
 def get_search_queries(s3_client, bucket: str, path: str) -> list[str]:
     """Fetches a list of topics to search in API."""
     return get_json_object(s3_client, bucket, path)
@@ -20,10 +42,19 @@ def get_date_str(date_time: datetime) -> str:
     return date_time.strftime("%Y/%m/%d")
 
 
-def save_parquet_to_s3(s3_client, data: list[dict], bucket: str, path: str):
-    """Converts a list of dicts to a pyarrow table and saves it as a parquet file to S3."""
+def save_parquet_to_s3(s3_client, data: list[dict], bucket: str, path: str, empty_schema: pa.Schema | None = None):
+    """Converts a list of dicts to a pyarrow table and saves it as a parquet file to S3.
+
+    When there are no rows the optional schema keeps the file readable
+    downstream instead of writing a table without columns.
+    """
     logging.debug(f"Converting data to pyarrow table. Rows: {len(data)}.")
-    table = pa.Table.from_pylist(data)
+    if data:
+        table = pa.Table.from_pylist(data)
+    elif empty_schema is not None:
+        table = empty_schema.empty_table()
+    else:
+        table = pa.Table.from_pylist(data)
 
     buffer = BytesIO()
     logging.debug("Writing pyarrow table to buffer.")

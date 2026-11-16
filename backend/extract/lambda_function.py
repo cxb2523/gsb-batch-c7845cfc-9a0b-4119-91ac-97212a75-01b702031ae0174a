@@ -5,10 +5,12 @@ from dts_utils.s3_utils import (
     running_on_lambda, setup_logging, create_s3_client, get_json_object, save_data_to_s3
 )
 from extract_core.utils import (
-    get_search_queries, save_parquet_to_s3, transform_lang_data
+    get_search_queries, save_parquet_to_s3, transform_lang_data,
+    REPO_PARQUET_SCHEMA, LANGUAGE_PARQUET_SCHEMA
 )
 from extract_core.extract import (
-    get_all_repos_data, deduplicate_repo_data, get_languages_data
+    get_all_repos_data, deduplicate_repo_data, get_languages_data,
+    add_language_failures_to_settlement, build_settlement_document
 )
 from extract_core.config import Settings
 from extract_core.repo_registry import upsert_repo_registry
@@ -33,8 +35,9 @@ def lambda_handler(event, context):
         s3_client=s3_client, bucket=settings.bucket, path=search_queries_path
     )
     logging.info(f"Search queries: {search_queries}.")
-    data, repo_counts = get_all_repos_data(topics=search_queries, settings=settings)
-    language_data = get_languages_data(data, settings=settings)
+    data, repo_counts, settlement = get_all_repos_data(topics=search_queries, settings=settings)
+    language_data, language_failures = get_languages_data(data, settings=settings)
+    settlement = add_language_failures_to_settlement(settlement, language_failures)
     data = deduplicate_repo_data(data)
 
     language_data_long = transform_lang_data(language_data)
@@ -45,14 +48,28 @@ def lambda_handler(event, context):
     save_data_to_s3(s3_client, settings.bucket, repo_registry_path, repo_registry_data)
 
     repos_output_path = settings.get_repos_path(run_datetime)
-    save_parquet_to_s3(s3_client=s3_client, data=data, bucket=settings.bucket, path=repos_output_path)
+    save_parquet_to_s3(
+        s3_client=s3_client, data=data, bucket=settings.bucket, path=repos_output_path,
+        empty_schema=REPO_PARQUET_SCHEMA
+    )
 
     languages_output_path = settings.get_languages_path(run_datetime)
-    save_parquet_to_s3(s3_client=s3_client, data=language_data_long, bucket=settings.bucket, path=languages_output_path)
+    save_parquet_to_s3(
+        s3_client=s3_client, data=language_data_long, bucket=settings.bucket, path=languages_output_path,
+        empty_schema=LANGUAGE_PARQUET_SCHEMA
+    )
 
     counts_output_path = settings.get_repo_counts_path(run_datetime)
     save_data_to_s3(s3_client=s3_client, body=repo_counts, bucket=settings.bucket, path=counts_output_path)
-    logging.info("Extraction lambda finished.")
+
+    settlement_output_path = settings.get_settlement_path(run_datetime)
+    settlement_document = build_settlement_document(repo_counts, settlement)
+    save_data_to_s3(s3_client=s3_client, body=settlement_document, bucket=settings.bucket, path=settlement_output_path)
+
+    logging.info(
+        f"Extraction lambda finished. Topics succeeded: {settlement['topics_succeeded']}/"
+        f"{settlement['topics_total']}, language failed repos: {settlement['language_failed_repos']}."
+    )
 
 
 if __name__ == "__main__":
