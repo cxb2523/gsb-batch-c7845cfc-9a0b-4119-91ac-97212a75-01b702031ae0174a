@@ -22,8 +22,14 @@ def merge_auto(data, auto):
     added = 0
     for project in data.get("projects", []):
         result = (auto.get("projects") or {}).get(project.get("id"))
-        if not result or not result.get("ok"):
+        if not result:
             continue
+        if not result.get("ok"):
+            # Источник сейчас не прочитан: берём последний успешный результат (его кладёт сборщик в last_ok),
+            # но без движения этапа — текущий проект в окне остаётся на прежнем месте, ошибка видна в sync.errors.
+            result = result.get("last_ok")
+            if not isinstance(result, dict) or not result.get("ok"):
+                continue
         current = result.get("current")
         if isinstance(current, int) and current >= project.get("current", 0):
             project["current"] = current

@@ -28,11 +28,26 @@ def run_sync():
             p = projects.get(pid, {})
             stages = p.get("stages") or []
             now, was = p.get("current", 0), before.get(pid, 0)
-            line = {"id": pid, "name": result.get("name", pid), "ok": result.get("ok", False), "error": result.get("error", "")}
+            line = {"id": pid, "name": result.get("name", pid), "ok": result.get("ok", False),
+                    "status": result.get("status", "ok" if result.get("ok") else "failed"),
+                    "local_only": bool(result.get("local_only")), "error": result.get("error", "")}
             if result.get("ok"):
                 line.update(stage=stages[now] if stages else "", moved=now != was, was=stages[was] if now != was and stages else "")
             lines.append(line)
-        return {"ok": True, "synced": auto.get("synced"), "seconds": auto.get("seconds"), "projects": lines,
+        commits = (auto.get("stats") or {}).get("commits") or {}
+        stats_errors = commits.get("errors") if isinstance(commits.get("errors"), list) else []
+        # Общий итог синхронизации: failed — ни один проект не прочитан; partial — часть проектов или
+        # часть статистики не удалась, но остальное собрано; ok — всё прочитано (предупреждения — не ошибки).
+        failed = [p for p in lines if not p["ok"]]
+        if failed and len(failed) == len(lines):
+            overall = "failed"
+        elif failed or stats_errors:
+            overall = "partial"
+        else:
+            overall = "ok"          # нет проектов с источником или всё прочитано — провалов нет
+        return {"ok": True, "status": overall, "synced": auto.get("synced"), "seconds": auto.get("seconds"),
+                "projects": lines, "counts": auto.get("counts", {}),
+                "stats": {"errors": stats_errors, "repos": len(commits.get("repos", []))},
                 "notes": auto.get("notes", []), "events": new_events, "calendar": calendar, "digest": digest,
                 "updates_check": updates}
 

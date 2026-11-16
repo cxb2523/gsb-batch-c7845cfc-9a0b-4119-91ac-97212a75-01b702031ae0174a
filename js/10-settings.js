@@ -301,19 +301,35 @@
       if (res.skipped) { syncBox.hidden = true; return; }
       if (res.busy) { showSync("warn", tl("Синхронизация уже идёт"), [["note", tl("Данные обновятся сами, когда она закончится.")]]); return; }
       if (!r.ok || !res.ok) throw new Error(res.error || (tl("ответ ") + r.status));
-      const items = (res.projects || []).map((p) => p.ok
-        ? (p.moved ? ["moved", esc(p.name) + tl(': этап сдвинулся — <b>') + esc(p.stage) + '</b>' + (p.was ? tl(' (был: ') + esc(p.was) + ')' : "")]
-                   : ["", esc(p.name) + tl(': без изменений — ') + esc(p.stage)])
-        : ["err", esc(p.name) + tl(': не прочитан — ') + esc(p.error || tl("ошибка"))]);
+      const items = (res.projects || []).map((p) => {
+        if (!p.ok)
+          return ["err", esc(p.name) + tl(': не прочитан — ') + esc(p.error || tl("ошибка"))];
+        const local = p.status === "local" || p.local_only;
+        const head = esc(p.name) + (local ? tl(': только данные на компьютере') + (p.moved ? " · " : " — ") : ": ");
+        if (p.moved)
+          return ["moved", head + tl('этап сдвинулся — <b>') + esc(p.stage) + '</b>' + (p.was ? tl(' (был: ') + esc(p.was) + ')' : "")];
+        return ["", head + tl('без изменений — ') + esc(p.stage)];
+      });
       (res.notes || []).forEach((n) => items.push(["note", esc(n)]));
+      // Статистика: часть репозиториев могла не прочитаться — это предупреждение, а не повод обнулять собранное.
+      const stats = res.stats || {};
+      (stats.errors || []).forEach((e) => items.push(["err", tl("Статистика: не прочитан репозиторий") + " — " + esc(e)]));
+      if ((stats.errors || []).length)
+        items.push(["note", tl("Статистика: остальные репозитории собраны, их данные по дням сохранены") +
+          " (" + tl("репозиториев") + ": " + stats.repos + ")"]);
       if (res.events) items.push(["", tl("Новых событий в истории: ") + res.events]);
       const cal = res.calendar;
       if (cal) items.push(cal.ok ? ["", tl("Google Календарь: обновлён, событий ") + cal.events]
         : [cal.need_login ? "note" : "err", tl("Google Календарь: ") + esc(cal.need_login ? tl("нужно войти снова — раздел «Календарь», кнопка «Войти в Google»") : cal.error || tl("не обновился"))]);
       const dgs = res.digest;
       if (dgs) items.push(dgs.ok ? ["", tl("Сводки: обновлены, новых ") + (dgs.new || 0)] : ["note", tl("Сводки: ") + esc(dgs.error || tl("не обновились"))]);
-      const kind = (res.projects || []).some((p) => !p.ok) ? "bad" : (res.notes || []).length ? "warn" : "";
-      showSync(kind, (auto ? tl("Синхронизировано при запуске") + " " : tl("Синхронизировано ")) + stamp(res.synced) + " · " + res.seconds + tl(" с"), items);
+      // Общий итог: ok — всё прочитано; partial — что-то не прочиталось, но остальное собрано; failed — не прочитан ни один проект.
+      // Предупреждения (notes) — это не ошибки: при общем ok окно остаётся нейтральным.
+      const kind = res.status === "failed" ? "bad" : res.status === "partial" ? "warn" : "";
+      const verdict = res.status === "failed" ? tl("Синхронизация не удалась")
+        : res.status === "partial" ? (auto ? tl("Синхронизация при запуске выполнена частично") : tl("Синхронизация выполнена частично"))
+        : (auto ? tl("Синхронизация при запуске выполнена") : tl("Синхронизация выполнена"));
+      showSync(kind, verdict + " · " + stamp(res.synced) + " · " + res.seconds + tl(" с"), items);
       refresh();
     } catch (err) {
       showSync("bad", auto ? tl("Синхронизация при запуске не удалась") : tl("Синхронизация не удалась"), [["err", esc(String(err && err.message || err))],

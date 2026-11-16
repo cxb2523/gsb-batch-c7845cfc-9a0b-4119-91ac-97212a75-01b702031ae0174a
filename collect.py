@@ -24,7 +24,14 @@
   а в итоге появляется предупреждение;
 - события пишутся только после даты "since" из projects.json (раньше история уже записана вручную);
 - если GitHub недоступен, используются данные, которые уже есть на компьютере, и это видно в итоге;
-- git только читает: без необязательных замков (GIT_OPTIONAL_LOCKS=0), в .git ничего не пишется, кроме fetch.
+- git только читает: без необязательных замков (GIT_OPTIONAL_LOCKS=0), в .git ничего не пишется, кроме fetch;
+- один неудачный проект не отменяет остальные: у успешных проектов итог собирается как обычно, у неудачного
+  остаётся его последний успешный результат (поле "last_ok"), а причина новой неудачи лежит в "error";
+- сбой одного репозитория не стирает статистику: репозитории, которые удалось прочитать, остаются в
+  stats.commits.repos с данными по дням, а неудачи — в stats.commits.errors;
+- итог каждой синхронизации получает "status": "ok" (все проекты прочитаны), "partial" (часть не удалась
+  или есть ошибки статистики) либо "failed" (не прочитан ни один проект); у проекта статус —
+  "ok", "local" (только данные компьютера) или "failed" (с текстом причины в "error").
 
 Проверка без Пульта:  python collect.py            (с git fetch)
                       python collect.py --no-fetch (только данные на компьютере)
@@ -323,8 +330,10 @@ def collect_project(project, fetch, path_map):
             current, move, events, act = read_progress(remap(source.get("path", ""), path_map), project.get("stages") or [])
         except SourceError as exc:
             result["error"] = str(exc)
+            result["status"] = "failed"
             return result, notes
         result["activity"] = act
+        result["status"] = "ok"                # progress-источник живёт на этом компьютере, git-fetch ему не нужен
         lessons = lessons_of_events(events)
         if lessons:
             result["lessons"] = lessons
@@ -332,6 +341,7 @@ def collect_project(project, fetch, path_map):
     repo = pathlib.Path(remap(source.get("repo", ""), path_map))
     if not (repo / ".git").exists():
         result["error"] = "нет репозитория: " + str(repo)
+        result["status"] = "failed"
         return result, notes
     if source.get("fetch", True) is False:
         result["local_only"] = True          # у проекта fetch выключен: только данные на компьютере
@@ -341,6 +351,7 @@ def collect_project(project, fetch, path_map):
             result["fetched"] = True
         except SourceError as exc:
             result["fetched"] = False
+            result["local_only"] = True      # GitHub не ответил: эта синхронизация прочла только данные компьютера
             notes.append(name + ": не удалось взять свежее с GitHub (" + str(exc) + ") — использованы данные с компьютера")
     try:
         ref = main_ref(repo)
@@ -358,6 +369,7 @@ def collect_project(project, fetch, path_map):
         result["activity"] = activity(repo)
     except SourceError as exc:
         result["error"] = str(exc)
+        result["status"] = "failed"
         return result, notes
 
     return finish(project, source, result, notes, current, move, events, ref)
@@ -370,6 +382,9 @@ def finish(project, source, result, notes, current, move, events, ref):
     manual = project.get("current", 0)
     result.update(ok=True, ref=ref, source_current=current,
                   events=[e for e in events if e["date"] and e["date"] > since])
+    # ok — источник прочитан; local — свежее с GitHub не бралось (fetch выключен или не удался),
+    # итог собран только из того, что уже лежит на компьютере.
+    result["status"] = "local" if result.get("local_only") else "ok"
     if current < manual:
         result["current"] = manual
         notes.append(name + ": по источнику этап «" + stages[current] + "», а в projects.json уже «" + stages[manual] +
@@ -420,7 +435,14 @@ def commit_stats(projects, path_map):
         except OSError as exc:
             errors.append(str(root) + ": " + (exc.strerror or str(exc)))
             continue
-        found += [d for d in children if (d / ".git").exists()]
+        for d in children:
+            try:
+                is_repo = (d / ".git").exists()
+            except OSError as exc:                  # недоступная папка не должна мешать увидеть остальные репозитории
+                errors.append(str(d) + ": " + (exc.strerror or str(exc)))
+                continue
+            if is_repo:
+                found.append(d)
     project_of = lambda d: next((pid for repo, pid in linked if same_path(repo, d)), None)
     found.sort(key=lambda d: (project_of(d) is None, d.name.lower()))   # репозитории проектов — первыми
     seen, repos = set(), []
@@ -431,41 +453,92 @@ def commit_stats(projects, path_map):
             if "does not have any commits" not in str(exc):
                 errors.append(repo.name + ": " + str(exc))
             continue
+        except Exception as exc:                   # любой другой сбой одного репозитория не стирает уже прочитанные
+            errors.append(repo.name + ": " + type(exc).__name__ + ": " + str(exc))
+            continue
         days = {}
-        for line in log.splitlines():
-            sha, _, stamp = line.partition(" ")
-            if not stamp.strip().isdigit() or sha in seen:
-                continue
-            seen.add(sha)
-            day = datetime.date.fromtimestamp(int(stamp)).isoformat()
-            if day >= since:
-                days[day] = days.get(day, 0) + 1
+        try:
+            for line in log.splitlines():
+                sha, _, stamp = line.partition(" ")
+                if not stamp.strip().isdigit() or sha in seen:
+                    continue
+                seen.add(sha)
+                day = datetime.date.fromtimestamp(int(stamp)).isoformat()
+                if day >= since:
+                    days[day] = days.get(day, 0) + 1
+        except (OSError, ValueError) as exc:
+            errors.append(repo.name + ": " + type(exc).__name__ + ": " + str(exc))
+            continue
         repos.append({"name": repo.name, "project": project_of(repo), "days": dict(sorted(days.items()))})
     return {"since": since, "roots": [str(r) for r in roots], "repos": repos, "errors": errors}
 
 
 # ---------------------------------------------------------------- всё вместе
 
+def previous_auto():
+    """Итог прошлой синхронизации: чтобы неудача проекта не стирала его последнее успешное значение."""
+    try:
+        return json.loads(TARGET.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError):
+        return None
+
+
+def keep_last_success(pid, failed, old):
+    """Проект не прочитан сейчас: в auto.json остаётся его последний успешный результат, а поверх —
+    читаемая причина новой неудачи. Пустой объект вместо прошлых данных не пишется никогда."""
+    result = {"ok": False, "name": failed.get("name", pid), "kind": failed.get("kind", ""),
+              "status": "failed", "error": failed.get("error", "ошибка")}
+    previous = ((old or {}).get("projects") or {}).get(pid)
+    if isinstance(previous, dict):
+        last_ok = previous.get("last_ok") if previous.get("status") == "failed" else previous
+        if isinstance(last_ok, dict) and last_ok.get("ok"):
+            result["last_ok"] = last_ok
+    return result
+
+
 def collect(fetch=True, path_map=()):
     data = json.loads(SOURCE.read_text(encoding="utf-8-sig"))
+    old = previous_auto()
     started = datetime.datetime.now()
     out = {"synced": started.strftime("%Y-%m-%d %H:%M"), "projects": {}, "notes": [], "errors": []}
-    lessons = {}
+    lessons = dict(((old or {}).get("stats") or {}).get("lessons") or {})   # уроки неудачного проекта остаются от прошлого раза
+    statuses = {"ok": 0, "local": 0, "failed": 0}
     for project in data.get("projects", []):
         if not isinstance(project.get("source"), dict):
             continue
-        result, notes = collect_project(project, fetch, path_map)
-        out["projects"][project["id"]] = result
+        pid = project["id"]
+        try:
+            result, notes = collect_project(project, fetch, path_map)
+        except Exception as exc:                 # никакой один проект не должен рушить синхронизацию целиком
+            result, notes = {"ok": False, "name": project.get("name", pid),
+                             "kind": project["source"].get("kind", ""), "status": "failed",
+                             "error": type(exc).__name__ + ": " + str(exc)}, []
         out["notes"].extend(notes)
-        if not result["ok"]:
+        if result["ok"]:
+            out["projects"][pid] = result
+            statuses["local" if result.get("local_only") else "ok"] += 1
+            if result.get("lessons"):
+                lessons[pid] = result.pop("lessons")
+            else:
+                lessons.pop(pid, None)
+        else:
+            out["projects"][pid] = keep_last_success(pid, result, old)
+            statuses["failed"] += 1
             out["errors"].append(result["name"] + ": " + result.get("error", "ошибка"))
-        if result.get("lessons"):
-            lessons[project["id"]] = result.pop("lessons")
     try:
         commits = commit_stats(data.get("projects", []), path_map)
-    except Exception as exc:                 # статистика не должна ломать синхронизацию
-        commits = {"repos": [], "errors": [type(exc).__name__ + ": " + str(exc)]}
+    except Exception as exc:                     # статистика не должна ломать синхронизацию: сохраняем уже собранное
+        old_commits = ((old or {}).get("stats") or {}).get("commits") or {}
+        commits = {"since": old_commits.get("since", ""), "roots": old_commits.get("roots", []),
+                   "repos": old_commits.get("repos", []),
+                   "errors": list(old_commits.get("errors", [])) + [type(exc).__name__ + ": " + str(exc)]}
     out["stats"] = {"lessons": lessons, "commits": commits}
+    if commits.get("errors"):
+        out["errors"].extend("Статистика: " + e for e in commits["errors"])
+    out["status"] = ("failed" if statuses["failed"] and statuses["ok"] + statuses["local"] == 0 else
+                     "partial" if statuses["failed"] or commits.get("errors") else "ok")
+    out["counts"] = {"ok": statuses["ok"], "local": statuses["local"], "failed": statuses["failed"],
+                     "stats_errors": len(commits.get("errors", []))}
     out["seconds"] = round((datetime.datetime.now() - started).total_seconds(), 1)
     temporary = TARGET.with_name("auto.json." + str(os.getpid()) + ".tmp")
     temporary.write_text(json.dumps(out, ensure_ascii=False, indent=1), encoding="utf-8")
