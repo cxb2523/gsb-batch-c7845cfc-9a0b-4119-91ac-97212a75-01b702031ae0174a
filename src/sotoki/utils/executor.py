@@ -128,6 +128,10 @@ class SotokiExecutor(queue.Queue):
     def join(self):
         """Await completion of workers, requesting them to stop taking new task"""
         logger.debug(f"joining all threads for {self.prefix}")
+        if not getattr(self, "_workers", None):
+            # executor was never started, nothing to wait for
+            self.no_more = True
+            return
         self.no_more = True
         for num, t in enumerate(self._workers):
             deadline = datetime.datetime.now(datetime.UTC) + datetime.timedelta(

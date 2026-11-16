@@ -20,7 +20,7 @@ if TYPE_CHECKING:
     from sotoki.utils.database.users import UsersDatabase
     from sotoki.utils.executor import SotokiExecutor
     from sotoki.utils.html import Rewriter
-    from sotoki.utils.imager import Imager
+    from sotoki.utils.imager import Imager, Settlement
     from sotoki.utils.progress import Progresser
 
 context = Context.get()
@@ -47,6 +47,8 @@ class Shared:
     dump_domain: str
     online_domain: str
     s3_storage: KiwixStorage | None
+    # settled image download results once the images step is over (queryable stats)
+    images_settlement: Settlement | None = None
 
     # total stats
     total_tags = 0

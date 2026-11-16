@@ -2,10 +2,13 @@
 
 import hashlib
 import io
+import json
 import re
+import threading
 import urllib.parse
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from enum import StrEnum
 from http import HTTPStatus
 from time import sleep
 from typing import Any
@@ -32,6 +35,7 @@ from sotoki.constants import (
     HTTP_REQUEST_TIMEOUT,
     IMAGES_ENCODER_VERSION,
     MAX_FILE_DOWNLOAD_RETRIES,
+    MAX_RECORDED_ABANDONED_URLS,
     POSTS_IMAGE_SIZE,
     USER_AGENT,
 )
@@ -40,16 +44,57 @@ from sotoki.utils.html import parse_retry_after_header
 from sotoki.utils.shared import context, logger, shared
 
 
+class DownloadOutcome(StrEnum):
+    """Final outcome of a single image download attempt lifecycle"""
+
+    SUCCESS = "success"
+    # definitively given up: retries exhausted, 404, undecodable or invalid image
+    ABANDONED = "abandoned"
+    # file was picked for download but never processed because of a global abort
+    UNPROCESSED = "unprocessed"
+
+
 @dataclass(kw_only=True)
 class HostData:
     files_to_download: FileDatabase
+    hostname: str | None = None
     last_request_date: datetime | None = None
     request_interval_milliseconds: float = FILES_DOWNLOAD_INITIAL_INTERVAL
     not_before_date: datetime | None = None
     download_success: int = 0
-    download_failure: int = 0
+    download_abandoned: int = 0
+    download_unprocessed: int = 0
+    nb_requested: int = 0
+    # files requested for this host but not settled yet (queued or in-flight)
+    nb_pending: int = 0
+    abandoned_urls: list[str] = field(default_factory=list)
     downloads_complete: bool = False
     requests_done_since_last_speed_change: int = 0
+
+
+@dataclass(frozen=True, kw_only=True)
+class HostSettlement:
+    """Settled download results for a single host"""
+
+    hostname: str
+    nb_requested: int
+    nb_success: int
+    nb_abandoned: int
+    nb_unprocessed: int
+    abandoned_urls: list[str]
+
+
+@dataclass(frozen=True, kw_only=True)
+class Settlement:
+    """Settled download results for the whole image processing step"""
+
+    aborted: bool
+    abort_reason: str | None
+    nb_requested: int
+    nb_success: int
+    nb_abandoned: int
+    nb_unprocessed: int
+    hosts: dict[str, HostSettlement]
 
 
 @dataclass(kw_only=True)
@@ -62,16 +107,154 @@ class Imager:
     def __init__(self):
         # list of source URLs that we've processed and added to ZIM
         self.aborted = False
+        self.abort_reason: str | None = None
         self.handled = set()
         self.nb_requested = 0
         self.nb_failed = 0
         self.nb_done = 0
+        self.nb_unprocessed = 0
         self.filesDatabases: list[FileDatabase] = []
         self.hosts: dict[str, HostData] = {}
+        # protects settlement counters and hosts registry from concurrent workers;
+        # deliberately not shared.lock because defer() might be called while it is held
+        self._stats_lock = threading.Lock()
+        self._settled = False
+        # last settlement computed, available for querying once processing is over
+        self.settlement: Settlement | None = None
 
-    def abort(self):
+    def abort(self, reason: str = "aborted on request"):
         """request imager to cancel processing of futures"""
+        if not self.aborted:
+            logger.error(f"Image downloads aborted: {reason}")
+        self.abort_reason = self.abort_reason or reason
         self.aborted = True
+
+    def record_success(self, file: FileToDownload):
+        """Record that file has been successfully added to the ZIM"""
+        with self._stats_lock:
+            file.host_data.download_success += 1
+            file.host_data.nb_pending = max(0, file.host_data.nb_pending - 1)
+
+    def record_abandoned(self, file: FileToDownload, reason: str = ""):
+        """Record that file will never be added to the ZIM (too many retries, 404…)"""
+        with self._stats_lock:
+            file.host_data.download_abandoned += 1
+            file.host_data.nb_pending = max(0, file.host_data.nb_pending - 1)
+            if len(file.host_data.abandoned_urls) < MAX_RECORDED_ABANDONED_URLS:
+                file.host_data.abandoned_urls.append(file.url)
+            self.nb_failed += 1
+        logger.debug(
+            f"Abandoned image {file.url} from {file.hostname}"
+            f"{f' ({reason})' if reason else ''}"
+        )
+
+    def requeue(self, file: FileToDownload):
+        """Put back a file which failed but can still be retried
+
+        The file is still pending settlement, so nb_pending is left untouched."""
+        with self._stats_lock:
+            file.host_data.files_to_download.push(file)
+
+    def settle(self) -> Settlement:
+        """Settle download results, including files left unprocessed after an abort
+
+        Must be called once workers are done. Files which were never settled (still
+        queued or in-flight when the imager aborted) are accounted for as unprocessed.
+        Successfully added items are never touched, so they survive partial failures."""
+        with self._stats_lock:
+            if not self._settled:
+                for host_data in self.hosts.values():
+                    host_data.download_unprocessed = host_data.nb_pending
+                    host_data.nb_pending = 0
+                    self.nb_unprocessed += host_data.download_unprocessed
+                    host_data.downloads_complete = True
+                self._settled = True
+
+            host_settlements = {
+                hostname: HostSettlement(
+                    hostname=hostname,
+                    nb_requested=host_data.nb_requested,
+                    nb_success=host_data.download_success,
+                    nb_abandoned=host_data.download_abandoned,
+                    nb_unprocessed=host_data.download_unprocessed,
+                    abandoned_urls=list(host_data.abandoned_urls),
+                )
+                for hostname, host_data in self.hosts.items()
+            }
+            nb_requested = sum(host.nb_requested for host in host_settlements.values())
+            nb_success = sum(host.nb_success for host in host_settlements.values())
+            nb_abandoned = sum(host.nb_abandoned for host in host_settlements.values())
+            self.settlement = Settlement(
+                aborted=self.aborted,
+                abort_reason=self.abort_reason,
+                nb_requested=nb_requested,
+                nb_success=nb_success,
+                nb_abandoned=nb_abandoned,
+                nb_unprocessed=self.nb_unprocessed,
+                hosts=host_settlements,
+            )
+            return self.settlement
+
+    def log_settlement(self, settlement: Settlement):
+        """Log a readable summary of settled download results"""
+        if settlement.aborted:
+            logger.error(
+                f"Image downloads aborted ({settlement.abort_reason}): "
+                f"{settlement.nb_success} succeeded, "
+                f"{settlement.nb_abandoned} abandoned, "
+                f"{settlement.nb_unprocessed} unprocessed "
+                f"out of {settlement.nb_requested} requested"
+            )
+        else:
+            logger.info(
+                f"Image downloads settled: {settlement.nb_success} succeeded, "
+                f"{settlement.nb_abandoned} abandoned, "
+                f"{settlement.nb_unprocessed} unprocessed "
+                f"out of {settlement.nb_requested} requested"
+            )
+        # also emit a machine-readable line so that results can be queried from logs
+        payload = json.dumps(self.settlement_as_dict(settlement))
+        logger.info(f"Image downloads settlement: {payload}")
+        for hostname, host in sorted(settlement.hosts.items()):
+            if (
+                host.nb_abandoned == 0
+                and host.nb_unprocessed == 0
+                and host.nb_success == host.nb_requested
+            ):
+                logger.debug(
+                    f"- {hostname}: {host.nb_success}/{host.nb_requested} succeeded"
+                )
+                continue
+            msg = (
+                f"- {hostname}: {host.nb_success}/{host.nb_requested} succeeded, "
+                f"{host.nb_abandoned} abandoned, {host.nb_unprocessed} unprocessed"
+            )
+            if host.nb_abandoned:
+                msg += f" (abandoned: {', '.join(host.abandoned_urls)})"
+                if host.nb_abandoned > len(host.abandoned_urls):
+                    msg += f" and {host.nb_abandoned - len(host.abandoned_urls)} more"
+            logger.warning(msg)
+
+    def settlement_as_dict(self, settlement: Settlement) -> dict[str, Any]:
+        """JSON-serializable representation of settled download results"""
+        return {
+            "aborted": settlement.aborted,
+            "abort_reason": settlement.abort_reason,
+            "requested": settlement.nb_requested,
+            "success": settlement.nb_success,
+            "abandoned": settlement.nb_abandoned,
+            "unprocessed": settlement.nb_unprocessed,
+            "hosts": {
+                hostname: {
+                    "requested": host.nb_requested,
+                    "success": host.nb_success,
+                    "abandoned": host.nb_abandoned,
+                    "unprocessed": host.nb_unprocessed,
+                    "abandoned_urls": host.abandoned_urls,
+                }
+                for hostname, host in settlement.hosts.items()
+            },
+        }
 
     def get_image_data(self, url: str, **resize_args: Any) -> tuple[io.BytesIO, str]:
         """Bytes stream of an optimized, resized WebP of the source image"""
@@ -166,32 +349,40 @@ class Imager:
         if path is None:
             path = f"images/{digest}"
 
-        # do not add same image to process twice
-        if digest in self.handled:
-            return path
+        with self._stats_lock:
+            # do not add same image to process twice
+            if digest in self.handled:
+                return path
 
-        # record that we are processing this one
-        self.handled.add(digest)
+            # record that we are processing this one
+            self.handled.add(digest)
 
-        self.nb_requested += 1
+            self.nb_requested += 1
 
-        if parsed_url.hostname not in self.hosts:
-            files_to_download = FileDatabase(parsed_url.hostname)
-            self.filesDatabases.append(files_to_download)
-            files_to_download.flush()
-            self.hosts[parsed_url.hostname] = HostData(
-                files_to_download=files_to_download
+            if parsed_url.hostname not in self.hosts:
+                files_to_download = FileDatabase(parsed_url.hostname)
+                self.filesDatabases.append(files_to_download)
+                files_to_download.flush()
+                self.hosts[parsed_url.hostname] = HostData(
+                    files_to_download=files_to_download,
+                    hostname=parsed_url.hostname,
+                )
+            host_data = self.hosts[parsed_url.hostname]
+            host_data.nb_requested += 1
+            # pending until settled (either successful, abandoned, or unprocessed)
+            host_data.nb_pending += 1
+            host_data.downloads_complete = False
+            host_data.files_to_download.push(
+                File(url=parsed_url.geturl(), zim_path=path, download_attempts=0)
             )
-        self.hosts[parsed_url.hostname].files_to_download.push(
-            File(url=parsed_url.geturl(), zim_path=path, download_attempts=0)
-        )
 
         return path
 
     def once_done(self):
         """default callback for single image processing"""
         # logger.debug("Once DONE")
-        self.nb_done += 1
+        with self._stats_lock:
+            self.nb_done += 1
         shared.progresser.update(incr=1)
 
     def process_images(self):
@@ -206,69 +397,103 @@ class Imager:
             shared.img_executor.submit(self.worker_loop)
         while not self.aborted and not self.all_hosts_done:
             sleep(2)
+        # workers might still be finishing their current download; settlement itself is
+        # computed once they are all done (see settle()) so that successes are not lost
+        return self.aborted
 
     @property
     def all_hosts_done(self) -> bool:
         return all(host.downloads_complete for host in self.hosts.values())
 
-    def _get_next_file_to_download(self) -> FileToDownload | None:
-        while not self.aborted:
-            now = datetime.now(UTC)
+    def _pick_next_file(self) -> FileToDownload | None:
+        """Pick next file to download, if any is available right now
 
-            # check if all downloads have completed and exit
-            if self.all_hosts_done:
-                return None
+        Must be called with shared.lock held (Redis queue and host state access).
+        Returns None when no file can be picked right now, either because all hosts are
+        done or because they are all throttled / have their files still in-flight."""
+        now = datetime.now(UTC)
 
-            for hostname, host_data in self.hosts.items():
-                # check for conditions which leads to ignore current host
-                if (
-                    host_data.downloads_complete
-                    or (
-                        host_data.not_before_date is not None
-                        and host_data.not_before_date > now
-                    )
-                    or (
-                        host_data.last_request_date is not None
-                        and host_data.last_request_date
-                        + timedelta(
-                            milliseconds=host_data.request_interval_milliseconds
-                        )
-                        > now
-                    )
-                ):
-                    continue
-
-                # grab new file from Redis queue
-                file_to_download = host_data.files_to_download.pop()
-                if file_to_download is None:
-                    logger.debug(f"{hostname} has completed all its downloads")
-                    host_data.downloads_complete = True
-                    continue
-
-                # modify lastRequestDate immediately so that all workers are aware
-                host_data.last_request_date = now
-                return FileToDownload(
-                    url=file_to_download.url,
-                    zim_path=file_to_download.zim_path,
-                    download_attempts=file_to_download.download_attempts,
-                    host_data=host_data,
-                    hostname=hostname,
+        for hostname, host_data in self.hosts.items():
+            # check for conditions which leads to ignore current host
+            if (
+                host_data.downloads_complete
+                or (
+                    host_data.not_before_date is not None
+                    and host_data.not_before_date > now
                 )
+                or (
+                    host_data.last_request_date is not None
+                    and host_data.last_request_date
+                    + timedelta(milliseconds=host_data.request_interval_milliseconds)
+                    > now
+                )
+            ):
+                continue
 
-            # pause few milliseconds, no host has something to process yet (just to not
-            # burn CPU)
-            sleep(0.01)
+            # grab new file from Redis queue
+            file_to_download = host_data.files_to_download.pop()
+            if file_to_download is None:
+                with self._stats_lock:
+                    if host_data.nb_pending:
+                        # remaining files of this host are still in-flight in other
+                        # workers (or waiting for a retry); do not mark it complete
+                        continue
+                    host_data.downloads_complete = True
+                logger.debug(f"{hostname} has completed all its downloads")
+                continue
+
+            # modify lastRequestDate immediately so that all workers are aware
+            host_data.last_request_date = now
+            return FileToDownload(
+                url=file_to_download.url,
+                zim_path=file_to_download.zim_path,
+                download_attempts=file_to_download.download_attempts,
+                host_data=host_data,
+                hostname=hostname,
+            )
+
+        return None
 
     def worker_loop(self):
         try:
             while not self.aborted:
                 with shared.lock:
-                    next_file = self._get_next_file_to_download()
+                    next_file = self._pick_next_file()
+                    all_done = self.all_hosts_done
                 if next_file is None:
-                    break
+                    if all_done or self.aborted:
+                        break
+                    # no host has something to process yet (just to not burn CPU);
+                    # done outside the lock so that in-flight workers can write to ZIM
+                    sleep(0.01)
+                    continue
                 self.process_image(next_file)
-        except Exception:
-            self.abort()
+        except Exception as exc:
+            self.abort(f"unexpected error in image worker: {exc}")
+            logger.exception(exc, exc_info=context.debug)
+
+    def _check_failure_threshold(self) -> bool:
+        """Whether the failure ratio has been exceeded, meaning we should stop
+
+        Only definitively abandoned downloads are considered as failures: unprocessed
+        files must not be counted, otherwise aborting would be self-reinforcing."""
+        with self._stats_lock:
+            nb_failed, nb_requested = self.nb_failed, self.nb_requested
+        return (
+            nb_failed > FILES_DOWNLOAD_FAILURE_MINIMUM_FOR_CHECK
+            and nb_requested > 0
+            and (nb_failed * 10000) / nb_requested
+            > FILES_DOWNLOAD_FAILURE_TRESHOLD_PER_TEN_THOUSAND
+        )
+
+    def _abort_on_too_many_failures(self):
+        """Abort the whole image processing if the failure ratio is exceeded"""
+        if self._check_failure_threshold():
+            with self._stats_lock:
+                nb_failed, nb_requested = self.nb_failed, self.nb_requested
+            self.abort(
+                f"too many files failed to download: [{nb_failed}/{nb_requested}]"
+            )
 
     def process_image(
         self,
@@ -276,38 +501,46 @@ class Imager:
     ):
         """download image from url or S3 and add to Zim at path. Upload if req."""
 
-        if (
-            self.nb_failed > FILES_DOWNLOAD_FAILURE_MINIMUM_FOR_CHECK
-            and (self.nb_failed * 10000) / self.nb_requested
-            > FILES_DOWNLOAD_FAILURE_TRESHOLD_PER_TEN_THOUSAND
-        ):
-            raise Exception(
-                f"Too many files failed to download: [{self.nb_failed}/"
-                f"{self.nb_requested}]"
-            )
+        if self.aborted:
+            return
+
+        if self._check_failure_threshold():
+            # do not process this file, and ask all workers to stop: this file will be
+            # accounted for as unprocessed in the settlement
+            self._abort_on_too_many_failures()
+            return
 
         file.download_attempts += 1
         try:
-            self.download_image(file)
-            file.host_data.requests_done_since_last_speed_change += 1
-            if (
-                file.host_data.requests_done_since_last_speed_change
-                > FILES_DOWNLOAD_SPEED_UP_AFTER
-                and file.host_data.request_interval_milliseconds
-                > FILES_DOWNLOAD_MIN_INTERVAL
-            ):
-                file.host_data.request_interval_milliseconds = max(
-                    FILES_DOWNLOAD_MIN_INTERVAL,
-                    file.host_data.request_interval_milliseconds
-                    / FILES_DOWNLOAD_SPEED_UP_FACTOR,
-                )
-                file.host_data.requests_done_since_last_speed_change = 0
-                logger.debug(
-                    f"Speeding up {file.hostname} to"
-                    f" {file.host_data.request_interval_milliseconds}ms interval"
-                    f" ({file.host_data.files_to_download.len()} files remaining"
-                    " to download from host)"
-                )
+            outcome = self.download_image(file)
+            if outcome is DownloadOutcome.SUCCESS:
+                file.host_data.requests_done_since_last_speed_change += 1
+                if (
+                    file.host_data.requests_done_since_last_speed_change
+                    > FILES_DOWNLOAD_SPEED_UP_AFTER
+                    and file.host_data.request_interval_milliseconds
+                    > FILES_DOWNLOAD_MIN_INTERVAL
+                ):
+                    file.host_data.request_interval_milliseconds = max(
+                        FILES_DOWNLOAD_MIN_INTERVAL,
+                        file.host_data.request_interval_milliseconds
+                        / FILES_DOWNLOAD_SPEED_UP_FACTOR,
+                    )
+                    file.host_data.requests_done_since_last_speed_change = 0
+                    logger.debug(
+                        f"Speeding up {file.hostname} to"
+                        f" {file.host_data.request_interval_milliseconds}ms interval"
+                        f" ({file.host_data.files_to_download.len()} files remaining"
+                        " to download from host)"
+                    )
+                self.record_success(file)
+            elif outcome is DownloadOutcome.UNPROCESSED:
+                # aborted while downloading this file: it stays pending and will be
+                # accounted for as unprocessed in the settlement
+                logger.debug(f"Processing of {file.url} interrupted by global abort")
+            else:
+                self.record_abandoned(file, reason="undownloadable")
+                self._abort_on_too_many_failures()
         except requests.RequestException as exc:
             if exc.response is not None:
                 err_details = f"HTTP error code {exc.response.status_code}"
@@ -321,8 +554,8 @@ class Imager:
                     f"Error downloading file {file.url}, too many attempts failed, last"
                     f" one failed with '{err_details}', skipping"
                 )
-                file.host_data.download_failure += 1
-                self.nb_failed += 1
+                self.record_abandoned(file, reason="too many attempts")
+                self._abort_on_too_many_failures()
                 return
             if (
                 exc.response is not None
@@ -331,8 +564,8 @@ class Imager:
                 logger.warning(
                     f"Error downloading file {file.url}, received a 404, skipping"
                 )
-                file.host_data.download_failure += 1
-                self.nb_failed += 1
+                self.record_abandoned(file, reason="HTTP 404")
+                self._abort_on_too_many_failures()
                 return
 
             if exc.response is not None:
@@ -372,21 +605,24 @@ class Imager:
                         " to download from host)"
                     )
 
-            # put file back in the queue
-            file.host_data.files_to_download.push(file)
+            if self.aborted:
+                # do not requeue when aborting: file stays pending and is accounted for
+                # as unprocessed in the settlement
+                return
+
+            # put file back in the queue for another attempt
+            self.requeue(file)
         except Exception as exc:
             logger.warning(
                 f"Error downloading file {file.url} due to '{exc}' exception, skipping",
                 exc_info=context.debug,
             )
-            file.host_data.download_failure += 1
-            self.nb_failed += 1
-        else:
-            file.host_data.download_success += 1
+            self.record_abandoned(file, reason=f"unexpected error: {exc}")
+            self._abort_on_too_many_failures()
 
-    def download_image(self, file: FileToDownload):
+    def download_image(self, file: FileToDownload) -> DownloadOutcome:
         if self.aborted:
-            return
+            return DownloadOutcome.UNPROCESSED
 
         # setup resizing based on request
         resize_args = {"width": POSTS_IMAGE_SIZE}
@@ -406,7 +642,7 @@ class Imager:
                     is_front=False,
                 )
             self.once_done()
-            return
+            return DownloadOutcome.SUCCESS
 
         if not shared.s3_storage:
             raise Exception("S3 storage should already have been initialized")
@@ -415,7 +651,7 @@ class Imager:
         ident = self.get_version_ident_for(parsed_url.geturl())
         if ident is None:
             logger.warning(f"Unable to query {parsed_url.geturl()}. Skipping")
-            return
+            return DownloadOutcome.ABANDONED
 
         key = self.get_s3_key_for(parsed_url.geturl())
         meta = {"ident": ident, "encoder_version": str(IMAGES_ENCODER_VERSION)}
@@ -453,7 +689,7 @@ class Imager:
                     is_front=False,
                 )
             self.once_done()
-            return
+            return DownloadOutcome.SUCCESS
 
         if not key or not meta:
             raise Exception("s3_key and s3_meta should have been populated")
@@ -482,4 +718,4 @@ class Imager:
             except Exception as exc:
                 logger.error(f"{key} failed to upload to cache: {exc}")
 
-        return
+        return DownloadOutcome.SUCCESS

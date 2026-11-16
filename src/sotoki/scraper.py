@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import datetime
+import json
 import logging
 import pathlib
 import re
@@ -48,7 +49,7 @@ from sotoki.utils.database.users import UsersDatabase
 from sotoki.utils.exceptions import DatabaseError
 from sotoki.utils.executor import SotokiExecutor
 from sotoki.utils.html import Rewriter
-from sotoki.utils.imager import Imager
+from sotoki.utils.imager import Imager, Settlement
 from sotoki.utils.misc import web_backoff
 from sotoki.utils.progress import Progresser
 from sotoki.utils.s3 import setup_s3_and_check_credentials
@@ -405,6 +406,30 @@ class StackExchangeToZim:
         shared.progresser.print()
         return self.start()
 
+    def record_images_settlement(self, settlement: Settlement):
+        """Settle image downloads and expose results
+
+        Logs the human-readable summary plus a machine-readable JSON line, stores the
+        settlement on the shared state, and persists it in the stats file (when one was
+        requested) so that it can be queried once the process is over. The existing
+        ``done``/``total`` progress contract of the stats file is preserved.
+
+        Successfully added images are already in the ZIM and are never affected."""
+        shared.imager.log_settlement(settlement)
+        shared.images_settlement = settlement
+        if not context.stats_filename:
+            return
+        try:
+            stats = {}
+            if context.stats_filename.exists():
+                with open(context.stats_filename) as fh:
+                    stats = json.load(fh)
+            stats["images"] = shared.imager.settlement_as_dict(settlement)
+            with open(context.stats_filename, "w") as fh:
+                json.dump(stats, fh)
+        except Exception as exc:
+            logger.error(f"Failed to record images settlement in stats file: {exc}")
+
     def start(self):
 
         # debug/devel mode to open a shell with the inited context
@@ -450,6 +475,10 @@ class StackExchangeToZim:
             shared.imager.process_images()
             shared.img_executor.join()
 
+            # workers are done: settle results (successes, abandoned, unprocessed) so
+            # that they are visible at the end of the process
+            self.record_images_settlement(shared.imager.settle())
+
             shared.executor.shutdown()
             shared.img_executor.shutdown()
 
@@ -463,9 +492,15 @@ class StackExchangeToZim:
             else:
                 logger.error(f"Interrupting process due to error: {exc}")
                 logger.exception(exc)
-            shared.imager.abort()
+            shared.imager.abort("scraper interrupted by an error")
             shared.executor.shutdown(wait=False)
             shared.img_executor.shutdown(wait=False)
+            # wait for in-flight image downloads to finish (they stop after their
+            # current item once aborted) so that reported counts are accurate
+            shared.img_executor.join()
+            # still settle and report images status since some downloads might have
+            # succeeded and must be reported (and ZIM might be kept for debugging)
+            self.record_images_settlement(shared.imager.settle())
             return 1
         else:
             logger.info("Finishing ZIM file…")

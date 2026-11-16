@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Settle image download results per host (success / definitively abandoned /
+  unprocessed) and report them at the end of the process, both in logs and in a
+  machine-readable summary. A single failing host no longer stops downloads from
+  other hosts; the global abort on excessive failures now accurately reports
+  unprocessed images and preserves images already added to the ZIM.
+
 ### Fixed
 
 - Skip unanswered posts whose XML has no `answers` element (#436)
