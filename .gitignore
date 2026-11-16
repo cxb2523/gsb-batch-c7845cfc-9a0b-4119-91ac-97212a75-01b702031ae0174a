@@ -1,0 +1,63 @@
+# Ignore everything by default.
+# The repository works as a whitelist: only explicitly allowed files are tracked.
+*
+
+# Application source code.
+# Only Python files are tracked.
+!adapters/
+!adapters/**/
+!adapters/**/*.py
+!core/
+!core/**/
+!core/**/*.py
+!domain/
+!domain/**/
+!domain/**/*.py
+!scripts/
+!scripts/**/
+!scripts/**/*.py
+
+# Runtime-generated channel state that should be versioned.
+!channels/
+!channels/current.json
+!channels/urls.txt
+
+# Runtime configuration templates.
+!configs/
+!configs/v2ray.json
+!configs/v2ray-clean.txt
+!configs/v2ray-raw.txt
+
+# Project documentation.
+!docs/
+!docs/**
+
+# Localization files.
+!locales/
+!locales/*.json
+
+# Keep the logs directory in the tree, but ignore its contents.
+# .gitkeep preserves the empty directory in git.
+!logs/
+!logs/.gitkeep
+
+# Tests
+!tests/
+!tests/**/
+!tests/**/*.py
+
+# Track gitignore itself so ignore rules are versioned.
+!.gitignore
+
+# Root project metadata and entry points.
+!LICENSE
+!README.md
+!main.py
+!pyproject.toml
+!requirements.txt
+!requirements-dev.txt
+!uv.lock
+
+# Python cache files
+__pycache__/
+*.py[cod]

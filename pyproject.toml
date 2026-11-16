@@ -1,0 +1,138 @@
+[project]
+name = "TGV2RayScraper"
+version = "1.9.2"
+requires-python = ">=3.10"
+dependencies = [
+    "aiofiles",
+    "asteval",
+    "babel",
+    "httpx[socks]",
+    "lxml",
+    "rich",
+]
+
+[dependency-groups]
+dev = [
+    "mypy",
+    "pytest",
+    "pytest-asyncio",
+    "pytest-cov",
+    "pytest-mock",
+    "ruff",
+]
+
+[tool.coverage.run]
+source = [
+    "adapters",
+    "core",
+    "domain",
+]
+omit = [
+    "core/constants/messages/**",
+    "core/constants/patterns/common.py",
+    "core/constants/templates/**",
+    "core/constants/common.py",
+    "core/constants/formats.py",
+    "scripts/**",
+    "tests/**",
+    "**/__init__.py",
+    "main.py",
+]
+
+[tool.mypy]
+check_untyped_defs = true
+disable_error_code = []
+disallow_any_decorated = true
+disallow_any_explicit = true
+disallow_any_generics = true
+disallow_any_unimported = true
+disallow_incomplete_defs = true
+disallow_subclassing_any = true
+disallow_untyped_calls = true
+disallow_untyped_decorators = true
+disallow_untyped_defs = true
+enable_error_code = [
+    "ignore-without-code",
+    "redundant-self",
+    "truthy-bool",
+]
+implicit_reexport = true
+no_implicit_optional = true
+pretty = true
+python_version = "3.10"
+show_error_codes = true
+strict = true
+strict_concatenate = true
+strict_equality = true
+warn_no_return = true
+warn_redundant_casts = true
+warn_return_any = true
+warn_unreachable = true
+warn_unused_configs = true
+warn_unused_ignores = true
+
+[[tool.mypy.overrides]]
+ignore_missing_imports = true
+module = [
+    "aiofiles",
+    "asteval",
+    "lxml",
+    "tests.*",
+]
+disable_error_code = [
+    "arg-type",
+]
+
+[tool.pytest.ini_options]
+addopts = "-v --tb=short --cov=adapters --cov=core --cov=domain --cov-report=term-missing"
+asyncio_mode = "auto"
+log_cli = true
+log_cli_level = "INFO"
+markers = [
+    "e2e: Marks a test as an end-to-end test.",
+    "integration: Marks a test as an integration test.",
+    "unit: Marks a test as a unit test.",
+]
+minversion = "8.0"
+pythonpath = [
+    ".",
+]
+testpaths = [
+    "tests/",
+]
+
+[tool.ruff]
+indent-width = 4
+line-length = 79
+respect-gitignore = true
+show-fixes = true
+target-version = "py310"
+
+[tool.ruff.lint]
+ignore = [
+    "BLE001",
+    "CPY001",
+    "D",
+    "PLR0913",
+    "PTH123",
+    "UP007",
+]
+select = [
+    "ALL",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*" = [
+    "ARG001",
+    "ARG005",
+    "E731",
+    "EM101",
+    "PLR0913",
+    "PLR2004",
+    "S101",
+]
+
+[tool.ruff.format]
+indent-style = "space"
+line-ending = "lf"
+quote-style = "double"

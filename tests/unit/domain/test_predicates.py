@@ -1,0 +1,172 @@
+import pytest
+
+from core.typing import (
+    ChannelInfo,
+    ConditionStr,
+    Record,
+)
+from domain.predicates import (
+    has_multiple_channel_actions,
+    is_channel_available,
+    is_channel_fully_scanned,
+    is_channel_pending_update,
+    is_new_channel,
+    make_predicate,
+    should_apply_changes,
+    should_delete_channel,
+)
+from tests.unit.domain.constants.test_cases.predicates import (
+    HAS_MULTIPLE_CHANNEL_ACTIONS_ARGS,
+    HAS_MULTIPLE_CHANNEL_ACTIONS_CASES,
+    IS_CHANNEL_AVAILABLE_ARGS,
+    IS_CHANNEL_AVAILABLE_CASES,
+    IS_CHANNEL_FULLY_SCANNED_ARGS,
+    IS_CHANNEL_FULLY_SCANNED_CASES,
+    IS_CHANNEL_PENDING_UPDATE_ARGS,
+    IS_CHANNEL_PENDING_UPDATE_CASES,
+    IS_NEW_CHANNEL_ARGS,
+    IS_NEW_CHANNEL_CASES,
+    MAKE_PREDICATE_ARGS,
+    MAKE_PREDICATE_CASES,
+    SHOULD_APPLY_CHANGES_ARGS,
+    SHOULD_APPLY_CHANGES_CASES,
+    SHOULD_DELETE_CHANNEL_ARGS,
+    SHOULD_DELETE_CHANNEL_CASES,
+)
+
+
+@pytest.mark.parametrize(
+    HAS_MULTIPLE_CHANNEL_ACTIONS_ARGS,
+    HAS_MULTIPLE_CHANNEL_ACTIONS_CASES,
+)
+def test_has_multiple_channel_actions(
+    *,
+    has_overrides: bool,
+    reset_to_defaults: bool,
+    should_delete: bool,
+    expected: bool,
+) -> None:
+    result = has_multiple_channel_actions(
+        has_overrides=has_overrides,
+        reset_to_defaults=reset_to_defaults,
+        should_delete=should_delete,
+    )
+
+    assert result is expected
+
+
+@pytest.mark.parametrize(
+    IS_CHANNEL_AVAILABLE_ARGS,
+    IS_CHANNEL_AVAILABLE_CASES,
+)
+def test_is_channel_available(
+    channel_info: ChannelInfo,
+    *,
+    expected: bool,
+) -> None:
+    result = is_channel_available(
+        channel_info=channel_info,
+    )
+
+    assert result is expected
+
+
+@pytest.mark.parametrize(
+    IS_CHANNEL_FULLY_SCANNED_ARGS,
+    IS_CHANNEL_FULLY_SCANNED_CASES,
+)
+def test_is_channel_fully_scanned(
+    channel_info: ChannelInfo,
+    *,
+    expected: bool,
+) -> None:
+    result = is_channel_fully_scanned(
+        channel_info=channel_info,
+    )
+
+    assert result is expected
+
+
+@pytest.mark.parametrize(
+    IS_CHANNEL_PENDING_UPDATE_ARGS,
+    IS_CHANNEL_PENDING_UPDATE_CASES,
+)
+def test_is_channel_pending_update(
+    channel_info: ChannelInfo,
+    *,
+    expected: bool,
+) -> None:
+    result = is_channel_pending_update(
+        channel_info=channel_info,
+    )
+
+    assert result is expected
+
+
+@pytest.mark.parametrize(
+    IS_NEW_CHANNEL_ARGS,
+    IS_NEW_CHANNEL_CASES,
+)
+def test_is_new_channel(
+    channel_info: ChannelInfo,
+    *,
+    expected: bool,
+) -> None:
+    result = is_new_channel(
+        channel_info=channel_info,
+    )
+
+    assert result is expected
+
+
+@pytest.mark.parametrize(
+    MAKE_PREDICATE_ARGS,
+    MAKE_PREDICATE_CASES,
+)
+def test_make_predicate(
+    condition: ConditionStr | None,
+    record: Record,
+    *,
+    expected: bool,
+) -> None:
+    predicate = make_predicate(
+        condition=condition,
+    )
+    result = (
+        predicate(record)
+        if predicate is not None else expected
+    )
+
+    assert result is expected
+
+
+@pytest.mark.parametrize(
+    SHOULD_APPLY_CHANGES_ARGS,
+    SHOULD_APPLY_CHANGES_CASES,
+)
+def test_should_apply_changes(
+    channel_info: ChannelInfo,
+    *,
+    expected: bool,
+) -> None:
+    result = should_apply_changes(
+        channel_info=channel_info,
+    )
+
+    assert result is expected
+
+
+@pytest.mark.parametrize(
+    SHOULD_DELETE_CHANNEL_ARGS,
+    SHOULD_DELETE_CHANNEL_CASES,
+)
+def test_should_delete_channel(
+    channel_info: ChannelInfo,
+    *,
+    expected: bool,
+) -> None:
+    result = should_delete_channel(
+        channel_info=channel_info,
+    )
+
+    assert result is expected

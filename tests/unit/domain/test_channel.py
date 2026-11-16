@@ -1,0 +1,674 @@
+from unittest.mock import (
+    ANY,
+    Mock,
+    call,
+)
+
+import pytest
+from pytest_mock import (
+    MockerFixture,
+)
+
+from core.terminal.renderers import (
+    render_channel_status,
+)
+from core.typing import (
+    ChannelInfo,
+    ChannelName,
+    ChannelNames,
+    ChannelsDict,
+    PostID,
+    RecordPredicate,
+)
+from domain.channel import (
+    ChannelStatus,
+    ChannelUpdateResult,
+    apply_channel_changes,
+    delete_channels,
+    diff_channel_id,
+    display_channel_info,
+    format_channel_status,
+    get_filtered_keys,
+    get_normalized_count,
+    get_normalized_current_id,
+    get_normalized_last_id,
+    get_normalized_state,
+    get_sorted_keys,
+    normalize_channel,
+    normalize_channel_names,
+    normalize_channels,
+    process_channels,
+    sort_channel_names,
+    update_last_id_and_state,
+    update_with_new_channels,
+)
+from domain.predicates import (
+    has_multiple_channel_actions,
+    should_apply_changes,
+    should_delete_channel,
+)
+from tests.unit.domain.constants.common import (
+    DEFAULT_CHANNEL_VALUES,
+    DEFAULT_LAST_ID,
+    MESSAGE_ERROR_MULTIPLE_ACTIONS_SPECIFIED,
+    MESSAGE_INFO_CHANNEL_DELETE_SKIPPED,
+    MESSAGE_WARNING_NO_CHANNELS_TO_DISPLAY,
+    TEMPLATE_DEBUG_CHANNEL_CHANGES_SKIPPED_NO_CHANGES,
+    TEMPLATE_DEBUG_CHANNEL_CHANGES_SKIPPED_TARGETS,
+    TEMPLATE_DEBUG_CHANNEL_MISSING_ADD_COMPLETED,
+    TEMPLATE_ERROR_INVALID_OVERRIDE_FIELDS,
+    TEMPLATE_INFO_CHANNEL_CHANGES_SKIPPED,
+    TEMPLATE_INFO_CHANNEL_CHANGES_TOTAL,
+    TEMPLATE_INFO_CHANNELS_STATUS_COMPLETED,
+    TEMPLATE_INFO_CHANNELS_STATUS_STARTED,
+    TEMPLATE_TITLE_CHANNEL_DELETE,
+)
+from tests.unit.domain.constants.fixtures.channel import (
+    CHANNEL_INFO_BY_NAMES,
+    CHANNELS_SAMPLE,
+)
+from tests.unit.domain.constants.test_cases.channel import (
+    APPLY_CHANNEL_CHANGES_ARGS,
+    APPLY_CHANNEL_CHANGES_CASES,
+    DELETE_CHANNELS_ARGS,
+    DELETE_CHANNELS_CASES,
+    DIFF_CHANNEL_ID_ARGS,
+    DIFF_CHANNEL_ID_CASES,
+    DISPLAY_CHANNEL_INFO_VARIOUS_ARGS,
+    DISPLAY_CHANNEL_INFO_VARIOUS_CASES,
+    FORMAT_CHANNEL_STATUS_ARGS,
+    FORMAT_CHANNEL_STATUS_CASES,
+    GET_FILTERED_KEYS_ARGS,
+    GET_FILTERED_KEYS_CASES,
+    GET_NORMALIZED_COUNT_ARGS,
+    GET_NORMALIZED_COUNT_CASES,
+    GET_NORMALIZED_CURRENT_ID_ARGS,
+    GET_NORMALIZED_CURRENT_ID_CASES,
+    GET_NORMALIZED_LAST_ID_ARGS,
+    GET_NORMALIZED_LAST_ID_CASES,
+    GET_NORMALIZED_STATE_ARGS,
+    GET_NORMALIZED_STATE_CASES,
+    GET_SORTED_KEYS_ARGS,
+    GET_SORTED_KEYS_CASES,
+    NORMALIZE_CHANNEL_ARGS,
+    NORMALIZE_CHANNEL_CASES,
+    NORMALIZE_CHANNEL_NAMES_ARGS,
+    NORMALIZE_CHANNEL_NAMES_CASES,
+    NORMALIZE_CHANNELS_ARGS,
+    NORMALIZE_CHANNELS_CASES,
+    PROCESS_CHANNELS_CALLS_ARGS,
+    PROCESS_CHANNELS_CALLS_CASES,
+    SORT_CHANNEL_NAMES_ARGS,
+    SORT_CHANNEL_NAMES_CASES,
+    UPDATE_LAST_ID_AND_STATE_ARGS,
+    UPDATE_LAST_ID_AND_STATE_CASES,
+    UPDATE_WITH_NEW_CHANNELS_ARGS,
+    UPDATE_WITH_NEW_CHANNELS_CASES,
+)
+
+
+@pytest.mark.parametrize(
+    APPLY_CHANNEL_CHANGES_ARGS,
+    APPLY_CHANNEL_CHANGES_CASES,
+)
+def test_apply_channel_changes(
+    mock_log_channel_changes: Mock,
+    mock_logger: Mock,
+    channel_overrides: ChannelInfo | None,
+    channel_predicate: RecordPredicate | None,
+    *,
+    dry_run: bool,
+    reset_to_defaults: bool,
+) -> None:
+    channels = CHANNELS_SAMPLE
+
+    result = apply_channel_changes(
+        channels=channels,
+        channel_overrides=channel_overrides,
+        channel_predicate=channel_predicate,
+        dry_run=dry_run,
+        reset_to_defaults=reset_to_defaults,
+    )
+
+    should_apply = channel_predicate or should_apply_changes
+    overrides = channel_overrides or {}  # type: ignore[var-annotated]
+
+    valid_overrides = {
+        key: value
+        for key, value in overrides.items()
+        if value is not None
+    }
+
+    if not reset_to_defaults and not valid_overrides:
+        mock_logger.debug.assert_called_with(
+            msg=TEMPLATE_DEBUG_CHANNEL_CHANGES_SKIPPED_NO_CHANGES.format(
+                reset_to_defaults=reset_to_defaults,
+                valid_overrides=valid_overrides,
+            ),
+        )
+        return
+
+    channel_names_to_update = [
+        name
+        for name in channels
+        if should_apply(channels[name])
+    ]
+
+    if dry_run:
+        mock_logger.info.assert_called_with(
+            msg=TEMPLATE_INFO_CHANNEL_CHANGES_SKIPPED.format(
+                count=len(channel_names_to_update),
+            ),
+        )
+        mock_logger.debug.assert_called_with(
+            msg=TEMPLATE_DEBUG_CHANNEL_CHANGES_SKIPPED_TARGETS.format(
+                dry_run=dry_run,
+                channel_names=channel_names_to_update,
+            ),
+        )
+        return
+
+    mock_logger.info.assert_called_with(
+        msg=TEMPLATE_INFO_CHANNEL_CHANGES_TOTAL.format(
+            count=len(channel_names_to_update),
+        ),
+    )
+
+    mock_log_channel_changes.assert_has_calls(
+        calls=[
+            call(
+                name=name,
+                before=channels[name],
+                after=result[name],
+            )
+            for name in channel_names_to_update
+        ],
+        any_order=False,
+    )
+
+
+def test_apply_channel_changes_invalid_override_key() -> None:
+    with pytest.raises(
+        ValueError,
+        match=r".*invalid_field.*",
+    ) as exc_info:
+        apply_channel_changes(
+            channels=CHANNEL_INFO_BY_NAMES([
+                "channel_available",
+                "channel_new",
+                "channel_unavailable",
+            ]),
+            channel_overrides={
+                "count": 0,
+                "invalid_field": 0,
+            },
+            channel_predicate=None,
+            dry_run=True,
+            reset_to_defaults=False,
+        )
+
+    assert TEMPLATE_ERROR_INVALID_OVERRIDE_FIELDS.format(
+        fields={
+            "invalid_field",
+        },
+    ) == str(exc_info.value)
+
+
+@pytest.mark.parametrize(
+    DELETE_CHANNELS_ARGS,
+    DELETE_CHANNELS_CASES,
+)
+def test_delete_channels(
+    mock_log_debug_object: Mock,
+    mock_logger: Mock,
+    channels: ChannelsDict,
+    expected_keys_to_keep: ChannelNames,
+    expected_deleted: ChannelNames,
+) -> None:
+    remaining_channels = delete_channels(
+        channels=channels,
+        channel_predicate=should_delete_channel,
+    )
+
+    assert list(remaining_channels) == expected_keys_to_keep
+
+    mock_log_debug_object.assert_has_calls(
+        calls=[
+            call(
+                title=TEMPLATE_TITLE_CHANNEL_DELETE.format(
+                    name=name,
+                ),
+                obj=channels[name],
+            )
+            for name in expected_deleted
+        ],
+        any_order=False,
+    )
+
+    for name in expected_keys_to_keep:
+        assert remaining_channels[name] == channels[name]
+        assert remaining_channels[name] is not channels[name]
+
+
+@pytest.mark.parametrize(
+    DIFF_CHANNEL_ID_ARGS,
+    DIFF_CHANNEL_ID_CASES,
+)
+def test_diff_channel_id(
+    channel_info: ChannelInfo,
+    expected: int,
+) -> None:
+    result = diff_channel_id(
+        channel_info=channel_info,
+    )
+
+    assert result == expected
+
+
+@pytest.mark.parametrize(
+    DISPLAY_CHANNEL_INFO_VARIOUS_ARGS,
+    DISPLAY_CHANNEL_INFO_VARIOUS_CASES,
+)
+def test_display_channel_info_various(
+    mock_logger: Mock,
+    mock_console: Mock,
+    channels: ChannelsDict,
+) -> None:
+    display_channel_info(
+        channels=channels,
+    )
+
+    filtered_names = get_sorted_keys(
+        channels=channels,
+        apply_filter=True,
+    )
+
+    if not filtered_names:
+        mock_logger.warning.assert_called_once_with(
+            msg=MESSAGE_WARNING_NO_CHANNELS_TO_DISPLAY,
+        )
+        mock_logger.info.assert_not_called()
+        return
+
+    total_messages = render_channel_status(
+        results=[
+            format_channel_status(
+                channel_name=name,
+                channel_info=channels[name],
+            )
+            for name in filtered_names
+        ],
+        console=mock_console,
+    )
+
+    mock_logger.warning.assert_not_called()
+
+    expected_calls = [
+        call(
+            msg=TEMPLATE_INFO_CHANNELS_STATUS_STARTED.format(
+                count=len(filtered_names),
+            ),
+        ),
+        call(
+            msg=TEMPLATE_INFO_CHANNELS_STATUS_COMPLETED.format(
+                total=len(channels),
+                pending=len(filtered_names),
+                messages=total_messages,
+            ),
+        ),
+    ]
+
+    mock_logger.info.assert_has_calls(expected_calls)
+    assert mock_logger.info.call_count == 2
+    mock_console.print.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    FORMAT_CHANNEL_STATUS_ARGS,
+    FORMAT_CHANNEL_STATUS_CASES,
+)
+def test_format_channel_status(
+    channel_name: ChannelName,
+    channel_info: ChannelInfo,
+) -> None:
+    result = format_channel_status(
+        channel_name=channel_name,
+        channel_info=channel_info,
+    )
+
+    expected_diff = diff_channel_id(
+        channel_info=channel_info,
+    )
+
+    assert isinstance(result, ChannelStatus)
+    assert result.channel_name == channel_name
+    assert result.current_id == get_normalized_current_id(
+        channel_info=channel_info,
+    )
+    assert result.last_id == channel_info.get(
+        "last_id",
+        DEFAULT_LAST_ID,
+    )
+    assert result.diff_id == expected_diff
+
+
+@pytest.mark.parametrize(
+    GET_FILTERED_KEYS_ARGS,
+    GET_FILTERED_KEYS_CASES,
+)
+def test_get_filtered_keys(
+    channels: ChannelsDict,
+    expected: ChannelNames,
+) -> None:
+    result = get_filtered_keys(
+        channels=channels,
+    )
+
+    assert result == expected
+
+
+@pytest.mark.parametrize(
+    GET_NORMALIZED_COUNT_ARGS,
+    GET_NORMALIZED_COUNT_CASES,
+)
+def test_get_normalized_count(
+    channel_info: ChannelInfo,
+    expected: int,
+) -> None:
+    result = get_normalized_count(
+        channel_info=channel_info,
+    )
+
+    assert result == expected
+
+
+@pytest.mark.parametrize(
+    GET_NORMALIZED_CURRENT_ID_ARGS,
+    GET_NORMALIZED_CURRENT_ID_CASES,
+)
+def test_get_normalized_current_id(
+    channel_info: ChannelInfo,
+    expected: PostID,
+) -> None:
+    result = get_normalized_current_id(
+        channel_info=channel_info,
+    )
+
+    assert result == expected
+
+
+@pytest.mark.parametrize(
+    GET_NORMALIZED_LAST_ID_ARGS,
+    GET_NORMALIZED_LAST_ID_CASES,
+)
+def test_get_normalized_last_id(
+    channel_info: ChannelInfo,
+    expected: PostID,
+) -> None:
+    result = get_normalized_last_id(
+        channel_info=channel_info,
+    )
+
+    assert result == expected
+
+
+@pytest.mark.parametrize(
+    GET_NORMALIZED_STATE_ARGS,
+    GET_NORMALIZED_STATE_CASES,
+)
+def test_get_normalized_state(
+    channel_info: ChannelInfo,
+    expected: int,
+) -> None:
+    result = get_normalized_state(
+        channel_info=channel_info,
+    )
+
+    assert result == expected
+
+
+@pytest.mark.parametrize(
+    GET_SORTED_KEYS_ARGS,
+    GET_SORTED_KEYS_CASES,
+)
+def test_get_sorted_keys(
+    channels: ChannelsDict,
+    *,
+    apply_filter: bool,
+    reverse: bool,
+    expected: ChannelNames,
+) -> None:
+    result = get_sorted_keys(
+        channels=channels,
+        apply_filter=apply_filter,
+        reverse=reverse,
+    )
+
+    assert isinstance(result, list)
+
+    for channel_name in result:
+        assert isinstance(channel_name, str)
+
+    assert result == expected
+
+
+@pytest.mark.parametrize(
+    NORMALIZE_CHANNEL_ARGS,
+    NORMALIZE_CHANNEL_CASES,
+)
+def test_normalize_channel(
+    channel_info: ChannelInfo,
+    expected: ChannelInfo,
+) -> None:
+    result = normalize_channel(
+        channel_info=channel_info,
+    )
+
+    assert result == expected
+    assert result is not channel_info
+
+
+@pytest.mark.parametrize(
+    NORMALIZE_CHANNEL_NAMES_ARGS,
+    NORMALIZE_CHANNEL_NAMES_CASES,
+)
+def test_normalize_channel_names(
+    channels: ChannelsDict,
+    expected: ChannelsDict,
+) -> None:
+    result = normalize_channel_names(
+        channels=channels,
+    )
+
+    assert list(result) == list(expected)
+    assert result == expected
+    assert result is not channels
+
+
+@pytest.mark.parametrize(
+    NORMALIZE_CHANNELS_ARGS,
+    NORMALIZE_CHANNELS_CASES,
+)
+def test_normalize_channels(
+    channels: ChannelsDict,
+    expected: ChannelsDict,
+) -> None:
+    result = normalize_channels(
+        channels=channels,
+    )
+
+    assert list(result) == list(expected)
+    assert result == expected
+    assert result is not channels
+
+
+@pytest.mark.parametrize(
+    PROCESS_CHANNELS_CALLS_ARGS,
+    PROCESS_CHANNELS_CALLS_CASES,
+)
+def test_process_channels_calls(
+    mock_logger: Mock,
+    mocker: MockerFixture,
+    *,
+    dry_run: bool,
+    reset_all: bool,
+    should_delete: bool,
+) -> None:
+    channels = CHANNEL_INFO_BY_NAMES([
+        "channel_available",
+        "channel_new",
+        "channel_unavailable",
+    ])
+
+    mock_apply = mocker.patch(
+        "domain.channel.apply_channel_changes",
+        wraps=apply_channel_changes,
+    )
+    mock_delete = mocker.patch(
+        "domain.channel.delete_channels",
+        wraps=delete_channels,
+    )
+
+    result = process_channels(
+        channels=channels,
+        channel_filter=None,
+        channel_overrides=None,
+        dry_run=dry_run,
+        reset_to_defaults=reset_all,
+        should_delete=should_delete,
+    )
+
+    if has_multiple_channel_actions(
+        has_overrides=False,
+        reset_to_defaults=reset_all,
+        should_delete=should_delete,
+    ):
+        assert result is channels
+
+        mock_logger.error.assert_any_call(
+            msg=MESSAGE_ERROR_MULTIPLE_ACTIONS_SPECIFIED,
+        )
+
+        mock_apply.assert_not_called()
+        mock_delete.assert_not_called()
+
+        return
+
+    if should_delete or reset_all:
+        assert result is not channels
+    else:
+        assert result is channels
+
+    if should_delete:
+        mock_delete.assert_called_once_with(
+            channels=channels,
+            channel_predicate=ANY,
+        )
+    else:
+        mock_logger.info.assert_any_call(
+            msg=MESSAGE_INFO_CHANNEL_DELETE_SKIPPED,
+        )
+        mock_delete.assert_not_called()
+
+    if reset_all:
+        mock_apply.assert_called_once_with(
+            channels=ANY,
+            channel_overrides=ANY,
+            channel_predicate=ANY,
+            dry_run=dry_run,
+            reset_to_defaults=reset_all,
+        )
+    else:
+        mock_apply.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    SORT_CHANNEL_NAMES_ARGS,
+    SORT_CHANNEL_NAMES_CASES,
+)
+def test_sort_channel_names(
+    channel_names: ChannelNames,
+    *,
+    ignore_case: bool,
+    reverse: bool,
+) -> None:
+    result = sort_channel_names(
+        channel_names=channel_names,
+        ignore_case=ignore_case,
+        reverse=reverse,
+    )
+
+    expected = sorted(
+        channel_names,
+        key=(
+            str.lower if ignore_case else None
+        ),
+        reverse=reverse,
+    )
+
+    assert result == expected
+    assert result is not channel_names
+
+
+@pytest.mark.parametrize(
+    UPDATE_LAST_ID_AND_STATE_ARGS,
+    UPDATE_LAST_ID_AND_STATE_CASES,
+)
+def test_update_last_id_and_state(
+    channel_name: ChannelName,
+    channel_info: ChannelInfo,
+    last_post_id: PostID,
+    expected: ChannelInfo,
+) -> None:
+    old_last_id = channel_info.get(
+        "last_id",
+        DEFAULT_LAST_ID,
+    )
+
+    result = update_last_id_and_state(
+        channel_name=channel_name,
+        channel_info=channel_info,
+        last_post_id=last_post_id,
+    )
+
+    assert channel_info == expected
+
+    assert isinstance(result, ChannelUpdateResult)
+    assert result.channel_name == channel_name
+    assert result.old_last_id == old_last_id
+    assert result.new_last_id == last_post_id
+    assert result.changed == (old_last_id != last_post_id)
+
+
+@pytest.mark.parametrize(
+    UPDATE_WITH_NEW_CHANNELS_ARGS,
+    UPDATE_WITH_NEW_CHANNELS_CASES,
+)
+def test_update_with_new_channels(
+    mock_logger: Mock,
+    current_channels: ChannelsDict,
+    new_channel_names: ChannelNames,
+    expected_keys: ChannelNames,
+) -> None:
+    updated_channels = update_with_new_channels(
+        current_channels=current_channels,
+        channel_names=new_channel_names,
+    )
+
+    assert list(updated_channels) == expected_keys
+    assert updated_channels is not current_channels
+    assert mock_logger.debug.call_count == len(new_channel_names)
+
+    for name in current_channels:
+        assert updated_channels[name] == current_channels[name]
+        assert updated_channels[name] is not current_channels[name]
+
+    for name in new_channel_names:
+        assert updated_channels[name] == DEFAULT_CHANNEL_VALUES
+        assert updated_channels[name] is not DEFAULT_CHANNEL_VALUES
+
+        mock_logger.debug.assert_any_call(
+            msg=TEMPLATE_DEBUG_CHANNEL_MISSING_ADD_COMPLETED.format(
+                name=name,
+            ),
+        )
