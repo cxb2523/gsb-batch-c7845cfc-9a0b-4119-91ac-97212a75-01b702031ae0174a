@@ -1,11 +1,11 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL" xmlns:bpmndi="http://www.omg.org/spec/BPMN/20100524/DI" xmlns:dc="http://www.omg.org/spec/DD/20100524/DC" xmlns:camunda="http://camunda.org/schema/1.0/bpmn" xmlns:di="http://www.omg.org/spec/DD/20100524/DI" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" id="Definitions_1f0d8hv" targetNamespace="http://bpmn.io/schema/bpmn" exporter="Camunda Modeler" exporterVersion="4.12.0">
   <bpmn:process id="aws-textract-pdf-to-form" name="Onify Blueprint: Amazon AWS Textract - PDF to form example" isExecutable="true">
+    <bpmn:startEvent id="startEvent" name="Start processing files">
+      <bpmn:outgoing>Flow_1bxo516</bpmn:outgoing>
+    </bpmn:startEvent>
     <bpmn:sequenceFlow id="Flow_1bxo516" sourceRef="startEvent" targetRef="getInboxFiles" />
-    <bpmn:endEvent id="endEvent" name="Done processing files">
-      <bpmn:incoming>Flow_1rpcyl1</bpmn:incoming>
-    </bpmn:endEvent>
-    <bpmn:sequenceFlow id="Flow_0469tfn" sourceRef="getInboxFiles" targetRef="subProcess" />
+
     <bpmn:serviceTask id="getInboxFiles" name="Get inbox files">
       <bpmn:extensionElements>
         <camunda:connector>
@@ -38,31 +38,35 @@
       <bpmn:incoming>Flow_1bxo516</bpmn:incoming>
       <bpmn:outgoing>Flow_0469tfn</bpmn:outgoing>
     </bpmn:serviceTask>
-    <bpmn:subProcess id="subProcess" name="Upload file to S3 and process using Textract">
+    <bpmn:sequenceFlow id="Flow_0469tfn" sourceRef="getInboxFiles" targetRef="batchSubProcess" />
+
+    <bpmn:subProcess id="batchSubProcess" name="Process every inbox file">
       <bpmn:incoming>Flow_0469tfn</bpmn:incoming>
-      <bpmn:outgoing>Flow_1rpcyl1</bpmn:outgoing>
-      <bpmn:multiInstanceLoopCharacteristics isSequential="true" camunda:collection="${environment.output.inboxFiles}" camunda:elementVariable="inboxFile" />
-      <bpmn:startEvent id="startEventSubProcess" name="Start">
-        <bpmn:outgoing>Flow_0jp20nu</bpmn:outgoing>
+      <bpmn:outgoing>Flow_14zfcxk</bpmn:outgoing>
+
+      <bpmn:startEvent id="startEventBatch" name="Start">
+        <bpmn:outgoing>Flow_BatchStart</bpmn:outgoing>
       </bpmn:startEvent>
-      <bpmn:endEvent id="endEventSubProcess" name="End">
-        <bpmn:incoming>Flow_19xhnbd</bpmn:incoming>
-      </bpmn:endEvent>
-      <bpmn:sequenceFlow id="Flow_0jp20nu" sourceRef="startEventSubProcess" targetRef="uploadFile" />
-      <bpmn:serviceTask id="uploadFile" name="Upload file to AWS S3">
+      <bpmn:sequenceFlow id="Flow_BatchStart" sourceRef="startEventBatch" targetRef="processBatchInbox" />
+
+      <bpmn:serviceTask id="processBatchInbox" name="Upload, process and mail each file (fault isolated)">
         <bpmn:extensionElements>
           <camunda:connector>
             <camunda:inputOutput>
               <camunda:inputParameter name="payload">
                 <camunda:script scriptFormat="js">next(null, {
   vars: [
-    environment.variables.content.inboxFile.name,
-    environment.variables.content.inboxFile.filename,
-    content.input.bucket
+    content.input.inboxPath,
+    content.input.bucket,
+    content.input.roleArn,
+    content.input.snsTopicArn,
+    content.input.sqsQueueUrl,
+    content.input.mailTo,
+    content.input.onifyURL
   ]
 });</camunda:script>
               </camunda:inputParameter>
-              <camunda:inputParameter name="url">/admin/agents/task/uploadFile</camunda:inputParameter>
+              <camunda:inputParameter name="url">/admin/agents/task/processBatch</camunda:inputParameter>
               <camunda:inputParameter name="query">
                 <camunda:map>
                   <camunda:entry key="tag">agent</camunda:entry>
@@ -74,293 +78,240 @@
             <camunda:connectorId>onifyApiRequest</camunda:connectorId>
           </camunda:connector>
           <camunda:inputOutput>
+            <camunda:inputParameter name="inboxPath">/temp/inbox/</camunda:inputParameter>
             <camunda:inputParameter name="bucket">my-bucket</camunda:inputParameter>
+            <camunda:inputParameter name="roleArn">arn:aws:iam::1234567890:role/Textract</camunda:inputParameter>
+            <camunda:inputParameter name="snsTopicArn">arn:aws:sns:eu-central-1:1234567890:AmazonTextract</camunda:inputParameter>
+            <camunda:inputParameter name="sqsQueueUrl">https://sqs.eu-central-1.amazonaws.com/1234567890/test</camunda:inputParameter>
+            <camunda:inputParameter name="mailTo">user@acme.com</camunda:inputParameter>
+            <camunda:inputParameter name="onifyURL">http://localhost:3000</camunda:inputParameter>
           </camunda:inputOutput>
           <camunda:properties>
-            <camunda:property name="alert_stateid" value="waitForUpload" />
+            <camunda:property name="alert_stateid" value="waitForBatch" />
           </camunda:properties>
         </bpmn:extensionElements>
-        <bpmn:incoming>Flow_0jp20nu</bpmn:incoming>
+        <bpmn:incoming>Flow_BatchStart</bpmn:incoming>
         <bpmn:outgoing>Flow_1jikwh3</bpmn:outgoing>
       </bpmn:serviceTask>
-      <bpmn:sequenceFlow id="Flow_1jikwh3" sourceRef="uploadFile" targetRef="waitForUpload" />
-      <bpmn:intermediateCatchEvent id="waitForUpload" name="Wait for&#10;upload">
+      <bpmn:sequenceFlow id="Flow_1jikwh3" sourceRef="processBatchInbox" targetRef="waitForBatch" />
+
+      <bpmn:intermediateCatchEvent id="waitForBatch" name="Wait for&#10;batch">
         <bpmn:extensionElements>
           <camunda:inputOutput>
-            <camunda:outputParameter name="uploadFileResult">
+            <camunda:outputParameter name="batchResult">
               <camunda:script scriptFormat="js">next(null, JSON.parse(content.output.result.response));</camunda:script>
+            </camunda:outputParameter>
+            <camunda:outputParameter name="batchStatus">
+              <camunda:script scriptFormat="js">next(null, JSON.parse(content.output.result.response).status);</camunda:script>
+            </camunda:outputParameter>
+            <camunda:outputParameter name="batchOutcomes">
+              <camunda:script scriptFormat="js">next(null, JSON.parse(content.output.result.response).outcomes);</camunda:script>
             </camunda:outputParameter>
           </camunda:inputOutput>
         </bpmn:extensionElements>
         <bpmn:incoming>Flow_1jikwh3</bpmn:incoming>
-        <bpmn:outgoing>Flow_14zfcxk</bpmn:outgoing>
+        <bpmn:outgoing>Flow_BatchWaitDone</bpmn:outgoing>
         <bpmn:messageEventDefinition id="MessageEventDefinition_06pu57z" />
       </bpmn:intermediateCatchEvent>
-      <bpmn:sequenceFlow id="Flow_14zfcxk" sourceRef="waitForUpload" targetRef="textractFile" />
-      <bpmn:serviceTask id="textractFile" name="Process file with AWS Textract">
-        <bpmn:extensionElements>
-          <camunda:connector>
-            <camunda:inputOutput>
-              <camunda:inputParameter name="payload">
-                <camunda:script scriptFormat="js">next(null, {
-  vars: [
-    environment.output.uploadFileResult.key,
-    environment.output.uploadFileResult.Bucket,
-    content.input.roleArn,
-    content.input.snsTopicArn,
-    content.input.sqsQueueUrl
-  ]
-});</camunda:script>
-              </camunda:inputParameter>
-              <camunda:inputParameter name="url">/admin/agents/task/processFile</camunda:inputParameter>
-              <camunda:inputParameter name="query">
-                <camunda:map>
-                  <camunda:entry key="tag">agent</camunda:entry>
-                  <camunda:entry key="async">${true}</camunda:entry>
-                </camunda:map>
-              </camunda:inputParameter>
-              <camunda:inputParameter name="method">post</camunda:inputParameter>
-            </camunda:inputOutput>
-            <camunda:connectorId>onifyApiRequest</camunda:connectorId>
-          </camunda:connector>
-          <camunda:inputOutput>
-            <camunda:inputParameter name="sqsQueueUrl">https://sqs.eu-central-1.amazonaws.com/1234567890/test</camunda:inputParameter>
-            <camunda:inputParameter name="snsTopicArn">arn:aws:sns:eu-central-1:1234567890:AmazonTextract</camunda:inputParameter>
-            <camunda:inputParameter name="roleArn">arn:aws:iam::1234567890:role/Textract</camunda:inputParameter>
-          </camunda:inputOutput>
-          <camunda:properties>
-            <camunda:property name="alert_stateid" value="waitForTextract" />
-          </camunda:properties>
-        </bpmn:extensionElements>
-        <bpmn:incoming>Flow_14zfcxk</bpmn:incoming>
-        <bpmn:outgoing>Flow_1wx33ud</bpmn:outgoing>
-      </bpmn:serviceTask>
-      <bpmn:intermediateCatchEvent id="waitForTextract" name="Wait for&#10;textract">
-        <bpmn:extensionElements>
-          <camunda:inputOutput>
-            <camunda:outputParameter name="processFileResult">
-              <camunda:script scriptFormat="js">next(null, JSON.parse(content.output.result.response));</camunda:script>
-            </camunda:outputParameter>
-          </camunda:inputOutput>
-        </bpmn:extensionElements>
-        <bpmn:incoming>Flow_1wx33ud</bpmn:incoming>
-        <bpmn:outgoing>Flow_0u1xd4q</bpmn:outgoing>
-        <bpmn:messageEventDefinition id="MessageEventDefinition_0ufrssp" />
-      </bpmn:intermediateCatchEvent>
-      <bpmn:sequenceFlow id="Flow_1wx33ud" sourceRef="textractFile" targetRef="waitForTextract" />
-      <bpmn:sequenceFlow id="Flow_0u1xd4q" sourceRef="waitForTextract" targetRef="sendMail" />
-      <bpmn:serviceTask id="sendMail" name="Send mail to process form">
-        <bpmn:documentation />
-        <bpmn:extensionElements>
-          <camunda:connector>
-            <camunda:inputOutput>
-              <camunda:inputParameter name="payload">
-                <camunda:script scriptFormat="javascript">let formDataEncoded = Buffer.from(JSON.stringify(environment.output.processFileResult)).toString('base64');
-let fileSignedUrlEncoded = Buffer.from(environment.output.uploadFileResult.SignedUrl).toString('base64');
+      <bpmn:sequenceFlow id="Flow_BatchWaitDone" sourceRef="waitForBatch" targetRef="endEventBatch" />
 
-let URL = content.input.onifyURL + "/form/processapplication?formdata=" + formDataEncoded + "&amp;fileurl=" + fileSignedUrlEncoded + "&amp;filename=" + environment.variables.content.inboxFile.name
+      <bpmn:endEvent id="endEventBatch" name="Batch reported">
+        <bpmn:incoming>Flow_BatchWaitDone</bpmn:incoming>
+      </bpmn:endEvent>
 
-var emailBody = `
-
-Hello!&lt;br&gt;
-&lt;br&gt;
-${environment.output.uploadFileResult.key}&lt;br&gt;
-&lt;br&gt;
-&lt;a href="${URL}"&gt;Process application&lt;/a&gt;
-
-`;
-
-var payload = {
-	"to": content.input.mailTo, 
-	"subject": environment.output.uploadFileResult.key,
-	"html": emailBody
-};
-
-next(null, payload);</camunda:script>
-              </camunda:inputParameter>
-              <camunda:inputParameter name="method">POST</camunda:inputParameter>
-              <camunda:inputParameter name="url">/tools/sendmail</camunda:inputParameter>
-            </camunda:inputOutput>
-            <camunda:connectorId>onifyApiRequest</camunda:connectorId>
-          </camunda:connector>
-          <camunda:properties>
-            <camunda:property name="message" value="Mail sent to manager" />
-            <camunda:property name="stateMessage" value="Mail sent to manager" />
-          </camunda:properties>
-          <camunda:inputOutput>
-            <camunda:inputParameter name="onifyURL">http://localhost:3000</camunda:inputParameter>
-            <camunda:inputParameter name="mailTo">user@acme.com</camunda:inputParameter>
-          </camunda:inputOutput>
-        </bpmn:extensionElements>
-        <bpmn:incoming>Flow_0u1xd4q</bpmn:incoming>
-        <bpmn:outgoing>Flow_19xhnbd</bpmn:outgoing>
-      </bpmn:serviceTask>
-      <bpmn:sequenceFlow id="Flow_19xhnbd" sourceRef="sendMail" targetRef="endEventSubProcess" />
       <bpmn:textAnnotation id="TextAnnotation_0y1eq9m">
-        <bpmn:text>Update input parameter "bucket"</bpmn:text>
+        <bpmn:text>Update input parameters "bucket", "roleArn", "snsTopicArn", "sqsQueueUrl", "mailTo" and "onifyURL". Each inbox file is processed independently; see batchResult.outcomes and batchResult.failures for per-file outcomes and reasons.</bpmn:text>
       </bpmn:textAnnotation>
-      <bpmn:association id="Association_0f4ul5w" sourceRef="uploadFile" targetRef="TextAnnotation_0y1eq9m" />
-      <bpmn:textAnnotation id="TextAnnotation_1e5ta3i">
-        <bpmn:text>Update input parameters "mailTo" and "onifyURL"</bpmn:text>
-      </bpmn:textAnnotation>
-      <bpmn:association id="Association_1d1a7ix" sourceRef="sendMail" targetRef="TextAnnotation_1e5ta3i" />
-      <bpmn:textAnnotation id="TextAnnotation_0alvspr">
-        <bpmn:text>Update input parameters "roleArn", "snsTopicArn" and "sqsQueueUrl"</bpmn:text>
-      </bpmn:textAnnotation>
-      <bpmn:association id="Association_1ou781c" sourceRef="textractFile" targetRef="TextAnnotation_0alvspr" />
+      <bpmn:association id="Association_0f4ul5w" sourceRef="processBatchInbox" targetRef="TextAnnotation_0y1eq9m" />
     </bpmn:subProcess>
-    <bpmn:sequenceFlow id="Flow_1rpcyl1" sourceRef="subProcess" targetRef="endEvent" />
-    <bpmn:startEvent id="startEvent" name="Start processing files">
-      <bpmn:outgoing>Flow_1bxo516</bpmn:outgoing>
-    </bpmn:startEvent>
-    <bpmn:sequenceFlow id="Flow_0hlhc7r" name="Timeout after 10 minutes" sourceRef="Event_0qduanv" targetRef="Event_0xaf885" />
-    <bpmn:boundaryEvent id="Event_0qduanv" attachedToRef="subProcess">
+    <bpmn:sequenceFlow id="Flow_14zfcxk" sourceRef="batchSubProcess" targetRef="batchOutcome" />
+
+    <bpmn:exclusiveGateway id="batchOutcome" name="Batch outcome" default="Flow_BatchFailed">
+      <bpmn:incoming>Flow_14zfcxk</bpmn:incoming>
+      <bpmn:outgoing>Flow_AllSucceeded</bpmn:outgoing>
+      <bpmn:outgoing>Flow_PartialFailure</bpmn:outgoing>
+      <bpmn:outgoing>Flow_BatchFailed</bpmn:outgoing>
+    </bpmn:exclusiveGateway>
+
+    <bpmn:sequenceFlow id="Flow_AllSucceeded" name="All files succeeded" sourceRef="batchOutcome" targetRef="endEventAllSucceeded">
+      <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">${environment.output.batchStatus == 'success'}</bpmn:conditionExpression>
+    </bpmn:sequenceFlow>
+    <bpmn:sequenceFlow id="Flow_PartialFailure" name="Some files failed" sourceRef="batchOutcome" targetRef="endEventPartialFailure">
+      <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">${environment.output.batchStatus == 'partial_failure'}</bpmn:conditionExpression>
+    </bpmn:sequenceFlow>
+    <bpmn:sequenceFlow id="Flow_BatchFailed" name="All files failed" sourceRef="batchOutcome" targetRef="endEventBatchFailed" />
+
+    <bpmn:endEvent id="endEventAllSucceeded" name="All files processed">
+      <bpmn:incoming>Flow_AllSucceeded</bpmn:incoming>
+    </bpmn:endEvent>
+    <bpmn:endEvent id="endEventPartialFailure" name="Batch completed with failed files">
+      <bpmn:incoming>Flow_PartialFailure</bpmn:incoming>
+    </bpmn:endEvent>
+    <bpmn:endEvent id="endEventBatchFailed" name="Batch failed (no file processed)">
+      <bpmn:incoming>Flow_BatchFailed</bpmn:incoming>
+    </bpmn:endEvent>
+
+    <bpmn:boundaryEvent id="Event_0qduanv" attachedToRef="batchSubProcess">
       <bpmn:outgoing>Flow_0hlhc7r</bpmn:outgoing>
       <bpmn:timerEventDefinition id="TimerEventDefinition_0qjbbwb">
-        <bpmn:timeDuration xsi:type="bpmn:tFormalExpression">PT10M</bpmn:timeDuration>
+        <bpmn:timeDuration xsi:type="bpmn:tFormalExpression">PT30M</bpmn:timeDuration>
       </bpmn:timerEventDefinition>
     </bpmn:boundaryEvent>
-    <bpmn:endEvent id="Event_0xaf885" name="Timeout">
+    <bpmn:sequenceFlow id="Flow_0hlhc7r" name="Timeout after 30 minutes" sourceRef="Event_0qduanv" targetRef="Event_0xaf885" />
+    <bpmn:endEvent id="Event_0xaf885" name="Batch timeout">
       <bpmn:incoming>Flow_0hlhc7r</bpmn:incoming>
       <bpmn:errorEventDefinition id="ErrorEventDefinition_0qk4oov" />
     </bpmn:endEvent>
+
     <bpmn:textAnnotation id="TextAnnotation_1r7a85n">
       <bpmn:text>Update input parameter "inboxPath"</bpmn:text>
     </bpmn:textAnnotation>
     <bpmn:association id="Association_0pqe9u6" sourceRef="getInboxFiles" targetRef="TextAnnotation_1r7a85n" />
+    <bpmn:textAnnotation id="TextAnnotation_0alvspr">
+      <bpmn:text>The batch report distinguishes "success", "partial_failure" and "failure". Failed files carry error.reason with file name and stage; files whose upload succeeded but recognition failed keep their upload result and receive no verification mail.</bpmn:text>
+    </bpmn:textAnnotation>
+    <bpmn:association id="Association_1ou781c" sourceRef="batchOutcome" targetRef="TextAnnotation_0alvspr" />
   </bpmn:process>
+
   <bpmndi:BPMNDiagram id="BPMNDiagram_1">
     <bpmndi:BPMNPlane id="BPMNPlane_1" bpmnElement="aws-textract-pdf-to-form">
-      <bpmndi:BPMNEdge id="Flow_0hlhc7r_di" bpmnElement="Flow_0hlhc7r">
-        <di:waypoint x="1100" y="395" />
-        <di:waypoint x="1100" y="493" />
-        <bpmndi:BPMNLabel>
-          <dc:Bounds x="1111" y="406" width="79" height="27" />
-        </bpmndi:BPMNLabel>
-      </bpmndi:BPMNEdge>
-      <bpmndi:BPMNEdge id="Flow_1rpcyl1_di" bpmnElement="Flow_1rpcyl1">
-        <di:waypoint x="1360" y="277" />
-        <di:waypoint x="1422" y="277" />
-      </bpmndi:BPMNEdge>
-      <bpmndi:BPMNEdge id="Flow_0469tfn_di" bpmnElement="Flow_0469tfn">
-        <di:waypoint x="350" y="277" />
-        <di:waypoint x="410" y="277" />
-      </bpmndi:BPMNEdge>
-      <bpmndi:BPMNEdge id="Flow_1bxo516_di" bpmnElement="Flow_1bxo516">
-        <di:waypoint x="198" y="277" />
-        <di:waypoint x="250" y="277" />
-      </bpmndi:BPMNEdge>
-      <bpmndi:BPMNShape id="Event_0ulg6yn_di" bpmnElement="endEvent">
-        <dc:Bounds x="1422" y="259" width="36" height="36" />
-        <bpmndi:BPMNLabel>
-          <dc:Bounds x="1399" y="302" width="83" height="27" />
-        </bpmndi:BPMNLabel>
-      </bpmndi:BPMNShape>
-      <bpmndi:BPMNShape id="Activity_1o3gpkz_di" bpmnElement="getInboxFiles">
-        <dc:Bounds x="250" y="237" width="100" height="80" />
-      </bpmndi:BPMNShape>
-      <bpmndi:BPMNShape id="Activity_0098w5p_di" bpmnElement="subProcess" isExpanded="true">
-        <dc:Bounds x="410" y="140" width="950" height="237" />
-      </bpmndi:BPMNShape>
-      <bpmndi:BPMNShape id="TextAnnotation_1e5ta3i_di" bpmnElement="TextAnnotation_1e5ta3i">
-        <dc:Bounds x="1160" y="168" width="160" height="43" />
-      </bpmndi:BPMNShape>
-      <bpmndi:BPMNEdge id="Flow_19xhnbd_di" bpmnElement="Flow_19xhnbd">
-        <di:waypoint x="1190" y="277" />
-        <di:waypoint x="1272" y="277" />
-      </bpmndi:BPMNEdge>
-      <bpmndi:BPMNEdge id="Flow_0u1xd4q_di" bpmnElement="Flow_0u1xd4q">
-        <di:waypoint x="1018" y="277" />
-        <di:waypoint x="1090" y="277" />
-      </bpmndi:BPMNEdge>
-      <bpmndi:BPMNEdge id="Flow_1wx33ud_di" bpmnElement="Flow_1wx33ud">
-        <di:waypoint x="910" y="277" />
-        <di:waypoint x="982" y="277" />
-      </bpmndi:BPMNEdge>
-      <bpmndi:BPMNEdge id="Flow_14zfcxk_di" bpmnElement="Flow_14zfcxk">
-        <di:waypoint x="738" y="277" />
-        <di:waypoint x="810" y="277" />
-      </bpmndi:BPMNEdge>
-      <bpmndi:BPMNEdge id="Flow_1jikwh3_di" bpmnElement="Flow_1jikwh3">
-        <di:waypoint x="640" y="277" />
-        <di:waypoint x="702" y="277" />
-      </bpmndi:BPMNEdge>
-      <bpmndi:BPMNEdge id="Flow_0jp20nu_di" bpmnElement="Flow_0jp20nu">
-        <di:waypoint x="486" y="277" />
-        <di:waypoint x="540" y="277" />
-      </bpmndi:BPMNEdge>
-      <bpmndi:BPMNShape id="Event_0rjpme5_di" bpmnElement="startEventSubProcess">
-        <dc:Bounds x="450" y="259" width="36" height="36" />
-        <bpmndi:BPMNLabel>
-          <dc:Bounds x="457" y="302" width="24" height="14" />
-        </bpmndi:BPMNLabel>
-      </bpmndi:BPMNShape>
-      <bpmndi:BPMNShape id="Event_1i6w04w_di" bpmnElement="endEventSubProcess">
-        <dc:Bounds x="1272" y="259" width="36" height="36" />
-        <bpmndi:BPMNLabel>
-          <dc:Bounds x="1280" y="302" width="20" height="14" />
-        </bpmndi:BPMNLabel>
-      </bpmndi:BPMNShape>
-      <bpmndi:BPMNShape id="Activity_104jprg_di" bpmnElement="uploadFile">
-        <dc:Bounds x="540" y="237" width="100" height="80" />
-      </bpmndi:BPMNShape>
-      <bpmndi:BPMNShape id="Event_18me3jv_di" bpmnElement="waitForUpload">
-        <dc:Bounds x="702" y="259" width="36" height="36" />
-        <bpmndi:BPMNLabel>
-          <dc:Bounds x="703" y="302" width="38" height="27" />
-        </bpmndi:BPMNLabel>
-      </bpmndi:BPMNShape>
-      <bpmndi:BPMNShape id="Activity_06v1m40_di" bpmnElement="textractFile">
-        <dc:Bounds x="810" y="237" width="100" height="80" />
-      </bpmndi:BPMNShape>
-      <bpmndi:BPMNShape id="Event_1wav4sq_di" bpmnElement="waitForTextract">
-        <dc:Bounds x="982" y="259" width="36" height="36" />
-        <bpmndi:BPMNLabel>
-          <dc:Bounds x="983" y="302" width="38" height="27" />
-        </bpmndi:BPMNLabel>
-      </bpmndi:BPMNShape>
-      <bpmndi:BPMNShape id="Activity_1926f1q_di" bpmnElement="sendMail">
-        <dc:Bounds x="1090" y="237" width="100" height="80" />
-      </bpmndi:BPMNShape>
-      <bpmndi:BPMNShape id="TextAnnotation_0y1eq9m_di" bpmnElement="TextAnnotation_0y1eq9m">
-        <dc:Bounds x="640" y="170" width="150" height="40" />
-      </bpmndi:BPMNShape>
-      <bpmndi:BPMNShape id="TextAnnotation_0alvspr_di" bpmnElement="TextAnnotation_0alvspr">
-        <dc:Bounds x="910" y="170" width="230" height="40" />
-      </bpmndi:BPMNShape>
-      <bpmndi:BPMNEdge id="Association_0f4ul5w_di" bpmnElement="Association_0f4ul5w">
-        <di:waypoint x="633" y="238" />
-        <di:waypoint x="663" y="210" />
-      </bpmndi:BPMNEdge>
-      <bpmndi:BPMNEdge id="Association_1ou781c_di" bpmnElement="Association_1ou781c">
-        <di:waypoint x="906" y="239" />
-        <di:waypoint x="940" y="210" />
-      </bpmndi:BPMNEdge>
-      <bpmndi:BPMNEdge id="Association_1d1a7ix_di" bpmnElement="Association_1d1a7ix">
-        <di:waypoint x="1156" y="237" />
-        <di:waypoint x="1183" y="211" />
-      </bpmndi:BPMNEdge>
       <bpmndi:BPMNShape id="Event_0pzss2w_di" bpmnElement="startEvent">
         <dc:Bounds x="162" y="259" width="36" height="36" />
         <bpmndi:BPMNLabel>
           <dc:Bounds x="141" y="302" width="80" height="27" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNShape>
-      <bpmndi:BPMNShape id="Event_108kc9w_di" bpmnElement="Event_0xaf885">
-        <dc:Bounds x="1082" y="493" width="36" height="36" />
+      <bpmndi:BPMNShape id="Activity_1o3gpkz_di" bpmnElement="getInboxFiles">
+        <dc:Bounds x="250" y="237" width="100" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Activity_BatchSubProcess_di" bpmnElement="batchSubProcess" isExpanded="true">
+        <dc:Bounds x="410" y="140" width="560" height="237" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Event_StartEventBatch_di" bpmnElement="startEventBatch">
+        <dc:Bounds x="446" y="259" width="36" height="36" />
         <bpmndi:BPMNLabel>
-          <dc:Bounds x="1080" y="536" width="40" height="14" />
+          <dc:Bounds x="453" y="302" width="24" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Activity_ProcessBatch_di" bpmnElement="processBatchInbox">
+        <dc:Bounds x="514" y="237" width="160" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Event_WaitForBatch_di" bpmnElement="waitForBatch">
+        <dc:Bounds x="710" y="259" width="36" height="36" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="705" y="302" width="46" height="27" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Event_EndEventBatch_di" bpmnElement="endEventBatch">
+        <dc:Bounds x="794" y="259" width="36" height="36" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="785" y="302" width="55" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNEdge id="Flow_BatchStart_di" bpmnElement="Flow_BatchStart">
+        <di:waypoint x="482" y="277" />
+        <di:waypoint x="514" y="277" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_1jikwh3_di" bpmnElement="Flow_1jikwh3">
+        <di:waypoint x="674" y="277" />
+        <di:waypoint x="710" y="277" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_BatchWaitDone_di" bpmnElement="Flow_BatchWaitDone">
+        <di:waypoint x="746" y="277" />
+        <di:waypoint x="794" y="277" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNShape id="TextAnnotation_0y1eq9m_di" bpmnElement="TextAnnotation_0y1eq9m">
+        <dc:Bounds x="510" y="160" width="300" height="60" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNEdge id="Association_0f4ul5w_di" bpmnElement="Association_0f4ul5w">
+        <di:waypoint x="560" y="237" />
+        <di:waypoint x="560" y="220" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNShape id="Event_1ylf61h_di" bpmnElement="Event_0qduanv">
+        <dc:Bounds x="672" y="359" width="36" height="36" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Event_108kc9w_di" bpmnElement="Event_0xaf885">
+        <dc:Bounds x="672" y="443" width="36" height="36" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="662" y="486" width="70" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNEdge id="Flow_0hlhc7r_di" bpmnElement="Flow_0hlhc7r">
+        <di:waypoint x="690" y="395" />
+        <di:waypoint x="690" y="443" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="701" y="406" width="79" height="27" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_0469tfn_di" bpmnElement="Flow_0469tfn">
+        <di:waypoint x="350" y="277" />
+        <di:waypoint x="410" y="277" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_14zfcxk_di" bpmnElement="Flow_14zfcxk">
+        <di:waypoint x="970" y="277" />
+        <di:waypoint x="1030" y="277" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNShape id="Gateway_BatchOutcome_di" bpmnElement="batchOutcome" isMarkerVisible="true">
+        <dc:Bounds x="1030" y="252" width="50" height="50" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="1023" y="309" width="67" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNEdge id="Flow_AllSucceeded_di" bpmnElement="Flow_AllSucceeded">
+        <di:waypoint x="1080" y="277" />
+        <di:waypoint x="1095" y="277" />
+        <di:waypoint x="1095" y="190" />
+        <di:waypoint x="1144" y="190" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="1085" y="162" width="90" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_PartialFailure_di" bpmnElement="Flow_PartialFailure">
+        <di:waypoint x="1080" y="277" />
+        <di:waypoint x="1144" y="277" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="1085" y="250" width="80" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Flow_BatchFailed_di" bpmnElement="Flow_BatchFailed">
+        <di:waypoint x="1055" y="302" />
+        <di:waypoint x="1055" y="364" />
+        <di:waypoint x="1144" y="364" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="1063" y="330" width="66" height="14" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNShape id="Event_AllSucceeded_di" bpmnElement="endEventAllSucceeded">
+        <dc:Bounds x="1144" y="172" width="36" height="36" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="1124" y="215" width="78" height="27" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Event_PartialFailure_di" bpmnElement="endEventPartialFailure">
+        <dc:Bounds x="1144" y="259" width="36" height="36" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="1112" y="302" width="100" height="40" />
+        </bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Event_BatchFailed_di" bpmnElement="endEventBatchFailed">
+        <dc:Bounds x="1144" y="346" width="36" height="36" />
+        <bpmndi:BPMNLabel>
+          <dc:Bounds x="1112" y="389" width="100" height="27" />
         </bpmndi:BPMNLabel>
       </bpmndi:BPMNShape>
       <bpmndi:BPMNShape id="TextAnnotation_1r7a85n_di" bpmnElement="TextAnnotation_1r7a85n">
         <dc:Bounds x="350" y="80" width="160" height="40" />
       </bpmndi:BPMNShape>
-      <bpmndi:BPMNShape id="Event_1ylf61h_di" bpmnElement="Event_0qduanv">
-        <dc:Bounds x="1082" y="359" width="36" height="36" />
-      </bpmndi:BPMNShape>
       <bpmndi:BPMNEdge id="Association_0pqe9u6_di" bpmnElement="Association_0pqe9u6">
         <di:waypoint x="323" y="237" />
         <di:waypoint x="390" y="120" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNShape id="TextAnnotation_0alvspr_di" bpmnElement="TextAnnotation_0alvspr">
+        <dc:Bounds x="1010" y="80" width="300" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNEdge id="Association_1ou781c_di" bpmnElement="Association_1ou781c">
+        <di:waypoint x="1055" y="252" />
+        <di:waypoint x="1100" y="160" />
       </bpmndi:BPMNEdge>
     </bpmndi:BPMNPlane>
   </bpmndi:BPMNDiagram>

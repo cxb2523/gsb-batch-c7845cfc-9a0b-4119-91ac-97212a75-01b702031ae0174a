@@ -2,5 +2,8 @@
   "dependencies": {
     "aws-sdk": "^2.881.0",
     "lodash": "^4.17.21"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.js"
   }
 }

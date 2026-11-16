@@ -1,161 +1,75 @@
-//Please see https://docs.aws.amazon.com/textract/latest/dg/api-async-roles.html on how to "Configuring Amazon Textract for Asynchronous Operations".
-
 'use strict';
 
-var key = process.argv[2];
-var bucket = process.argv[3];
-var roleArn = process.argv[4];
-var snsTopicArn = process.argv[5];
-var sqsQueueUrl = process.argv[6];
+//Please see https://docs.aws.amazon.com/textract/latest/dg/api-async-roles.html on how to "Configuring Amazon Textract for Asynchronous Operations".
 
-const fs = require('fs');
-const _ = require("lodash");
+/**
+ * Agent task: run asynchronous Textract analysis for one uploaded S3 object.
+ *
+ * Invocation contract is unchanged:
+ *   node processFile.js <key> <bucket> <roleArn> <snsTopicArn> <sqsQueueUrl>
+ *
+ * Success output is unchanged: the extracted `{ "Key": "Value" }` object.
+ *
+ * Failures no longer throw (which used to abort the whole batch). They are
+ * printed as a structured envelope and the process exits 0:
+ *   { "ok": false, "stage": "textract", "operation": "waitForAnalysis",
+ *     "fileName": ..., "key": ..., "bucket": ..., "jobId": ...,
+ *     "error": { "reason": "...file=...jobId=..." } }
+ */
 
-const AWS = require('aws-sdk');
-const AWS_Config = require(__dirname + '/aws_config.json');
-AWS.config.update(AWS_Config);
+const { createAdapters } = require('./lib/adapters');
+const { analyseFile } = require('./lib/stages');
 
-var textract = new AWS.Textract();
-const sqs = new AWS.SQS();
+const key = process.argv[2];
+const bucket = process.argv[3];
+const roleArn = process.argv[4];
+const snsTopicArn = process.argv[5];
+const sqsQueueUrl = process.argv[6];
 
-const getText = (result, blocksMap) => {
-    let text = "";
-  
-    if (_.has(result, "Relationships")) {
-      result.Relationships.forEach(relationship => {
-        if (relationship.Type === "CHILD") {
-          relationship.Ids.forEach(childId => {
-            const word = blocksMap[childId];
-            if (word.BlockType === "WORD") {
-              text += `${word.Text} `;
-            }
+async function main() {
+    const envelope = await analyseFile(
+        {
+            key: key,
+            bucket: bucket,
+            roleArn: roleArn,
+            snsTopicArn: snsTopicArn,
+            sqsQueueUrl: sqsQueueUrl
+        },
+        createAdapters()
+    );
 
-            if (word.BlockType === "SELECTION_ELEMENT") {
-              if (word.SelectionStatus === "SELECTED") {
-                text += `X `;
-              }
-            }
-          });
-        }
-      });
-    }
-  
-    return text.trim();
-  };
-  
-  const findValueBlock = (keyBlock, valueMap) => {
-    let valueBlock;
-    keyBlock.Relationships.forEach(relationship => {
-      if (relationship.Type === "VALUE") {
-        // eslint-disable-next-line array-callback-return
-        relationship.Ids.every(valueId => {
-          if (_.has(valueMap, valueId)) {
-            valueBlock = valueMap[valueId];
-            return false;
-          }
-        });
-      }
-    });
-  
-    return valueBlock;
-  };
-  
-  const getKeyValueRelationship = (keyMap, valueMap, blockMap) => {
-    const keyValues = {};
-  
-    const keyMapValues = _.values(keyMap);
-  
-    keyMapValues.forEach(keyMapValue => {
-      const valueBlock = findValueBlock(keyMapValue, valueMap);
-      const key = getText(keyMapValue, blockMap);
-      const value = getText(valueBlock, blockMap);
-      keyValues[key] = value;
-    });
-  
-    return keyValues;
-  };
-  
-  const getKeyValueMap = blocks => {
-    const keyMap = {};
-    const valueMap = {};
-    const blockMap = {};
-  
-    let blockId;
-    blocks.forEach(block => {
-      blockId = block.Id;
-      blockMap[blockId] = block;
-  
-      if (block.BlockType === "KEY_VALUE_SET") {
-        if (_.includes(block.EntityTypes, "KEY")) {
-          keyMap[blockId] = block;
-        } else {
-          valueMap[blockId] = block;
-        }
-      }
-    });
-  
-    return { keyMap, valueMap, blockMap };
-  };
-
-
-var params = {
-    DocumentLocation: { 
-        S3Object: {
-            Bucket: bucket,
-            Name: key,
-        }
-    },
-    FeatureTypes: [ "FORMS" ],
-    NotificationChannel: { 
-      RoleArn: roleArn,
-      SNSTopicArn: snsTopicArn
-   }    
-};
-
-textract.startDocumentAnalysis(params, async function(err, data) {
-    if (err) {
-        throw err;
+    if (envelope.ok) {
+        // Keep the original wire format: just the key/value object.
+        console.log(JSON.stringify(envelope.processResult));
+        return;
     }
 
-    var params = {
-        JobId: data.JobId
-    };
-
-    await waitForDocumentAnalysis(data.JobId);
-
-    textract.getDocumentAnalysis(params, function(err, data) {
-        if (err) {
-            throw err;
-        }
-        if (data && data.Blocks) {
-            const { keyMap, valueMap, blockMap } = getKeyValueMap(data.Blocks);
-            const keyValues = getKeyValueRelationship(keyMap, valueMap, blockMap);
-            console.log(JSON.stringify(keyValues));
-        } else {
-            console.log(JSON.stringify(data));
-        }
-    });
-});
-
-async function waitForDocumentAnalysis(jobId) {
-  const response = await sqs.receiveMessage({
-    QueueUrl: sqsQueueUrl,
-    WaitTimeSeconds: 10,
-    MaxNumberOfMessages: 5 
-  }).promise();
-  if (!response.Messages) return waitForDocumentAnalysis(jobId);
-
-  let foundMessage;
-  for (const message of response.Messages) {
-    const messageBody = JSON.parse(message.Body);
-    const {JobId} = JSON.parse(messageBody.Message);
-    if (JobId === jobId) {
-      foundMessage = message;
-    }
-  }
-  if (!foundMessage) return waitForDocumentAnalysis(jobId);
-  return sqs.deleteMessage({
-    QueueUrl: sqsQueueUrl,
-    ReceiptHandle: foundMessage.ReceiptHandle
-  })
+    console.log(JSON.stringify({
+        ok: false,
+        stage: envelope.stage,
+        operation: envelope.operation,
+        fileName: envelope.fileName,
+        key: envelope.key,
+        bucket: envelope.bucket,
+        jobId: envelope.jobId,
+        error: envelope.error
+    }));
 }
+
+main().catch(function (err) {
+    console.log(JSON.stringify({
+        ok: false,
+        stage: 'textract',
+        operation: 'startAnalysis',
+        fileName: key || null,
+        key: key || null,
+        bucket: bucket || null,
+        jobId: null,
+        error: {
+            stage: 'textract',
+            message: err && err.message ? err.message : String(err),
+            reason: 'textract failed for file=' + (key || '<unknown>') + ': ' +
+                (err && err.message ? err.message : String(err))
+        }
+    }));
+});
