@@ -17,6 +17,14 @@ export interface IClusterSchedulerOptions {
     // Use this to set the maximum task allocations per worker.
     //
     maxAllocations?: number;
+
+    //
+    // Optional per-task timeout in milliseconds.
+    // When set, any task that doesn't settle within this time is failed on the
+    // master process instead of waiting forever for its worker to respond.
+    // Omit (or set to 0) to disable timeouts, preserving the default behaviour.
+    //
+    taskTimeout?: number;
 }
 
 //
@@ -47,6 +55,24 @@ export interface IWorkerRecord {
     // The Node.js cluster object that represents the worker.
     //
     worker: cluster.Worker;
+
+    //
+    // Tasks currently executing on this worker, keyed by task ID.
+    // Used to reject in-flight tasks if the worker process exits unexpectedly.
+    //
+    executingTasks: ITaskMap;
+
+    //
+    // Set to true once the worker process has exited.
+    // A dead worker is removed from rotation and must never be scheduled again.
+    //
+    isDead: boolean;
+
+    //
+    // Set to true once the worker has signalled that its application code is
+    // loaded and its message handler is ready to accept "run-task" messages.
+    //
+    isReady?: boolean;
 }
 
 //
@@ -74,7 +100,7 @@ export interface ITaskRecord {
     //
     taskName: string;
 
-    // 
+    //
     // Promise to be resolved when the task completes successfully.
     //
     resolve: (result: any) => void;
@@ -83,6 +109,24 @@ export interface ITaskRecord {
     // Promise to be rejected if the tasks throws an error.
     //
     reject: (error: any) => void;
+
+    //
+    // The ID of the worker the task was dispatched to.
+    // Undefined while the task is still queued.
+    //
+    workerId?: string;
+
+    //
+    // Handle for the optional per-task timeout timer.
+    //
+    timeoutHandle?: NodeJS.Timer;
+
+    //
+    // Guards against resolving/rejecting the task's promise more than once.
+    // Every completion path (worker response, timeout, worker exit) must go
+    // through settleTask so that each task is settled exactly once.
+    //
+    settled?: boolean;
 }
 
 //
@@ -109,6 +153,11 @@ export class ClusterScheduler implements IScheduler {
     private maxAllocations: number;
 
     //
+    // Optional per-task timeout in milliseconds. 0 means no timeout.
+    //
+    private taskTimeout: number;
+
+    //
     // Number of worker processes to create.
     //
     private numWorkers: number;
@@ -129,6 +178,21 @@ export class ClusterScheduler implements IScheduler {
     private taskQueue: ITaskRecord[] = [];
 
     //
+    // How many forked workers have emitted their "online" event so far.
+    //
+    private onlineWorkerCount: number = 0;
+
+    //
+    // How many forked workers have signalled they are ready to run tasks.
+    //
+    private readyWorkerCount: number = 0;
+
+    //
+    // How many forked workers have exited before/during operation.
+    //
+    private deadWorkerCount: number = 0;
+
+    //
     // Tasks currenlty executing.
     //
     private pendingTasks: ITaskMap = {};
@@ -138,10 +202,26 @@ export class ClusterScheduler implements IScheduler {
     //
     private whoami: string = "unknown";
 
+    //
+    // Resolves once every forked worker has signalled it is ready (or exited).
+    // Used by init() to wait for full readiness before running mainFn.
+    //
+    private workersReady!: Promise<void>;
+
+    //
+    // Stored resolver for the workers-ready promise.
+    //
+    private workersReadyResolve!: () => void;
+
     constructor(numWorkers: number, options?: IClusterSchedulerOptions) {
         this.numWorkers = numWorkers;
         this.enableVerboseLogging = options && options.verbose || false;
         this.maxAllocations = options && options.maxAllocations || 1;
+        this.taskTimeout = options && options.taskTimeout || 0;
+
+        this.workersReady = new Promise<void>(resolve => {
+            this.workersReadyResolve = resolve;
+        });
     }
 
     //
@@ -155,26 +235,39 @@ export class ClusterScheduler implements IScheduler {
 
             // Running on the master.
             this.verbose(`Starting ${this.numWorkers} worker processes.`);
-        
+
             for (let workerIndex = 0; workerIndex < this.numWorkers; ++workerIndex) {
                 const workerId = uuid();
-                const worker = cluster.fork({ 
+                const worker = cluster.fork({
                     WORKER_ID: workerId,
                     WORKER_INDEX: workerIndex,
                 });
                 this.trackWorker(workerIndex, workerId, worker, this.maxAllocations);
             }
 
+            // Don't run application code until every worker is ready, so task
+            // timeouts only measure real execution rather than process startup.
+            await this.workersReady;
+
             await mainFn();
-    
+
             this.shutdownWorkers();
-    
+
             this.verbose("Master done.");
         }
         else {
             this.whoami = `WORKER[${process.env.WORKER_INDEX}]`;
 
             this.initWorker();
+
+            // Tell the master the worker's message handler is installed and it
+            // is ready to accept "run-task" messages. This is more reliable
+            // than the cluster "online" event, which fires before the worker's
+            // application code has finished loading (e.g. under ts-node).
+            process.send!({
+                type: "worker-ready",
+                workerId: process.env.WORKER_ID,
+            });
 
             this.verbose("Worker online.");
         }
@@ -261,7 +354,16 @@ export class ClusterScheduler implements IScheduler {
             console.log(this.whoami + ": " + msg);
         }
     }
-    
+
+    //
+    // Resolve the workers-ready promise exactly once.
+    //
+    private markWorkersReady(): void {
+        if (this.workersReadyResolve) {
+            this.workersReadyResolve();
+        }
+    }
+
     //
     // Track a worker process that was created.
     //
@@ -269,63 +371,254 @@ export class ClusterScheduler implements IScheduler {
         this.workers.push(worker);
         this.workerMap[workerId] = {
             workerIndex,
-            workerId, 
+            workerId,
             allocations: 0,
             maxAllocations,
             worker,
+            executingTasks: {},
+            isDead: false,
+            isReady: false,
         };
+
+        worker.on("online", () => {
+            // Tracked for diagnostics; readiness itself is driven by the
+            // worker's explicit "worker-ready" handshake below.
+            ++this.onlineWorkerCount;
+        });
 
         worker.on("message", msg => {
 
+            if (msg.type === "worker-ready") { // Worker has loaded its code and installed its message handler.
+                const readyRecord = this.workerMap[workerId];
+                if (readyRecord && !readyRecord.isDead && !readyRecord.isReady) {
+                    readyRecord.isReady = true;
+                    ++this.readyWorkerCount;
+                    this.checkWorkersReady();
+                }
+                return;
+            }
+
             if (msg.type === "task-complete") { // Worker notifying master that a task has completed.
-
-                this.workerMap[workerId].allocations -= 1;
                 const taskRecord = this.pendingTasks[msg.taskId];
-                this.verbose(`Task ${taskRecord.taskName} (${taskRecord.taskId}) has completed.`);
+                if (!taskRecord || taskRecord.settled) {
+                    // The task was already settled (e.g. it timed out) or never
+                    // existed, so this is a late response from the worker.
+                    this.verbose(`Ignoring late completion for unknown/settled task (${msg.taskId}).`);
+                    return;
+                }
 
-                delete this.pendingTasks[msg.taskId];
-                taskRecord.resolve(msg.result); // Resolve the task's promise.
-
-                this.scheduleTasks(); // Worker is now free, schedule more tasks.
+                this.completeTask(taskRecord, msg.result);
             }
             else if (msg.type === "task-error") { // Worker notifying master that a task has thrown an error.
-                this.workerMap[workerId].allocations -= 1;
                 const taskRecord = this.pendingTasks[msg.taskId];
+                if (!taskRecord || taskRecord.settled) {
+                    // Late error response for a task that was already settled.
+                    this.verbose(`Ignoring late error for unknown/settled task (${msg.taskId}).`);
+                    return;
+                }
+
                 this.verbose(`Task ${taskRecord.taskName} (${taskRecord.taskId}) has thrown error:`);
                 this.verbose(msg.error);
 
-                delete this.pendingTasks[msg.taskId];
-                taskRecord.reject(msg.error); // Reject the task's promise.
-
-                this.scheduleTasks(); // Worker is now free, schedule more tasks.
+                this.failTask(taskRecord, msg.error);
             }
             else if (msg.type === "queue-task") { // Worker requesting master to queue a task.
+                const requestingWorker = this.workerMap[msg.workerId];
+                if (!requestingWorker || requestingWorker.isDead) {
+                    // The requesting worker has already gone; nothing to do.
+                    return;
+                }
 
-                this.workerMap[msg.workerId].maxAllocations += 1; // When a worker requests a task be queued we increase its max allocations by 1 to help avoid deadlocks.
+                requestingWorker.maxAllocations += 1; // When a worker requests a task be queued we increase its max allocations by 1 to help avoid deadlocks.
 
                 this.queueTask(msg.inputs, msg.taskId, msg.taskName)
                     .then(result => {
-                        worker.send({
-                            type: "task-complete",
-                            taskId: msg.taskId,
-                            result,
-                        });
+                        if (worker.isConnected()) { // The requesting worker may have died while waiting.
+                            worker.send({
+                                type: "task-complete",
+                                taskId: msg.taskId,
+                                result,
+                            });
+                        }
                     })
                     .catch(err => {
-                        worker.send({
-                            type: "task-error",
-                            taskId: msg.taskId,
-                            error: err && err.stack || err.toString(),
-                        });
+                        if (worker.isConnected()) {
+                            worker.send({
+                                type: "task-error",
+                                taskId: msg.taskId,
+                                error: err && err.stack || err.toString(),
+                            });
+                        }
                     })
                     .then(() => {
-                        this.workerMap[msg.workerId].maxAllocations -= 1;
+                        const currentWorker = this.workerMap[msg.workerId];
+                        if (currentWorker) { // The worker may have exited while its nested task was running.
+                            currentWorker.maxAllocations -= 1;
+                        }
                     });
             }
             else {
-                throw new Error(`Unrecognised message ${msg.type} from worker.`);
+                // Unknown messages (e.g. application-specific IPC from a task)
+                // are ignored so they can never take down the master process.
+                this.verbose(`Ignoring unrecognised message ${msg.type} from worker.`);
             }
         });
+
+        //
+        // A worker process has exited. Anything still running on it can never
+        // respond, so fail those tasks explicitly and take the worker out of
+        // rotation so that no further tasks are dispatched to it.
+        //
+        worker.on("exit", (code, signal) => {
+            this.handleWorkerExit(workerId, code, signal);
+        });
+
+        //
+        // Log worker errors rather than letting them crash the master process.
+        //
+        worker.on("error", err => {
+            this.verbose(`Worker ${workerId} raised an error:`);
+            this.verbose(err && err.stack || err.toString());
+        });
+    }
+
+    //
+    // Resolve the readiness barrier once every worker is either ready to run
+    // tasks or has already exited, so startup can never hang.
+    //
+    private checkWorkersReady(): void {
+        const accountedFor = this.readyWorkerCount + this.deadWorkerCount;
+        if (accountedFor >= this.numWorkers) {
+            this.markWorkersReady();
+        }
+    }
+
+    //
+    // Handle termination of a worker process.
+    // Rejects every task that was still executing on that worker, removes the
+    // worker from the available pool and schedules queued tasks on the
+    // remaining live workers.
+    //
+    private handleWorkerExit(workerId: string, code: number, signal: string): void {
+        const workerRecord = this.workerMap[workerId];
+        if (!workerRecord || workerRecord.isDead) {
+            return; // Already handled.
+        }
+
+        ++this.deadWorkerCount;
+
+        // Never leave the readiness barrier hanging if a worker dies during startup.
+        this.checkWorkersReady();
+
+        workerRecord.isDead = true;
+        this.verbose(`Worker ${workerId} exited (code=${code}, signal=${signal}), failing its in-flight tasks.`);
+
+        // Remove the dead worker first so it can never receive new tasks,
+        // even while the settle callbacks below trigger rescheduling.
+        delete this.workerMap[workerId];
+        this.workers = this.workers.filter(w => w.id !== workerRecord.worker.id);
+
+        // Reject each task that was still executing on the dead worker.
+        const abandonedTasks = Object.keys(workerRecord.executingTasks)
+            .map(taskId => workerRecord.executingTasks[taskId]);
+        for (const taskRecord of abandonedTasks) {
+            this.failTask(taskRecord, new Error(
+                `Worker process ${workerId} exited (code=${code}, signal=${signal}) ` +
+                `while executing task ${taskRecord.taskName} (${taskRecord.taskId}).`
+            ));
+        }
+
+        // Reclaim any allocations that weren't accounted for by the failed tasks.
+        workerRecord.allocations = 0;
+        workerRecord.executingTasks = {};
+
+        // Hand the queued work over to whatever workers are still alive.
+        this.scheduleTasks();
+    }
+
+    //
+    // Settle a task exactly once. Cleans up all bookkeeping shared by the
+    // completion, error, timeout and worker-exit paths.
+    //
+    private settleTask(taskRecord: ITaskRecord, settle: () => void): void {
+        if (taskRecord.settled) {
+            // Every failure path funnels through here, so a task can only ever
+            // be resolved or rejected a single time.
+            return;
+        }
+        taskRecord.settled = true;
+
+        if (taskRecord.timeoutHandle) {
+            clearTimeout(taskRecord.timeoutHandle as NodeJS.Timer);
+            taskRecord.timeoutHandle = undefined;
+        }
+
+        if (taskRecord.workerId) {
+            const workerRecord = this.workerMap[taskRecord.workerId];
+            if (workerRecord) {
+                delete workerRecord.executingTasks[taskRecord.taskId];
+            }
+        }
+
+        delete this.pendingTasks[taskRecord.taskId];
+
+        settle();
+
+        // A slot has freed up (or the worker is gone), try to run queued tasks.
+        this.scheduleTasks();
+    }
+
+    //
+    // Resolve a task's promise exactly once and release its allocation.
+    //
+    private completeTask(taskRecord: ITaskRecord, result: any): void {
+        this.verbose(`Task ${taskRecord.taskName} (${taskRecord.taskId}) has completed.`);
+
+        const workerRecord = taskRecord.workerId && this.workerMap[taskRecord.workerId];
+        this.settleTask(taskRecord, () => {
+            if (workerRecord) {
+                workerRecord.allocations -= 1;
+            }
+            taskRecord.resolve(result); // Resolve the task's promise.
+        });
+    }
+
+    //
+    // Reject a task's promise exactly once and release its allocation.
+    // Works whether the worker is still alive (task error / timeout) or has
+    // already been removed (worker exit).
+    //
+    private failTask(taskRecord: ITaskRecord, error: any): void {
+        const workerRecord = taskRecord.workerId && this.workerMap[taskRecord.workerId];
+        this.settleTask(taskRecord, () => {
+            if (workerRecord) {
+                workerRecord.allocations -= 1; // Reclaim the worker's allocation.
+            }
+            taskRecord.reject(error); // Reject the task's promise.
+        });
+    }
+
+    //
+    // Arm the optional per-task timeout. When it fires the task is failed on
+    // the master without waiting for the worker; the task is never requeued so
+    // it cannot be dispatched a second time.
+    //
+    private armTaskTimeout(taskRecord: ITaskRecord): void {
+        if (!this.taskTimeout) {
+            return; // No timeout configured: keep the original waiting behaviour.
+        }
+
+        taskRecord.timeoutHandle = setTimeout(() => {
+            if (taskRecord.settled) {
+                return; // The worker responded first, nothing to do.
+            }
+
+            this.verbose(`Task ${taskRecord.taskName} (${taskRecord.taskId}) timed out after ${this.taskTimeout}ms.`);
+
+            this.failTask(taskRecord, new Error(
+                `Task ${taskRecord.taskName} (${taskRecord.taskId}) timed out after ${this.taskTimeout}ms.`
+            ));
+        }, this.taskTimeout);
     }
 
     //
@@ -335,7 +628,7 @@ export class ClusterScheduler implements IScheduler {
         process.on("message",  msg => {
             if (msg.type === "exit") { // Master has instructed the worker to shutdown.
                 this.verbose("Exiting worker.");
-                process.exit(0); 
+                process.exit(0);
             }
             else if (msg.type === "run-task") { // Master has instructed the worker to run a task.
 
@@ -388,7 +681,7 @@ export class ClusterScheduler implements IScheduler {
             }
         });
     }
-    
+
     //
     // Run a task if there is a task to run and there is a worker available to run it.
     //
@@ -404,6 +697,8 @@ export class ClusterScheduler implements IScheduler {
         }
 
         const freeWorkers = Object.keys(this.workerMap)
+            .filter(workerId => !this.workerMap[workerId].isDead) // Never dispatch to a worker that has exited.
+            .filter(workerId => this.workerMap[workerId].isReady) // Only workers that signalled readiness.
             .filter(workerId => this.workerMap[workerId].allocations < this.workerMap[workerId].maxAllocations)
             .map(workerId => this.workerMap[workerId]);
         if (freeWorkers.length <= 0) {
@@ -420,6 +715,13 @@ export class ClusterScheduler implements IScheduler {
 
         const nextFreeWorker = freeWorkers[0]; // Get the next free worker.
         ++nextFreeWorker.allocations;
+
+        // Bind the task to this worker so an unexpected exit can fail it.
+        nextTask.workerId = nextFreeWorker.workerId;
+        nextFreeWorker.executingTasks[nextTask.taskId] = nextTask;
+
+        this.armTaskTimeout(nextTask); // Start the optional per-task timeout.
+
         this.verbose(`Scheduling task ${nextTask.taskName} (${nextTask.taskId}) on worker.`);
 
         nextFreeWorker.worker.send({ // Instruct the worker to run the task.
@@ -448,8 +750,10 @@ export class ClusterScheduler implements IScheduler {
     //
     private shutdownWorkers(): void {
         for (const worker of this.workers) {
-            worker.send({ type: "exit" }); // Instruct workers to shutdown.
+            if (worker.isConnected()) { // Don't bother workers that have already exited.
+                worker.send({ type: "exit" }); // Instruct workers to shutdown.
+            }
         }
     }
-    
+
 }
