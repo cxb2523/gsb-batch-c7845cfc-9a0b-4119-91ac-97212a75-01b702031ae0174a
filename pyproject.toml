@@ -22,6 +22,12 @@ dependencies = [
 Homepage = "https://cotlet.dev/integrations/substack-api-mcp-server"
 Source = "https://github.com/cotletdev/substack-api-mcp-server"
 
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "httpx>=0.27",
+]
+
 [project.scripts]
 substack-mcp = "substack_api_mcp.cli:main"
 substack-api-mcp = "substack_api_mcp.cli:main"

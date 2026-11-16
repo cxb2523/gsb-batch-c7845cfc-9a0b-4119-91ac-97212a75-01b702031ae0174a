@@ -1,6 +1,6 @@
 # AGENTS.md
 
-You are an AI agent in a clone of this repo. It is a self-hosted Substack API and MCP server: 50 tools that work in the user's own Substack account and publication, through the session of their own Google Chrome. Your usual job is one of three: set it up for the user, use its tools for them, or change its code. Human docs: `README.md`.
+You are an AI agent in a clone of this repo. It is a self-hosted Substack API and MCP server: 51 tools that work in the user's own Substack account and publication, through the session of their own Google Chrome. Your usual job is one of three: set it up for the user, use its tools for them, or change its code. Human docs: `README.md`.
 
 ## Before you start
 
@@ -47,6 +47,7 @@ If step 4 fails:
 - `.venv/bin/substack-mcp tools` lists every tool with access and route. `tools --json` adds the input schemas.
 - Publisher tools work on the first publication the account runs. Start with `list_posts` (its `post_id` values go to most post tools) or `get_publication_stats`.
 - Lists return `next_cursor`. Pass it back as `cursor` for the next page.
+- To read many pages at once, use `collect_pages` (tool `get_feed` or `search_substack`, its `params`, `max_pages`, optional `cursor`): it keeps the pages that worked, stops at the first error, and returns `pages_fetched`, `complete`, `stop_reason`, `stop_message` and the `next_cursor` to resume from. `complete` is true only when Substack had no next page.
 - Before a `write` tool, show the user what you will send and to whom, and get their OK. `publish_post` and `schedule_post` email every subscriber. Never message or add people in a loop.
 - Times (`publish_at`) need an explicit offset, e.g. `2026-11-03T08:00:00-05:00`.
 - For a script or a cron job, use `substack_api_mcp.scripting` (`call`, `paginate`, `write_rows`) and the scripts in `examples/` as models.
@@ -63,7 +64,7 @@ Errors come as `<code>: <message>`. `auth_expired` means Substack signed the ses
 
 | Path | What | Edit? |
 |---|---|---|
-| `substack_api_mcp/substack/` | the Substack tools, one file per tool in `tools/`, shared request code in `client.py`, Markdown conversion in `markdown.py` | Yes for a local fix, but the next `git pull` brings our version of these files. Report the bug at https://github.com/cotletdev/substack-api-mcp-server/issues |
+| `substack_api_mcp/substack/` | the Substack tools, one file per tool in `tools/`, shared request code in `client.py`, paged reading in `batch.py`, Markdown conversion in `markdown.py` | Yes for a local fix, but the next `git pull` brings our version of these files. Report the bug at https://github.com/cotletdev/substack-api-mcp-server/issues |
 | `substack_api_mcp/app.py` | app name, domains, session cookie, account paths, REST prefix | Rarely |
 | `substack_api_mcp/core/` | `@tool` declaration, errors, the HTTP client with the session (`context.py`), the account guard | Yes |
 | `substack_api_mcp/session.py` | reading cookies from Chrome over CDP, the session file | Yes |
@@ -72,4 +73,4 @@ Errors come as `<code>: <message>`. `auth_expired` means Substack signed the ses
 
 A new tool is a new file in `substack_api_mcp/substack/tools/` with a `@tool(...)` declaration (name, access, input schema, `route`). The registry finds it, and the REST API, the MCP server and the CLI show it without other changes.
 
-There is no test suite. After a change, run `.venv/bin/substack-mcp tools` and one read tool against the user's account.
+Tests live in `tests/` and use faked Substack answers, so they need no session: `.venv/bin/python -m pytest tests -q` (on Windows `.venv\Scripts\python`). After a change, also run `.venv/bin/substack-mcp tools` and one read tool against the user's account.

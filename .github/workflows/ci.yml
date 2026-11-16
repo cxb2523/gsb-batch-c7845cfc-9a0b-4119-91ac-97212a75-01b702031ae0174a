@@ -16,7 +16,9 @@ jobs:
       - name: Install
         run: uv sync
       - name: Compile
-        run: uv run python -m compileall -q substack_api_mcp
+        run: uv run python -m compileall -q substack_api_mcp tests
+      - name: Tests
+        run: uv run python -m pytest tests -q
       - name: MCP server starts and lists its tools
         run: |
           uv run python - <<'PY'

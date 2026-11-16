@@ -4,7 +4,7 @@
 
 **Yes, ChatGPT, Claude and other AI agents can work in your Substack account.** That includes Cursor, Codex, OpenClaw and any MCP client, plus automations in n8n, Make and Zapier. Ask in plain words, and the AI drafts posts from your notes, schedules them, posts Notes, answers comments and reports your subscriber and post stats. It shows you what it will do first and sends nothing to other people until you say so.
 
-As of November 2026, this repo is the missing piece: 50 Substack tools for AI assistants and scripts.
+As of November 2026, this repo is the missing piece: 51 Substack tools for AI assistants and scripts.
 
 ## What you can ask
 
@@ -32,7 +32,7 @@ Cotlet is best for writers and publishers who want ChatGPT, Claude or another AI
 
 ## Run it yourself
 
-A **Substack API** and a **Substack MCP server** you run on your own computer, in Python, on the session of your own Google Chrome. All 50 Substack tools we run in production at [Cotlet](https://cotlet.dev/integrations/substack-api-mcp-server?utm_source=github&utm_medium=readme&utm_campaign=substack&utm_content=intro): posts and drafts from Markdown, publishing and scheduling, Notes, comments, subscribers, stats, recommendations and direct messages.
+A **Substack API** and a **Substack MCP server** you run on your own computer, in Python, on the session of your own Google Chrome. All 50 Substack tools we run in production at [Cotlet](https://cotlet.dev/integrations/substack-api-mcp-server?utm_source=github&utm_medium=readme&utm_campaign=substack&utm_content=intro), plus `collect_pages` for resumable paged reading here: posts and drafts from Markdown, publishing and scheduling, Notes, comments, subscribers, stats, recommendations and direct messages.
 
 Substack has no public API to write posts, publish Notes or manage subscribers, and no official MCP server. This repo gives you both:
 
@@ -42,7 +42,7 @@ Substack has no public API to write posts, publish Notes or manage subscribers, 
 
 Free for your own use, your own business included ([license](#license)).
 
-[![Substack MCP server](https://img.shields.io/badge/Substack%20MCP-50%20tools-ff6719)](#all-50-tools)
+[![Substack MCP server](https://img.shields.io/badge/Substack%20MCP-51%20tools-ff6719)](#all-51-tools)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-141318)](#requirements)
 [![License: Elastic 2.0](https://img.shields.io/badge/license-Elastic%202.0-141318)](https://github.com/cotletdev/substack-api-mcp-server/blob/main/LICENSE)
 [![MCP Badge](https://lobehub.com/badge/mcp/cotletdev-substack-api-mcp-server)](https://lobehub.com/mcp/cotletdev-substack-api-mcp-server)
@@ -66,7 +66,7 @@ claude mcp add substack -- uvx substack-api-mcp mcp
 - [MCP server](#mcp-server)
 - [REST API](#rest-api)
 - [Python and the example scripts](#python-and-the-example-scripts)
-- [All 50 tools](#all-50-tools)
+- [All 51 tools](#all-51-tools)
 - [Configuration](#configuration)
 - [Security and your Substack account](#security-and-your-substack-account)
 - [Errors](#errors)
@@ -77,7 +77,7 @@ claude mcp add substack -- uvx substack-api-mcp mcp
 ## Questions from Substack users
 
 **Does Substack have an API?**
-Only a limited one (checked 11 Oct 2026). Its Developer API looks up public creator profiles after approval, and there is no public API to write posts or Notes, manage subscribers or send email. RSS reads public posts only. This repo and [Cotlet](https://cotlet.dev/integrations/substack-api-mcp-server?utm_source=github&utm_medium=readme&utm_campaign=substack&utm_content=faq-api) give you 50 Substack tools as a REST API and an MCP server.
+Only a limited one (checked 11 Oct 2026). Its Developer API looks up public creator profiles after approval, and there is no public API to write posts or Notes, manage subscribers or send email. RSS reads public posts only. This repo and [Cotlet](https://cotlet.dev/integrations/substack-api-mcp-server?utm_source=github&utm_medium=readme&utm_campaign=substack&utm_content=faq-api) give you 50 Substack tools as a REST API and an MCP server, and this repo adds `collect_pages`.
 
 **Can I get a Substack API key?**
 Not from Substack for your own account. With Cotlet you get your own API key that works with your Substack account, for scripts, n8n, Make, Zapier or any HTTP client. This repo needs no key: it runs on your computer, on your own Substack session.
@@ -304,6 +304,7 @@ curl -X POST http://127.0.0.1:8787/api/v1/substack/tools/list_comments -d '{"pos
 - `GET /api/v1/substack/tools`: every tool with its route, input schema and an example answer.
 - `GET /docs`: interactive OpenAPI docs, `GET /openapi.json` the schema, for n8n, Postman or a generated client.
 - Answers are JSON. Lists return `next_cursor`; pass it back as `cursor` for the next page.
+- `collect_pages` walks many pages of `get_feed` or `search_substack` in one call and keeps the pages that worked: on `rate_limited` or `auth_expired` it stops, returns the items so far with `pages_fetched`, `complete`, `stop_reason`, `stop_message` and the `next_cursor` of the failed page, and you resume with `cursor=<that value>`. `complete` is true only when Substack had no next page. For example: `curl 'http://127.0.0.1:8787/api/v1/substack/collect?tool=get_feed&max_pages=5'` (pass `params` as a JSON object).
 
 The server listens on `127.0.0.1` only. To reach it from another device of yours, set a token, and every request then needs `Authorization: Bearer <token>`:
 
@@ -353,7 +354,7 @@ python examples/unanswered_comments.py --last 3 --out todo.csv
 
 On a schedule, cron on your own computer works while it is on: `0 8 * * 1 cd ~/substack-api-mcp-server && .venv/bin/python examples/weekly_report.py`.
 
-## All 50 tools
+## All 51 tools
 
 `post_id` comes from `list_posts`, `comment_id` from `list_comments`. `substack-mcp tools` prints this list, `substack-mcp tools --json` adds the input schemas.
 
@@ -443,6 +444,7 @@ On a schedule, cron on your own computer works while it is on: `0 8 * * 1 cd ~/s
 |---|---|---|---|
 | `get_feed` | read | `GET /feed` | Your Substack home feed: posts and Notes, For you or Following. |
 | `search_substack` | read | `GET /search` | Search all of Substack for people, posts and Notes. |
+| `collect_pages` | read | `GET /collect` | Many pages of `get_feed` or `search_substack` in one call, keeping the pages that worked and naming any page that failed. |
 | `list_activity` | read | `GET /activity` | Your Substack notifications: replies, likes, new followers, restacks, newest first. |
 | `get_unread_counts` | read | `GET /unread-counts` | How many unread direct messages, message requests and activity notifications you have. |
 | `list_conversations` | read | `GET /conversations` | Your direct-message conversations, latest first, with the last message. |
@@ -494,7 +496,7 @@ The REST API answers `{"error": "<code>", "message": "..."}`. The MCP server ret
 
 | | This repo | [Cotlet, hosted](https://cotlet.dev/integrations/substack-api-mcp-server?utm_source=github&utm_medium=readme&utm_campaign=substack&utm_content=compare) |
 |---|---|---|
-| Tools | the same 50 | the same 50 |
+| Tools | the same 50, plus local `collect_pages` | the same 50 |
 | Runs | on your computer, while it is on | in the cloud, 24/7 |
 | Substack session | your Chrome, cookies in a local file | your own Cloud Browser in the EU, profile encrypted with AES-256-GCM |
 | When Substack changes its site | `git pull` once we have fixed it | fixed for you, every tool tested daily |
