@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<!-- 根据详情页 DOM 脱敏构造的测试夹具，包含主标题和模拟推荐卡片，非完整线上快照 -->
+<html>
+<head><title>MIDA-583 タイトルテキスト | JavDB</title></head>
+<body>
+  <h2 class="title is-4"><strong>MIDA-583</strong> <strong class="current-title">完全なるタイトルテキスト | JavDB 成人影片数据库</strong></h2>
+
+  <div class="panel-block first-block">
+    <strong>番號:</strong>
+    <span class="value">MIDA-583</span>
+    <a class="button copy-to-clipboard" data-clipboard-text="MIDA-583">複製</a>
+  </div>
+
+  <div class="panel-block">
+    <strong>日期:</strong>
+    <span class="value">2023-05-12</span>
+  </div>
+
+  <div class="panel-block">
+    <strong>系列:</strong>
+    <span class="value"><a href="/series/abc">絶頂シリーズ</a></span>
+  </div>
+
+  <div class="panel-block">
+    <strong>類別:</strong>
+    <span class="value">
+      <a href="/tags?c1=1">單體作品</a>,
+      <a href="/tags?c1=2">中出</a>,
+      <a href="/tags?c1=3">美少女</a>
+    </span>
+  </div>
+
+  <div class="panel-block">
+    <strong>演員:</strong>
+    <span class="value">
+      <a href="/actors/AbCdE">七沢みあ</a><strong class="symbol female">♀</strong>
+    </span>
+  </div>
+
+  <div class="preview-video">
+    <video controls>
+      <source src="//cdn.example.com/preview/mida583.mp4" type="video/mp4">
+    </video>
+  </div>
+
+  <div id="magnets-content">
+    <div class="item">
+      <a class="copy-to-clipboard" data-clipboard-text="magnet:?xt=urn:btih:SMALL">複製</a>
+      <span class="meta">1.2GB, 1個文件</span>
+    </div>
+    <div class="item">
+      <a class="copy-to-clipboard" data-clipboard-text="magnet:?xt=urn:btih:BIG">複製</a>
+      <span class="meta">4.52GB, 1個文件</span>
+    </div>
+    <div class="item">
+      <a class="copy-to-clipboard" data-clipboard-text="not-a-magnet">複製</a>
+      <span class="meta">0.5GB</span>
+    </div>
+  </div>
+  <!-- 脱敏模拟推荐卡片：详情标题解析不得读取这里 -->
+  <article class="message video-panel">
+    <div class="message-body"><div class="tile-images tile-small">
+      <a class="tile-item" href="/v/other"><div class="video-title">其他影片的推荐标题</div></a>
+    </div></div>
+  </article>
+</body>
+</html>

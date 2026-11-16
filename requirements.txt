@@ -1,0 +1,18 @@
+# GUI
+PySide6>=6.5.0
+
+# 网络与解析
+curl_cffi>=0.6.0
+cffi>=1.15.0
+requests>=2.31.0
+beautifulsoup4>=4.12.0
+lxml>=4.9.0
+
+# 打包构建（convert_icon.py 生成图标用）
+Pillow>=10.0.0
+
+# 在线试看（GUI 右键「在线试看」，进程内启动播放服务）
+flask>=3.0.0
+
+# 开发：单元测试
+# pytest>=7.0.0

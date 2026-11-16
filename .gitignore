@@ -1,0 +1,66 @@
+# 测试相关文件
+/test/测试*/
+/test/其他测试/
+/test/javbus/
+/test/images/
+/test/output/
+test_results/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# 虚拟环境
+venv/
+ENV/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# 日志
+logs/
+*.log
+
+# 临时文件
+temp_*.json
+*.tmp
+
+# 配置文件（包含敏感信息）
+cookies.json
+config_local.py
+
+# 输出目录
+/output/
+settings_backup.json
+tasks_backup.json
+malicious_code.nfo
+.DS_Store
+/docs
+
+# 构建产物
+icon.icns
+icon.ico
+version_info.txt
+*.zip
