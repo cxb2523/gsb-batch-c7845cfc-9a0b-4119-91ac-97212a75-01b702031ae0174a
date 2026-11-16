@@ -1,0 +1,85 @@
+services:
+  scraper:
+    build: .
+    environment:
+      SCHEDULER_DB_USERNAME: postgres
+      SCHEDULER_DB_DBNAME: postgres
+      SCHEDULER_DB_HOSTNAME: postgres
+      SCHEDULER_DB_PORT: 5432
+      SCHEDULER_DB_PG_PASSWORD: super-secret-password
+      SNS_ENDPOINT_URL: http://localstack:4566
+      AWS_DEFAULT_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: "my-access-key"
+      AWS_SECRET_ACCESS_KEY: "my-secret-access-key"
+      DREXEL_EMAIL: ${DREXEL_EMAIL}
+      DREXEL_PASSWORD: ${DREXEL_PASSWORD}
+      DREXEL_MFA_SECRET_KEY: ${DREXEL_MFA_SECRET_KEY}
+    volumes:
+      - ./:/app
+    depends_on:
+      - postgres
+      - localstack
+
+  grafana:
+    image: grafana/grafana:12.3.1
+    container_name: grafana
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_NAME: Main Org.
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_UNIFIED_ALERTING_ENABLED: "false"
+      GF_ALERTING_ENABLED: "false"
+      GF_PANELS_DISABLE_SANITIZE_HTML: "true"
+      GF_NEWS_NEWS_FEED_ENABLED: "false"
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/scheduler.json
+    volumes:
+      - ./grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./k8s/drexel-scraper/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      - postgres
+
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_PASSWORD: super-secret-password
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
+      interval: 2s
+      timeout: 5s
+      retries: 15
+      start_period: 5s
+
+  pgweb:
+    container_name: pgweb
+    restart: always
+    image: sosedoff/pgweb
+    ports:
+      - "30012:8081"
+    environment:
+      - PGWEB_DATABASE_URL=postgres://postgres:super-secret-password@postgres:5432/postgres?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+  
+  # Used to imitate AWS services locally
+  # We are using SNS in this case for sending error emails
+  localstack:
+    image: localstack/localstack:4.14.0
+    ports:
+      - "4566:4566"
+    environment:
+      - SERVICES=sns
+      - AWS_DEFAULT_REGION=us-east-1
+      - AWS_ACCESS_KEY_ID=my-access-key
+      - AWS_SECRET_ACCESS_KEY=my-secret-access-key
+    volumes:
+      - "/var/run/docker.sock:/var/run/docker.sock"
+      - "./scripts/create-sns-topic.sh:/etc/localstack/init/ready.d/init-aws.sh"

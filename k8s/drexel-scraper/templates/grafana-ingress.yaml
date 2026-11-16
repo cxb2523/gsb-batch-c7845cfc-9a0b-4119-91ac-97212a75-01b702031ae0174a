@@ -1,0 +1,53 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: grafana-ingress
+  annotations:
+    kubernetes.io/ingress.class: nginx
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/server-snippet: |
+      access_by_lua_block {
+        local uri = ngx.var.uri
+        -- Check if the URI is "/" or starts with "/d/"
+        if uri == "/" or ngx.re.find(uri, "^/d/") then
+          local orig_args = ngx.var.args or ""
+          -- Use PCRE to check if "kiosk" exists anywhere in the query string.
+          local res, err = ngx.re.find(orig_args, "(^|&)kiosk($|&)")
+          if not res then
+            local new_query
+            if orig_args == "" then
+              new_query = "kiosk"
+            else
+              new_query = orig_args .. "&kiosk"
+            end
+            return ngx.redirect(ngx.var.scheme .. "://" .. ngx.var.host .. uri .. "?" .. new_query, 302)
+          end
+        end
+      }
+spec:
+  rules:
+    - host: {{ .Values.host }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ .Values.serviceName }}
+                port:
+                  number: 80
+    - host: www.{{ .Values.host }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ .Values.serviceName }}
+                port:
+                  number: 80
+  tls:
+    - hosts:
+        - {{ .Values.host }}
+        - www.{{ .Values.host }}
+      secretName: {{ .Values.tlsSecretName }}

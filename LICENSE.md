@@ -1,0 +1,1 @@
+You are free to use this code for any purpose, except if you're using it for a commercial product. If you're using this code for a commercial product (anything that generates revenue via whatever model), please contact me at zohair.ul.hasan@gmail.com to discuss licensing options.

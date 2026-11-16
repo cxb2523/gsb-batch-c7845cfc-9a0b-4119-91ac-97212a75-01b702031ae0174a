@@ -1,0 +1,7 @@
+cache/*
+data.json
+.git
+.github
+.gitignore
+postgres-data
+grafana_data

@@ -1,0 +1,13 @@
+__pycache__
+.DS_Store
+data.json
+.env
+postgres-data
+grafana_data
+trash.py
+profile_output.pstat
+callgrind.out.profile
+.venv
+test.py
+test_bruteforce.py
+test.txt

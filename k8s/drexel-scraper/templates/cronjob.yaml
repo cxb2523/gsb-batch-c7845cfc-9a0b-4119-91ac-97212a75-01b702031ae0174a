@@ -1,0 +1,54 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: drexel-scheduler-cronjob
+spec:
+  suspend: false
+  schedule: {{ .Values.schedule }}
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 1
+  timeZone: "US/Eastern"
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: 21600
+      backoffLimit: 1
+      template:
+        spec:
+          containers:
+            - name: drexel-scheduler-job
+              image: zohairr/drexelscheduler-scraper:{{ .Values.image.tag }}
+              env:
+                - name: ENVIRONMENT
+                  value: {{ .Values.env }}
+                - name: SCRAPER_FAILURE_DIR
+                  value: /app/performance/failures
+              envFrom:
+                - configMapRef:
+                    name: drexel-scheduler-configmap
+                - configMapRef:
+                    name: aws-configmap
+                - configMapRef:
+                    name: postgres-configmap
+                - secretRef:
+                    name: aws-pwds
+                - secretRef:
+                    name: grafana-sa-pwd
+                - secretRef:
+                    name: postgres-pwd
+                - secretRef:
+                    name: drexel-scheduler-secrets
+              volumeMounts:
+                - name: shared-pvc
+                  mountPath: /app/cache
+                  subPath: cronjob_cache
+                - name: shared-pvc
+                  mountPath: /app/performance
+                  subPath: cronjob_performance
+          volumes:
+            - name: shared-pvc
+              persistentVolumeClaim:
+                claimName: shared-pvc
+          restartPolicy: OnFailure
+          nodeSelector:
+            kubernetes.io/hostname: {{ .Values.nodeSelector.hostname }}

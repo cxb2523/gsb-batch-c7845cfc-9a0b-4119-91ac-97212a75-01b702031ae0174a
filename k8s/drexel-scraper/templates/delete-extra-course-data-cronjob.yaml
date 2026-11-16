@@ -1,0 +1,35 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: delete-extra-course-data-cronjob
+spec:
+  schedule: "0 5 * * *" # Every night at 05:00
+  timeZone: "US/Eastern"
+  # Cronitor fetches the completed Job and Pod when processing completion events.
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          volumes:
+            - name: shared-pvc
+              persistentVolumeClaim:
+                claimName: shared-pvc
+          containers:
+            - name: delete-extra-course-data-cache-file
+              image: busybox
+              volumeMounts:
+                - name: shared-pvc
+                  mountPath: /data
+                  subPath: cronjob_cache
+              command:
+                - "/bin/sh"
+                - "-c"
+                - |
+                  if [ -f /data/extra_course_data_cache.json ]; then
+                    rm /data/extra_course_data_cache.json
+                  fi
+          restartPolicy: OnFailure
+          nodeSelector:
+            kubernetes.io/hostname: {{ .Values.nodeSelector.hostname }}
