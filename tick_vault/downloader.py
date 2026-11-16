@@ -5,7 +5,7 @@ from tqdm.asyncio import tqdm
 
 from .chunk import TickChunk
 from .config import CONFIG
-from .download_worker import download_worker
+from .download_worker import DownloadResult, download_worker
 from .logger import logger
 from .metadata import MetadataDB
 from .metadata_worker import metadata_worker
@@ -34,8 +34,14 @@ async def download_range(
 
     Raises:
         ForbiddenError: If access is blocked/forbidden during download
-        RuntimeError: If max retries exceeded or unexpected errors occur
+        RuntimeError: If unexpected errors occur
         ValueError: If database operations fail
+
+    Note:
+        Chunks whose retries are exhausted do NOT abort the batch. They are
+        excluded from the metadata database (so a later run over the same
+        range retries them) and reported in a summary log at the end listing
+        the failed chunk count and details.
 
     Example:
         >>> await download_range(
@@ -69,7 +75,7 @@ async def download_range(
 
     # Create queues
     downloader_input_queue: asyncio.Queue[TickChunk | None] = asyncio.Queue()
-    downloader_output_queue: asyncio.Queue[TickChunk] = asyncio.Queue()
+    downloader_output_queue: asyncio.Queue[DownloadResult] = asyncio.Queue()
     metadata_queue: asyncio.Queue[TickChunk | None] = asyncio.Queue()
 
     # Calculate total number of workers (capped by available chunks)
@@ -118,6 +124,7 @@ async def download_range(
     )
 
     completed = 0
+    failed_results: list[DownloadResult] = []
     error_occurred = False
 
     try:
@@ -127,10 +134,15 @@ async def download_range(
             [t.result() for t in all_tasks if t.done()]
 
             # Get result from download workers
-            chunk = await downloader_output_queue.get()
+            result = await downloader_output_queue.get()
 
-            # Forward to metadata worker
-            await metadata_queue.put(chunk)
+            if result.error is None:
+                # Success or confirmed no-data (404): record in metadata
+                await metadata_queue.put(result.chunk)
+            else:
+                # Failed chunk: do NOT record it as attempted, so a rerun
+                # of the same range fetches it again
+                failed_results.append(result)
 
             # Update progress
             completed += 1
@@ -141,7 +153,19 @@ async def download_range(
                 await downloader_input_queue.put(chunks_remaining.pop(0))
 
         pbar.close()
-        logger.info(f"Successfully downloaded {total_chunks} chunks for {symbol}")
+
+        succeeded = total_chunks - len(failed_results)
+        if failed_results:
+            failure_details = ", ".join(
+                f"{r.chunk.time.isoformat()} ({r.error})" for r in failed_results
+            )
+            logger.warning(
+                f"Downloaded {succeeded}/{total_chunks} chunks for {symbol}; "
+                f"{len(failed_results)} chunk(s) failed and were NOT recorded "
+                f"as attempted (rerun the range to retry them): {failure_details}"
+            )
+        else:
+            logger.info(f"Successfully downloaded {total_chunks} chunks for {symbol}")
 
     except Exception as e:
         logger.error(f"Error during download: {e}", exc_info=True)
@@ -161,20 +185,17 @@ async def download_range(
 
         logger.debug("Waiting for workers to finish")
         # Wait for all workers to finish
-        try:
-            if error_occurred:
-                # Cancel tasks if error occurred
-                for task in download_tasks:
-                    task.cancel()
-                metadata_task.cancel()
+        if error_occurred:
+            # Cancel download workers (they may be sleeping in retry backoff),
+            # but let the metadata worker drain its queue and flush so that
+            # already-completed chunks are still recorded in the database.
+            for task in download_tasks:
+                task.cancel()
 
-                await asyncio.gather(
-                    *download_tasks, metadata_task, return_exceptions=True
-                )
-            else:
-                # Normal shutdown
-                await asyncio.gather(*download_tasks, metadata_task)
-        except asyncio.CancelledError:
-            pass
+            await asyncio.gather(*download_tasks, return_exceptions=True)
+            await asyncio.gather(metadata_task, return_exceptions=True)
+        else:
+            # Normal shutdown
+            await asyncio.gather(*download_tasks, metadata_task)
 
-        logger.debug("Workers cancelled")
+        logger.debug("Workers stopped")

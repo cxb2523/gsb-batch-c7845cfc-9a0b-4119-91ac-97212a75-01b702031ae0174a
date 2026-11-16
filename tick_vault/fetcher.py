@@ -36,6 +36,19 @@ class RetryableError(FetchError):
     """Raised for transient errors that should be retried."""
 
 
+class RetriesExhaustedError(FetchError):
+    """Raised when all retry attempts for a request are exhausted.
+
+    This is a per-request failure: callers processing batches of requests
+    should treat it as a failure of that single request (mark it failed and
+    continue with the rest) rather than aborting the whole batch.
+    """
+
+    def __init__(self, message: str, url: str | None = None):
+        super().__init__(message)
+        self.url = url
+
+
 async def _fetch(client: AsyncClient, url: str) -> bytes | None:
     """
     Fetch data from a URL with comprehensive error handling.
@@ -133,6 +146,11 @@ async def _fetch(client: AsyncClient, url: str) -> bytes | None:
                 f"Unexpected status code {response.status_code} for URL: {url}"
             )
 
+    # Our own error categories (RateLimitError, ForbiddenError, RetryableError)
+    # raised above must propagate unwrapped so fetch_with_retry can act on them
+    except FetchError:
+        raise
+
     # Network timeouts (includes ConnectTimeout, ReadTimeout, WriteTimeout, PoolTimeout)
     except TimeoutException as e:
         logger.warning(f"Timeout while fetching {url}")
@@ -183,12 +201,16 @@ async def fetch_with_retry(client: AsyncClient, url: str) -> bytes | None:
     Raises:
         ForbiddenError: When access is denied/blocked (401, 403, 451).
             Raised immediately without retry.
-        RuntimeError: When max retry attempts are exhausted for RateLimitError
-            or RetryableError, or when any unexpected error occurs.
+        RetriesExhaustedError: When max retry attempts are exhausted for
+            RateLimitError or RetryableError. Callers handling batches should
+            treat this as a single-item failure and continue with other items.
+        RuntimeError: When any unexpected error occurs.
 
     Retry behavior:
         - RateLimitError: Uses server's Retry-After header if available,
-          otherwise applies exponential backoff
+          otherwise applies exponential backoff. Retry-After values larger
+          than CONFIG.fetch_max_retry_wait are truncated to that cap (and
+          logged) so a single worker never idles excessively.
         - RetryableError: Applies exponential backoff with base delay from config
         - Max attempts: CONFIG.fetch_max_retry_attempts + 1 (initial + retries)
         - Backoff formula: base_delay * (2 ** attempt)
@@ -201,16 +223,23 @@ async def fetch_with_retry(client: AsyncClient, url: str) -> bytes | None:
 
         except RateLimitError as e:
             if attempt == CONFIG.fetch_max_retry_attempts:
-                raise RuntimeError(
-                    f"Max retries ({CONFIG.fetch_max_retry_attempts}) exceeded for URL: {url}"
+                raise RetriesExhaustedError(
+                    f"Max retries ({CONFIG.fetch_max_retry_attempts}) exceeded for URL: {url}",
+                    url=url,
                 ) from e
 
             # Use server-suggested delay or exponential backoff
-            delay = (
-                e.retry_after
-                if e.retry_after
-                else CONFIG.fetch_base_retry_delay * (2**attempt)
-            )
+            if e.retry_after:
+                delay = float(e.retry_after)
+                if delay > CONFIG.fetch_max_retry_wait:
+                    logger.warning(
+                        f"Server Retry-After ({delay:.1f}s) exceeds configured "
+                        f"fetch_max_retry_wait ({CONFIG.fetch_max_retry_wait:.1f}s) "
+                        f"for {url}; capping wait at the limit"
+                    )
+                    delay = CONFIG.fetch_max_retry_wait
+            else:
+                delay = CONFIG.fetch_base_retry_delay * (2**attempt)
             logger.info(
                 f"Rate limit hit, retrying in {delay:.1f}s (attempt {attempt + 1}/{CONFIG.fetch_max_retry_attempts + 1})"
             )
@@ -219,8 +248,9 @@ async def fetch_with_retry(client: AsyncClient, url: str) -> bytes | None:
 
         except RetryableError as e:
             if attempt == CONFIG.fetch_max_retry_attempts:
-                raise RuntimeError(
-                    f"Max retries ({CONFIG.fetch_max_retry_attempts}) exceeded for URL: {url}"
+                raise RetriesExhaustedError(
+                    f"Max retries ({CONFIG.fetch_max_retry_attempts}) exceeded for URL: {url}",
+                    url=url,
                 ) from e
 
             # Exponential backoff

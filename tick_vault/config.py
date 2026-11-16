@@ -27,6 +27,14 @@ class Config(BaseSettings):
             - 3rd retry: 4.0s
             Default: 1.0
 
+        fetch_max_retry_wait: Maximum time in seconds a worker will wait before
+            retrying a rate-limited request. The server's Retry-After header is
+            still honored, but capped at this value; when the server asks for a
+            longer wait, the wait is truncated to this limit and a warning is
+            logged. Prevents a single worker from idling for excessively long
+            server-suggested delays.
+            Default: 300.0
+
         worker_per_proxy: Number of concurrent download workers to spawn per proxy.
             Higher values increase download speed but may trigger rate limiting.
             Total workers = worker_per_proxy * number_of_proxies.
@@ -86,6 +94,12 @@ class Config(BaseSettings):
         gt=0,
         le=60.0,
         description="Base delay in seconds for exponential backoff (0-60)",
+    )
+
+    fetch_max_retry_wait: float = Field(
+        default=300.0,
+        gt=0,
+        description="Maximum seconds to wait before a retry; caps server Retry-After",
     )
 
     worker_per_proxy: int = Field(
