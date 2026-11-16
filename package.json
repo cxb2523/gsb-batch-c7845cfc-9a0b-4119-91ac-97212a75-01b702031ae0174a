@@ -1,0 +1,66 @@
+{
+  "name": "@zenrows/mcp",
+  "version": "2.19.0",
+  "description": "Zenrows MCP server: Fetch, Extract, Batch, and Browser Sessions for AI agents",
+  "type": "module",
+  "bin": {
+    "zenrows-mcp": "dist/index.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc && chmod +x dist/index.js",
+    "check:server-json": "node scripts/sync-server-json-version.mjs --check",
+    "clean": "rm -rf dist",
+    "dev": "node --env-file=.env --import tsx src/index.ts",
+    "dev:http": "node --env-file=.env --import tsx src/http.ts",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "inspect": "npm run build && npx @modelcontextprotocol/inspector node dist/index.js",
+    "lint": "eslint src/**/*.ts",
+    "lint:fix": "eslint src/**/*.ts --fix",
+    "prepare": "npm run build",
+    "prepublishOnly": "npm run clean && npm run build && npm run typecheck && npm run lint && npm test && npm run check:server-json",
+    "sync:server-json": "node scripts/sync-server-json-version.mjs",
+    "test": "node --import tsx --test tests/*.test.ts",
+    "test:e2e": "node --import tsx --test tests/e2e/*.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@hono/node-server": "^1.19.9",
+    "@modelcontextprotocol/sdk": "^1.27.1",
+    "hono": "^4.11.4",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@typescript-eslint/eslint-plugin": "^8.57.0",
+    "@typescript-eslint/parser": "^8.57.0",
+    "eslint": "^10.0.3",
+    "prettier": "^3.8.1",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  },
+  "engines": {
+    "node": ">=20.6"
+  },
+  "keywords": [
+    "mcp",
+    "zenrows",
+    "scraping",
+    "web-scraping",
+    "extract",
+    "structured-data",
+    "web-data",
+    "model-context-protocol",
+    "ai",
+    "llm"
+  ],
+  "mcpName": "io.github.ZenRows/zenrows-mcp",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ZenRows/zenrows-mcp.git"
+  }
+}

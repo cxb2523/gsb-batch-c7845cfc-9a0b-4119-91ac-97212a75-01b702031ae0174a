@@ -1,0 +1,43 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.ZenRows/zenrows-mcp",
+  "description": "Zenrows MCP server: Fetch, Extract, Batch, and Browser Sessions for AI agents",
+  "repository": {
+    "url": "https://github.com/ZenRows/zenrows-mcp",
+    "source": "github"
+  },
+  "version": "2.19.0",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "@zenrows/mcp",
+      "version": "2.19.0",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "description": "Optional. Without it, the first tool call creates a Free account (5,000 credits/month) you can claim later. ZENROWS_AUTO_SIGNUP=false opts out. Keys: https://app.zenrows.com/account/settings",
+          "isRequired": false,
+          "format": "string",
+          "isSecret": true,
+          "name": "ZENROWS_API_KEY"
+        }
+      ]
+    }
+  ],
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://mcp.zenrows.com/mcp",
+      "headers": [
+        {
+          "name": "Authorization",
+          "description": "Bearer <ZENROWS_API_KEY> or OAuth. Needed for tool calls only. No auto-signup; agents can POST https://app.zenrows.com/api/agent/signup for a key (it may ask a short question first).",
+          "isRequired": false,
+          "isSecret": true
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,47 @@
+startCommand:
+  type: stdio
+  commandFunction: |-
+    (config) => ({
+      command: "node",
+      args: ["dist/index.js"],
+      env: {
+        ZENROWS_API_KEY: config.apiKey,
+        ZENROWS_JS_RENDER: String(config.js_render ?? false),
+        ZENROWS_PREMIUM_PROXY: String(config.premium_proxy ?? false),
+        ZENROWS_RESPONSE_TYPE: config.response_type ?? "markdown"
+      }
+    })
+  configSchema:
+    type: object
+    required:
+      - apiKey
+    properties:
+      apiKey:
+        type: string
+        title: Zenrows API Key
+        description: Your Zenrows API key from app.zenrows.com/register
+      js_render:
+        type: boolean
+        title: JavaScript Rendering
+        description: Force JavaScript rendering on every scrape request. Leave off to keep Adaptive Stealth Mode, which already renders when a page needs it.
+        default: false
+      premium_proxy:
+        type: boolean
+        title: Premium Proxy
+        description: Force premium residential proxies on every scrape request (10x cost). Leave off to keep Adaptive Stealth Mode, which already escalates when a site blocks.
+        default: false
+      response_type:
+        type: string
+        title: Default Response Type
+        description: Default output format for scraped content.
+        enum: [markdown, plaintext, html]
+        default: markdown
+  exampleConfig:
+    apiKey: your-zenrows-api-key
+    js_render: false
+    premium_proxy: false
+    response_type: markdown
+
+remote:
+  type: http
+  url: https://mcp.zenrows.com/mcp
