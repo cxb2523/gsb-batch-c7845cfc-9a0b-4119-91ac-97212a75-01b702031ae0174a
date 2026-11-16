@@ -404,7 +404,7 @@ diff --git a/third_party/blink/renderer/core/loader/frame_loader.cc b/third_part
 index 5f54d8101f65..13e01eb8900a 100644
 --- a/third_party/blink/renderer/core/loader/frame_loader.cc
 +++ b/third_party/blink/renderer/core/loader/frame_loader.cc
-@@ -727,11 +727,20 @@ void FrameLoader::StartNavigation(const FrameLoadRequest& passed_request,
+@@ -727,11 +727,28 @@ void FrameLoader::StartNavigation(const FrameLoadRequest& passed_request,
    if (HTMLFrameOwnerElement* element = frame_->DeprecatedLocalOwner())
      element->CancelPendingLazyLoad();
  
@@ -414,18 +414,26 @@ index 5f54d8101f65..13e01eb8900a 100644
    const KURL& url = resource_request.Url();
    Document* origin_document = request.OriginDocument();
  
-+  frame_->DomWindow()->appendInfo("_-_");
-+  frame_->DomWindow()->appendInfo(url.GetString());
-+  frame_->GetDocument()->AddConsoleMessage(ConsoleMessage::Create(
-+    mojom::ConsoleMessageSource::kJavaScript,
-+    mojom::ConsoleMessageLevel::kInfo,
-+      "*[scrawler log] [Navigation] [" + url.ElidedString() + "]"));
++  // Dynamic crawler: record every navigation target without actually
++  // leaving the current document. Use the same full URL string for both
++  // window.info and the console log so they always match.
++  LocalDOMWindow* dom_window = frame_->DomWindow();
++  Document* document = frame_->GetDocument();
++  if (dom_window && document) {
++    const String& target_url = url.GetString();
++    dom_window->appendInfo("_-_");
++    dom_window->appendInfo(target_url);
++    document->AddConsoleMessage(ConsoleMessage::Create(
++      mojom::ConsoleMessageSource::kJavaScript,
++      mojom::ConsoleMessageLevel::kInfo,
++      "[scrawler log] [Navigation] [" + target_url + "]"));
++  }
 +  return;
 +
    resource_request.SetHasUserGesture(
        LocalFrame::HasTransientUserActivation(frame_));
  
-@@ -782,6 +791,7 @@ void FrameLoader::StartNavigation(const FrameLoadRequest& passed_request,
+@@ -782,6 +799,7 @@ void FrameLoader::StartNavigation(const FrameLoadRequest& passed_request,
      return;
    }
  
