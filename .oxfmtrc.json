@@ -1,0 +1,27 @@
+{
+  "$schema": "./node_modules/oxfmt/configuration_schema.json",
+  "plugins": [
+    "import"
+  ],
+  "rules": {
+    "import/no-cycle": [
+      "error",
+      {
+        "maxDepth": 3
+      }
+    ]
+  },
+  "semi": false,
+  "singleQuote": true,
+  "trailingComma": "es5",
+  "insertFinalNewline": true,
+  "bracketSpacing": true,
+  "arrowParens": "always",
+  "endOfLine": "lf",
+  "printWidth": 100,
+  "experimentalSortPackageJson": false,
+  "ignorePatterns": [
+    "**/*.md",
+    "**/*.json"
+  ]
+}

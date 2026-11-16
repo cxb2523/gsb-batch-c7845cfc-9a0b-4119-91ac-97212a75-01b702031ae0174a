@@ -1,0 +1,5 @@
+#!/usr/bin/env sh
+# pre-push: run slow checks only (tests, typecheck)
+# formatter/linter/toc run in pre-commit via lint-staged
+npm run type-check
+npm run test:ci

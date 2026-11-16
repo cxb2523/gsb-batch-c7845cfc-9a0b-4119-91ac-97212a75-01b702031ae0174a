@@ -1,0 +1,29 @@
+{
+  "github": {
+    "release": true,
+    "assets": [
+      "dist/",
+      "README.md",
+      "LICENSE"
+    ]
+  },
+  "git": {
+    "commitMessage": "chore: release v${version}",
+    "tagName": "v${version}"
+  },
+  "npm": {
+    "publish": false
+  },
+  "plugins": {
+    "@release-it/conventional-changelog": {
+      "preset": "angular",
+      "infile": "CHANGELOG.md"
+    }
+  },
+  "hooks": {
+    "before:init": [
+      "pnpm test",
+      "pnpm run build"
+    ]
+  }
+}
