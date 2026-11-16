@@ -412,7 +412,7 @@ def test_damage_that_cannot_be_repaired_is_a_data_error_that_names_the_file(tmp_
     client = _db(_rows(JAN_1, JAN_5))
     _load(client, tmp_path)
     path = _alter_first_close(tmp_path)
-    client.queue(503, {"status": "error", "message": "maintenance"})
+    client.queue(503, {"status": "error", "message": "maintenance"}, persistent=True)
     with pytest.raises(DataError) as caught:
         _load(client, tmp_path)
     assert str(path) in str(caught.value)

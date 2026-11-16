@@ -303,10 +303,20 @@ def _server_rows(
         records, meta.fetch = provider.collect(request.series, whole, source, sessions, now_ns)
     if len(records) == 0:
         chosen = f" source='auto' chose {source!r} because {probe.reason}." if probe else ""
-        raise NoDataError(
-            f"{request.tag}: source={source!r} returned no bars for {request.start} to "
-            f"{whole[0][1]}.{chosen} {_NO_DATA_ADVICE[source]}"
+        why = (
+            f" The fetch ended before any window was answered: {meta.fetch.stopped}"
+            if meta.fetch and meta.fetch.stopped
+            else ""
         )
+        error = NoDataError(
+            f"{request.tag}: source={source!r} returned no bars for {request.start} to "
+            f"{whole[0][1]}.{chosen}{why} {_NO_DATA_ADVICE[source]}"
+        )
+        # The fetch report rides on the error so a caller that catches it (the
+        # warm-up load) can tell a converged broker failure apart from a source
+        # that genuinely holds nothing.
+        error.meta = meta
+        raise error
     present = {name: records[name] for name in VALUE_COLUMNS if not np.isnan(records[name]).all()}
     stamped = Stamped(
         (records["timestamp"] - shift) * NANOS_PER_SECOND,
@@ -375,7 +385,9 @@ def _through_cache(
         message = f"{' '.join(cached.notes)}. Fetching them again failed: {exc}"
         if isinstance(exc, ServerError):
             # A server that cannot answer stays a ServerError, so a caller can tell it apart.
-            raise ServerError(message, rate_limited=exc.rate_limited) from exc
+            raise ServerError(
+                message, rate_limited=exc.rate_limited, transport=exc.transport
+            ) from exc
         raise DataError(message) from exc
     served = set(bucket_days(records).tolist())
     cached_days = set(bucket_days(cached.records).tolist())

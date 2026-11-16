@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **A broker fetch keeps the windows it answered when a window cannot be
+  answered, instead of discarding the whole fetch.** Walking the broker
+  (`source="api"`) newest to oldest, the fetch now converges on the first window
+  that the OpenAlgo server cannot serve and returns the rows of every window
+  answered before it, sorted by timestamp (an empty array, never `None`, when
+  none were answered), with the ending recorded in `FetchReport`: the new
+  machine-readable `stop_reason` (`"rate_limited"`, `"transport_failure"`,
+  `"server_error"` or `"broker_history_start"`) plus the human `stopped` text,
+  and the `windows_fetched`, `requests` and `retries` totals. During the broker
+  walk HTTP 429, HTTP 408, the 5xx and a transport failure (a connect timeout,
+  a refused connection) share one doubling-backoff budget, so the waits always
+  converge after `max_retries`; a final non-retryable answer such as HTTP 401
+  ends the walk at once. The empty window that marks the broker's history start
+  keeps its own stop reason and wording, so the two endings are
+  distinguishable. A load whose fetch answered no window raises `NoDataError`
+  carrying the same reason in its message and the metadata on `error.meta`; a
+  partial fetch returns its bars with the short-history warning. Historify
+  (`source="db"`) is unchanged: it is still read oldest first, keeps to the
+  HTTP 429 backoff alone, and a failed window still raises, as does an unknown
+  symbol for either source. `ServerError` gains a `transport` flag for a
+  request that never got an HTTP response.
+
 ## [2.2.1] - 2026-11-15
 
 ### Fixed

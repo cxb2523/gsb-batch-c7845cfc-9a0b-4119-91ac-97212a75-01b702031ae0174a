@@ -63,12 +63,15 @@ class ServerError(DataError):
     logged in to the broker, then run again.
 
     `rate_limited` is True when the server kept answering HTTP 429: raise `pacing=` or
-    try again later.
+    try again later. `transport` is True when no HTTP response ever arrived (a connect
+    timeout, a refused connection, a TLS failure): check that OpenAlgo is running and
+    reachable, then try again later.
     """
 
-    def __init__(self, message, rate_limited=False):
+    def __init__(self, message, rate_limited=False, transport=False):
         super().__init__(message)
         self.rate_limited = rate_limited
+        self.transport = transport
 
 
 class TimestampError(DataError):

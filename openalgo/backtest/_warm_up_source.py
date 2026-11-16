@@ -16,7 +16,8 @@ from typing import Any
 from ._base_interval import _data_for
 from ._series import ist_time
 from .data import BarsResult, load_bars
-from .errors import DataError, ServerError
+from .data.fetching import STOP_BROKER_START
+from .errors import DataError, NoDataError, ServerError
 
 SERVER_SOURCES = ("db", "api")
 # The days up to the present the server check asks for: a week holds a completed
@@ -94,6 +95,18 @@ def load_range(
     )
 
 
+def _cannot_answer(symbol: str, failure: Exception, first: dt.date, last: dt.date) -> ServerError:
+    """The error for a server that fails both the bars the indicators need and
+    the recent-sessions probe asked without the cache."""
+    return ServerError(
+        f"{symbol}: the OpenAlgo server cannot answer history requests. The bars before "
+        f"start that the indicators need failed ({failure}), and so did a request for "
+        f"its most recent sessions ({first} to {last}), asked without the local cache. "
+        "Check that OpenAlgo is running and logged in to the broker, then run the "
+        "backtest again."
+    )
+
+
 def check_server(symbol: str, plan: Any, source: HistorySource, failure: ServerError) -> None:
     """Raise ServerError when the server that failed a request of `symbol`'s history
     (`failure`) cannot answer at all (`_warm_up_load`): at once for a rate limit, whose
@@ -111,13 +124,18 @@ def check_server(symbol: str, plan: Any, source: HistorySource, failure: ServerE
     try:
         load_range(symbol, first, last, plan, source, cache=False)
     except ServerError as again:
-        raise ServerError(
-            f"{symbol}: the OpenAlgo server cannot answer history requests. The bars before "
-            f"start that the indicators need failed ({failure}), and so did a request for "
-            f"its most recent sessions ({first} to {last}), asked without the local cache. "
-            "Check that OpenAlgo is running and logged in to the broker, then run the "
-            "backtest again."
-        ) from again
+        raise _cannot_answer(symbol, failure, first, last) from again
+    except NoDataError as again:
+        # A broker fetch converges instead of raising: when it converged on a
+        # server failure before answering any window, that is the same answer a
+        # raised ServerError would give — the server cannot serve history now.
+        # An empty answer at the broker's history start, or a source that simply
+        # holds nothing, means the server is up and the earlier failure was
+        # about the older days.
+        fetch = getattr(again, "meta", None)
+        fetch = getattr(fetch, "fetch", None)
+        if fetch is not None and fetch.stop_reason not in (None, STOP_BROKER_START):
+            raise _cannot_answer(symbol, failure, first, last) from again
     except DataError:
         # The server answered (no rows, an unknown symbol, or rows that fail a check):
         # it is up, and the failure is about the older days, which the caller records

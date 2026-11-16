@@ -19,6 +19,7 @@ from test_quickstart import QUICKSTART, historify_rows
 
 import openalgo.backtest as bt
 from openalgo.backtest._warm_up_source import RECENT_DAYS, check_server
+from openalgo.backtest.data.fetching import DEFAULT_MAX_RETRIES
 from openalgo.backtest.errors import DataError, ServerError, WarmUpWarning
 
 SERIES = ("SBIN", "NSE", "D")
@@ -97,7 +98,11 @@ def recent_sessions_asked(client) -> list[tuple[dt.date, dt.date]]:
 def test_the_server_is_asked_for_recent_sessions_before_the_run_stops(expired_after_caching):
     with pytest.raises(ServerError):
         run(QUICKSTART.EmaCross, expired_after_caching)
-    assert len(recent_sessions_asked(expired_after_caching)) == 1
+    # One recent-sessions probe; its HTTP 500 is retried with the standard
+    # backoff (one initial request plus the retries), all for the same week.
+    recent = recent_sessions_asked(expired_after_caching)
+    assert recent and len(set(recent)) == 1
+    assert len(recent) == 1 + DEFAULT_MAX_RETRIES
 
 
 def test_a_run_that_needs_no_history_still_runs_from_the_cache(expired_after_caching):

@@ -270,8 +270,10 @@ class OpenAlgoProvider:
         """The raw rows of the inclusive IST date `ranges` from `source` ("db" or
         "api"), with a report of the fetch (see `HistoryFetcher.collect`).
 
-        Raises ServerError when a request fails or is rate limited beyond the retries,
-        and DataError for rows it cannot read.
+        A broker fetch that meets a rate limit, a transport failure or a final
+        server error converges: it keeps the windows already answered and says why
+        in the report instead of raising. Historify raises on any failed window,
+        and an unknown symbol always raises SymbolNotFoundError.
         """
         profile = DB_PROFILE if source == "db" else broker_profile(self.broker_name())
         window_days = self._chunk_days or profile.window_days(series[2])

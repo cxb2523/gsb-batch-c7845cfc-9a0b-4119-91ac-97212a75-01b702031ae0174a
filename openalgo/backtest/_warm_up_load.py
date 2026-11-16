@@ -30,14 +30,17 @@ series loads none (`_warm_up_history`).
 
 **A server that cannot answer** stops the run: when the OpenAlgo server fails a request
 (`ServerError`: it cannot be reached, keeps rate limiting, or answers with an error such
-as an expired broker login), the run asks it once more for the symbol's most recent
-sessions, bypassing the local cache (`_warm_up_source.check_server`). If that fails too,
-the server cannot serve history at all just now, and a run without its history would
-trade from bars the cache happened to hold, waiting inside them for its indicators:
-`ServerError` is raised. If the server answers it, the failure is about the older days (a
-broker that refuses dates before a listing or beyond the recent history it keeps), and
-the steps end as above. A rate limit stops the run at once, with its own advice (raise
-`pacing=`): its history exists but was not sent.
+as an expired broker login), or a broker fetch converges on such a failure after keeping
+the windows it had already answered (`FetchReport.stop_reason` in the data layer), the
+run asks it once more for the symbol's most recent sessions, bypassing the local cache
+(`_warm_up_source.check_server`). If that fails too, the server cannot serve history at
+all just now, and a run without its history would trade from bars the cache happened to
+hold, waiting inside them for its indicators: `ServerError` is raised. If the server
+answers it, the failure is about the older days (a broker that refuses dates before a
+listing or beyond the recent history it keeps), and the steps end as above. A rate limit
+stops the run at once, with its own advice (raise `pacing=`): its history exists but was
+not sent. The broker's own history start is not a server failure: the steps end on it
+without the recent-sessions probe.
 
 **A sweep** loads once per symbol, stepping for the largest need of each series over
 its combinations first, and each combination then steps through the same loads as its
@@ -73,10 +76,40 @@ from ._warm_up_probe import largest
 from ._warm_up_source import HistorySource, check_server, load_range
 from .data import BarsResult
 from .data._sessions import day_start_ns
+from .data.fetching import STOP_RATE_LIMITED, STOP_TRANSPORT
 from .data.loader import own_reader
 from .errors import DataError, NoDataError, ServerError
 
 ONE_DAY = dt.timedelta(days=1)
+# The FetchReport stop reasons that mean the server, not the broker's history
+# depth, ended a broker fetch (see `data.fetching`).
+_SERVER_STOP_REASONS = frozenset({STOP_RATE_LIMITED, STOP_TRANSPORT, "server_error"})
+
+
+def _server_error_from_fetch(fetch: Any) -> ServerError:
+    """Reconstruct the ServerError a converged broker fetch recorded in its
+    FetchReport, so the warm-up load can put it through `check_server` as if the
+    fetch had raised it itself."""
+    return ServerError(
+        fetch.stopped or f"the fetch ended early ({fetch.stop_reason})",
+        rate_limited=fetch.stop_reason == STOP_RATE_LIMITED,
+        transport=fetch.stop_reason == STOP_TRANSPORT,
+    )
+
+
+def _converged_server_error(result: BarsResult) -> ServerError | None:
+    """The ServerError a broker fetch converged into, reconstructed from its
+    FetchReport, or None when the fetch read every window it planned. A broker
+    fetch now keeps the windows it answered instead of raising, so the warm-up
+    load treats a converged failure exactly as the raised ServerError it used to
+    get: the server may be down, and the run must ask its recent sessions once
+    more before deciding (`check_server`)."""
+    fetch = result.meta.fetch
+    if fetch is None or fetch.stop_reason not in _SERVER_STOP_REASONS:
+        return None
+    return _server_error_from_fetch(fetch)
+
+
 # The bars from a first IST day to the last bar before `start`.
 Fetch = Callable[[dt.date], SymbolLoad]
 
@@ -125,13 +158,30 @@ def load_symbol(
         return SymbolLoad(empty_base(), kind, declared=declared)
     try:
         result = load_range(symbol, day, last_day, plan, source, corporate_actions=declared)
-    except NoDataError:
+    except NoDataError as error:
+        # A broker fetch that converged on a server failure before any window
+        # was answered reports it here: handle it as the raised ServerError it
+        # used to be, so a server that is down still stops the run once its
+        # recent sessions fail too. A genuinely empty source stays an empty load.
+        fetch = getattr(getattr(error, "meta", None), "fetch", None)
+        if fetch is not None and fetch.stop_reason in _SERVER_STOP_REASONS:
+            server_error = _server_error_from_fetch(fetch)
+            check_server(symbol, plan, source, server_error)
+            return SymbolLoad(empty_base(), kind, _failure(server_error), declared=declared)
         return SymbolLoad(empty_base(), kind, declared=declared)
     except ServerError as error:
         check_server(symbol, plan, source, error)
         return SymbolLoad(empty_base(), kind, _failure(error), declared=declared)
     except DataError as error:
         return SymbolLoad(empty_base(), kind, _failure(error), declared=declared)
+    converged = _converged_server_error(result)
+    if converged is not None:
+        # The broker fetch kept the windows it answered but ended on a rate
+        # limit, a transport failure or a server error: handle it as the raised
+        # ServerError it used to be, so a server that is down still stops the
+        # run once its recent sessions fail too.
+        check_server(symbol, plan, source, converged)
+        return SymbolLoad(empty_base(), kind, _failure(converged), declared=declared)
     base = result.bars[result.bars["ts_open"].to_numpy() < run_from(plan)]
     notes = [f"{symbol} history before start: {note}" for note in result.meta.warnings]
     # A source that returned less than was asked for says so in the first warning

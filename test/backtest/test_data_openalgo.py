@@ -362,12 +362,13 @@ def test_http_429_is_backed_off_through_the_sdk_post_helper_too():
     [
         (403, {"status": "error", "message": "Invalid openalgo apikey"}, "HTTP 403: Invalid"),
         (400, {"status": "error", "message": {"interval": ["Invalid interval"]}}, "HTTP 400"),
-        (502, None, "HTTP 502: the body is not JSON"),
         (200, {"status": "error", "message": "master contract not ready"}, "HTTP 200: master"),
     ],
-    ids=["bad key", "validation", "proxy error page", "error with status 200"],
+    ids=["bad key", "validation", "error with status 200"],
 )
-def test_error_answer_of_the_server_is_a_data_error_without_the_api_key(status, body, message):
+def test_a_final_error_answer_of_the_server_is_a_data_error_without_the_api_key(
+    status, body, message
+):
     client = _broker_client()
     client.queue(status, body)
     with pytest.raises(DataError, match=message) as caught:
@@ -375,14 +376,32 @@ def test_error_answer_of_the_server_is_a_data_error_without_the_api_key(status, 
     assert client.api_key not in str(caught.value)
 
 
-def test_unreachable_server_is_a_data_error_that_keeps_the_cause():
+def test_a_5xx_proxy_page_is_retried_then_converges_and_keeps_the_api_key_out():
+    # A 502 is retryable within the window walk: once the budget is spent the
+    # broker walk converges, and its report (not a raised error) carries the
+    # non-JSON body wording.
+    client = _broker_client()
+    client.queue(502, None, persistent=True)
+    with pytest.raises(NoDataError) as caught:
+        _load(client, "api", broker="zerodha", provider_options={"max_retries": 1})
+    assert "HTTP 502" in str(caught.value) and "the body is not JSON" in str(caught.value)
+    assert client.api_key not in str(caught.value)
+    assert client.history_calls("api") and all(
+        client.api_key not in str(call) for call in client.history_calls("api")
+    )
+
+
+def test_unreachable_server_converges_to_a_no_data_error_that_keeps_the_cause():
     class Unreachable(FakeClient):
         def handle(self, url, payload, headers, timeout):
             raise OSError("connection refused")
 
-    with pytest.raises(DataError, match="could not reach the OpenAlgo server") as caught:
-        _load(Unreachable(), "api", broker="zerodha")
-    assert isinstance(caught.value.__cause__, OSError)
+    with pytest.raises(NoDataError, match="could not reach the OpenAlgo server") as caught:
+        _load(Unreachable(), "api", broker="zerodha", provider_options={"max_retries": 0})
+    # The converged fetch quotes the transport ServerError, which chains the
+    # socket OSError as its cause.
+    assert "connection refused" in str(caught.value)
+    assert caught.value.__cause__ is None  # the convergence records, does not chain, the error
 
 
 def test_date_string_timestamps_from_the_server_are_rejected_not_parsed():

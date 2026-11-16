@@ -190,7 +190,13 @@ class _FakeHTTP:
         self._owner = owner
 
     def post(self, url, json=None, headers=None, timeout=None):
-        return self._owner.handle(url, json, headers, timeout)
+        try:
+            return self._owner.handle(url, json, headers, timeout)
+        except OSError:
+            # A socket-level failure (a refused connection or a connect
+            # timeout) happens outside the HTTP response, as httpx raises it;
+            # re-raise so the Transport turns it into a transport ServerError.
+            raise
 
 
 class FakeClient:
@@ -200,6 +206,9 @@ class FakeClient:
     db, api: {(symbol, exchange, interval): [raw rows]}
     api_fail_before: a date; broker requests that end before it answer HTTP 500
         (a broker that errors for ranges it no longer holds).
+    transport_fail_before: a date; broker requests that end before it fail to
+        connect at all (OSError), as a server that is down or refuses the
+        connection would.
     aggregates_periods: answer W and M requests to Historify by aggregating the
         stored D rows of the requested dates, stamped at the period start, as the
         server's SQL does. The data layer must never rely on that aggregation.
@@ -217,6 +226,7 @@ class FakeClient:
         db=None,
         api=None,
         api_fail_before=None,
+        transport_fail_before=None,
         clock=None,
         aggregates_periods=False,
     ):
@@ -225,6 +235,7 @@ class FakeClient:
         self.db = dict(db or {})
         self.api = dict(api or {})
         self.api_fail_before = api_fail_before
+        self.transport_fail_before = transport_fail_before
         self.aggregates_periods = aggregates_periods
         self.calls = []
         self.call_times = []
@@ -245,9 +256,14 @@ class FakeClient:
     def endpoints(self):
         return {endpoint for endpoint, _ in self.calls}
 
-    def queue(self, status, body=None, headers=None):
-        """Answer the next request with this instead of the normal behaviour."""
-        self.script.append((status, body, headers))
+    def queue(self, status, body=None, headers=None, *, persistent=False):
+        """Answer the next request with this instead of the normal behaviour.
+
+        A queued 5xx is retryable, so it is served again on every retry until
+        the caller's retry budget is spent; pass persistent=False to serve it
+        once, so the next attempt falls through to the normal in-memory rows.
+        """
+        self.script.append((status, body, headers, bool(persistent)))
 
     # --- the server side --------------------------------------------------------------
 
@@ -261,7 +277,9 @@ class FakeClient:
         if self._clock is not None:
             self.call_times.append(self._clock())
         if self.script:
-            status, body, extra = self.script.pop(0)
+            status, body, extra, persistent = self.script[0]
+            if not persistent:
+                self.script.pop(0)
             return FakeResponse(status, body, extra)
         if endpoint == "ping":
             if self.broker is None:
@@ -280,6 +298,10 @@ class FakeClient:
         first = dt.date.fromisoformat(payload["start_date"])
         last = dt.date.fromisoformat(payload["end_date"])
         source = payload["source"]
+        if self.transport_fail_before is not None and last < self.transport_fail_before:
+            # The socket fails before any HTTP answer, as a refused connection or
+            # a connect timeout does. Applies to either source.
+            raise OSError("connection refused")
         held = (self.db if source == "db" else self.api).get(key, [])
         if source == "db" and self.aggregates_periods and key[2] in ("W", "M"):
             daily = self.db.get((key[0], key[1], "D"), [])

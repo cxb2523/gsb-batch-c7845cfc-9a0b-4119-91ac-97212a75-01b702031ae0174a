@@ -25,8 +25,23 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from openalgo.backtest.data.brokers import BROKER_PROFILES, DEFAULT_PROFILE, broker_profile
-from openalgo.backtest.data.fetching import plan_chunks, rows_to_records
-from openalgo.backtest.errors import ConfigError, DataError, ServerError, TimestampError
+from openalgo.backtest.data.fetching import (
+    STOP_BROKER_START,
+    STOP_RATE_LIMITED,
+    STOP_SERVER_ERROR,
+    STOP_TRANSPORT,
+    is_retryable_status,
+    plan_chunks,
+    rows_to_records,
+)
+from openalgo.backtest.errors import (
+    ConfigError,
+    DataError,
+    NoDataError,
+    ServerError,
+    SymbolNotFoundError,
+    TimestampError,
+)
 
 START = dt.date(2024, 1, 1)
 END = dt.date(2024, 5, 31)  # 152 days after START, inclusive
@@ -253,15 +268,54 @@ def test_window_of_todays_unfinished_session_does_not_end_the_broker_walk():
 
 
 @pytest.mark.parametrize(
-    "status, body", [(401, {"status": "error", "message": "Session expired"}), (502, None)]
+    "status, body",
+    [
+        (401, {"status": "error", "message": "Session expired"}),
+        (403, {"status": "error", "message": "forbidden"}),
+    ],
 )
-def test_failure_of_an_older_window_is_a_server_error_not_short_history(status, body):
+def test_a_final_error_of_an_older_window_ends_the_broker_walk_with_the_newest_windows_kept(
+    status, body
+):
+    # A non-retryable 4xx is not an answer a retry could change: the walk
+    # converges at once (no retry is spent) and the newest window's bars are
+    # returned with the reason recorded, instead of one error discarding the fetch.
     client = _client()
     newest = broker_shape(truth_rows(CAL, "NSE", [END], step=300))
     client.queue(200, {"status": "success", "data": newest})
     client.queue(status, body)
-    with pytest.raises(ServerError, match=rf"2024-02-02 to 2024-04-01 .* failed \(HTTP {status}"):
-        _load(client, broker="zerodha")
+    result = _load(client, broker="zerodha")
+    fetch = result.meta.fetch
+    assert fetch.windows_fetched == 1
+    assert fetch.stop_reason == "server_error"
+    assert "final error" in fetch.stopped and f"HTTP {status}" in fetch.stopped
+    assert (fetch.requests, fetch.retries) == (2, 0)
+    assert len(result.bars) == BARS_PER_DAY_5M
+
+
+def test_a_5xx_that_persists_is_retried_before_the_walk_converges():
+    # A 5xx is retryable: unlike a 4xx it spends the backoff budget first.
+    client = _client()
+    newest = broker_shape(truth_rows(CAL, "NSE", [END], step=300))
+    client.queue(200, {"status": "success", "data": newest})
+    client.queue(502, None, persistent=True)
+    result = _load(client, broker="zerodha", provider_options={"max_retries": 2})
+    fetch = result.meta.fetch
+    assert fetch.windows_fetched == 1
+    assert fetch.stop_reason == "server_error"
+    assert "HTTP 502" in fetch.stopped
+    assert (fetch.requests, fetch.retries) == (4, 2)
+
+
+def test_historify_still_raises_on_a_failed_window():
+    # The db source keeps its old contract: read oldest first, a failed window
+    # raises rather than converging, so the failure cannot be mistaken for the
+    # end of stored history.
+    rows = historify_shape(truth_rows(CAL, "NSE", DAYS[:5], step=300))
+    client = FakeClient(db={("X", "NSE", "5m"): rows})
+    client.queue(500, None, persistent=True)
+    with pytest.raises(ServerError, match="HTTP 500"):
+        _load(client, source="db", end=dt.date(2024, 1, 5))
 
 
 def test_not_json_404_from_the_store_is_reported_as_what_it_is():
@@ -341,7 +395,7 @@ def test_negative_pacing_and_empty_window_are_config_errors(option):
 def test_http_429_is_retried_with_doubling_waits():
     clock = FakeClock()
     client = _client(days=DAYS[:10])
-    for _ in range(3):
+    for _ in range(3):  # three rate-limited answers, then the in-memory rows
         client.queue(429, BUSY)
     result = _load(client, end=dt.date(2024, 1, 10), clock=clock, broker="zerodha")
     assert clock.sleeps == [1.0, 2.0, 4.0]
@@ -364,18 +418,245 @@ def test_retry_after_header_lengthens_the_wait_up_to_the_cap(retry_after, waited
     assert clock.sleeps == [waited]
 
 
-def test_backoff_gives_up_after_max_retries_with_a_server_error():
+def test_backoff_gives_up_after_max_retries_and_converges_with_no_bars_lost():
+    # The retries are exhausted with the existing backoff schedule (1 s, 2 s),
+    # the walk ends there instead of raising, and the report says why: every
+    # request and retry is still counted. No window was answered, so the load is
+    # a NoDataError whose message carries the same stop reason.
     clock = FakeClock()
     client = _client(days=DAYS[:10])
-    for _ in range(3):
-        client.queue(429, BUSY)
-    with pytest.raises(ServerError, match="HTTP 429.*after 2 retries") as raised:
+    client.queue(429, BUSY, persistent=True)
+    with pytest.raises(NoDataError, match="rate limited .*HTTP 429"):
         _load(
             client, end=dt.date(2024, 1, 10), clock=clock, broker="zerodha",
             provider_options={"max_retries": 2},
         )  # fmt: skip
-    assert raised.value.rate_limited
     assert clock.sleeps == [1.0, 2.0]
+    asked = client.history_calls("api")
+    assert len(asked) == 3 and all(call == asked[0] for call in asked)  # the one window, retried
+
+
+def test_rate_limit_after_some_windows_keeps_the_windows_already_answered():
+    clock = FakeClock()
+    client = _client()
+    newest = broker_shape(truth_rows(CAL, "NSE", [END], step=300))
+    client.queue(200, {"status": "success", "data": newest})
+    client.queue(429, BUSY, persistent=True)
+    result = _load(
+        client, clock=clock, broker="zerodha", provider_options={"max_retries": 2},
+    )  # fmt: skip
+    fetch = result.meta.fetch
+    assert fetch.windows_fetched == 1
+    assert fetch.stop_reason == "rate_limited"
+    assert "rate limited (HTTP 429)" in fetch.stopped
+    assert "2024-02-02 to 2024-04-01" in fetch.stopped
+    assert (fetch.requests, fetch.retries) == (4, 2)
+    assert [sleep for sleep in clock.sleeps if sleep >= 1.0] == [1.0, 2.0]  # backoff only
+    assert fetch.answered == [("2024-04-02", "2024-05-31")]
+    assert len(result.bars) == BARS_PER_DAY_5M  # only the newest window's rows
+    assert result.meta.short_history is True
+    assert "The fetch stopped going back" in result.meta.warnings[0]
+
+
+# --- transport failures (no HTTP response) ------------------------------------------
+
+
+def _transport_client(fail_before):
+    """A broker whose newest window is reachable; older ones cannot be reached."""
+    rows = broker_shape(truth_rows(CAL, "NSE", DAYS, step=300))
+    return FakeClient(api={("X", "NSE", "5m"): rows}, transport_fail_before=fail_before)
+
+
+def test_transport_failure_is_retried_then_converges_keeping_the_newest_windows():
+    clock = FakeClock()
+    client = _transport_client(dt.date(2024, 4, 2))
+    result = _load(
+        client, clock=clock, broker="zerodha", provider_options={"max_retries": 2},
+    )  # fmt: skip
+    fetch = result.meta.fetch
+    assert fetch.windows_fetched == 1
+    assert fetch.stop_reason == "transport_failure"
+    assert "could not be reached" in fetch.stopped and "2024-02-02 to 2024-04-01" in fetch.stopped
+    # One initial attempt plus two retries of the same window (each failed attempt
+    # is a request), backed off 1 s then 2 s.
+    assert (fetch.requests, fetch.retries) == (4, 2)
+    assert [sleep for sleep in clock.sleeps if sleep >= 1.0] == [1.0, 2.0]
+    assert len(result.bars) == BARS_PER_DAY_5M * 44  # Apr 2 to May 31, weekdays
+    assert result.meta.short_history is True
+
+
+def test_transport_failure_on_the_first_window_converges_to_a_no_data_error_with_the_reason():
+    clock = FakeClock()
+    client = _transport_client(END + dt.timedelta(days=1))  # every window is unreachable
+    with pytest.raises(NoDataError, match="could not be reached"):
+        _load(client, clock=clock, broker="zerodha", provider_options={"max_retries": 1})
+    assert [sleep for sleep in clock.sleeps if sleep >= 1.0] == [1.0]
+
+
+def test_historify_does_not_converge_on_a_transport_failure():
+    rows = historify_shape(truth_rows(CAL, "NSE", DAYS[:5], step=300))
+    client = FakeClient(
+        db={("X", "NSE", "5m"): rows},
+        transport_fail_before=dt.date(2030, 1, 1),
+    )
+    with pytest.raises(ServerError, match="could not reach the OpenAlgo server") as raised:
+        _load(client, source="db", end=dt.date(2024, 1, 5), provider_options={"max_retries": 5})
+    assert raised.value.transport and not raised.value.rate_limited
+    # Historify keeps the old contract: the transport failure is not retried and
+    # the fetch raises on the first failed attempt.
+    assert len(client.history_calls("db")) == 1
+    assert raised.value is not None
+
+
+def test_historify_raises_on_a_5xx_without_spending_the_retry_budget():
+    # The wider transient retry set is the broker walk's only; a db window gets
+    # one request and raises, even though a 500 would be retried for source="api".
+    rows = historify_shape(truth_rows(CAL, "NSE", DAYS[:5], step=300))
+    client = FakeClient(db={("X", "NSE", "5m"): rows})
+    client.queue(500, None, persistent=True)
+    with pytest.raises(ServerError, match="HTTP 500"):
+        _load(client, source="db", end=dt.date(2024, 1, 5), provider_options={"max_retries": 5})
+    assert len(client.history_calls("db")) == 1
+
+
+# --- the retryable status table ------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "status, retryable",
+    [
+        (200, False),
+        (400, False),
+        (401, False),
+        (403, False),
+        (404, False),
+        (408, True),
+        (429, True),
+        (500, True),
+        (502, True),
+        (503, True),
+        (504, True),
+    ],
+)
+def test_only_408_429_and_5xx_answers_are_retried(status, retryable):
+    assert is_retryable_status(status) is retryable
+
+
+def test_a_retryable_5xx_is_retried_and_then_converges_when_it_persists():
+    # 503 uses the same backoff and retry budget as 429; once they are spent the
+    # broker walk converges with a server_error stop, the newest window kept.
+    clock = FakeClock()
+    client = _client()
+    newest = broker_shape(truth_rows(CAL, "NSE", [END], step=300))
+    client.queue(200, {"status": "success", "data": newest})
+    client.queue(503, {"status": "error", "message": "maintenance"}, persistent=True)
+    result = _load(
+        client, clock=clock, broker="zerodha", provider_options={"max_retries": 2},
+    )  # fmt: skip
+    fetch = result.meta.fetch
+    assert fetch.windows_fetched == 1
+    assert fetch.stop_reason == "server_error"
+    assert "HTTP 503" in fetch.stopped
+    assert (fetch.requests, fetch.retries) == (4, 2)
+    assert [sleep for sleep in clock.sleeps if sleep >= 1.0] == [1.0, 2.0]  # backoff only
+
+
+def test_a_5xx_that_clears_on_retry_succeeds_without_losing_windows():
+    clock = FakeClock()
+    client = _client(days=DAYS[:10])
+    client.queue(503, {"status": "error", "message": "maintenance"})
+    result = _load(client, end=dt.date(2024, 1, 10), clock=clock, broker="zerodha")
+    fetch = result.meta.fetch
+    assert fetch.stopped is None and fetch.stop_reason is None
+    assert (fetch.requests, fetch.retries) == (2, 1)
+    assert len(result.bars) == BARS_PER_DAY_5M * 8
+
+
+def test_an_unknown_symbol_still_raises_instead_of_converging():
+    client = FakeClient()
+    client.queue(
+        400,
+        {"status": "error", "message": "Symbol 'X' not found for exchange 'NSE'. Please verify."},
+    )
+    with pytest.raises(SymbolNotFoundError):
+        _load(client, broker="zerodha", end=dt.date(2024, 1, 5))
+
+
+# --- the broker history start stays its own stop reason ------------------------------
+
+
+def test_broker_history_start_and_a_failure_stop_are_distinct_reasons():
+    # The four machine-readable stop reasons are distinct codes.
+    assert len({STOP_BROKER_START, STOP_RATE_LIMITED, STOP_TRANSPORT, STOP_SERVER_ERROR}) == 4
+    # The empty first window of the oldest range: the history start, as before.
+    held = [day for day in DAYS if day >= dt.date(2024, 5, 10)]
+    result = _load(_client(days=held))
+    fetch = result.meta.fetch
+    assert fetch.stop_reason == STOP_BROKER_START
+    assert fetch.stopped.startswith("the broker returned no bars")
+    # A complete fetch has neither a reason nor words.
+    complete = _load(_client())
+    assert complete.meta.fetch.stopped is None and complete.meta.fetch.stop_reason is None
+
+
+def test_rows_are_returned_sorted_and_an_empty_fetch_is_an_array_not_none():
+    from openalgo.backtest.data.fetching import HistoryFetcher, Reply
+
+    class StubTransport:
+        def post(self, endpoint, payload):
+            if payload["end_date"] == "2024-01-31":
+                # Timestamps deliberately out of order; the result must be sorted.
+                rows = [
+                    {
+                        "timestamp": at_ist(dt.date(2024, 1, 2), 9, 15) // 10**9,
+                        "open": 1,
+                        "high": 1,
+                        "low": 1,
+                        "close": 1,
+                        "volume": 1,
+                    },
+                    {
+                        "timestamp": at_ist(dt.date(2024, 1, 1), 9, 15) // 10**9,
+                        "open": 1,
+                        "high": 1,
+                        "low": 1,
+                        "close": 1,
+                        "volume": 1,
+                    },
+                ]
+                return Reply(200, {"status": "success", "data": broker_shape(rows)})
+            return Reply(200, {"status": "success", "data": []})
+
+    series = ("X", "NSE", "5m")
+    fetcher = HistoryFetcher(StubTransport(), sleep=lambda seconds: None, clock=lambda: 0.0)
+    records, report = fetcher.collect(
+        series,
+        [(dt.date(2024, 1, 1), dt.date(2024, 1, 31))],
+        "api",
+        31,
+        0.0,
+        completed_sessions=lambda first, last: 0,
+    )
+    assert list(records["timestamp"]) == sorted(records["timestamp"])
+    assert report.stop_reason is None  # empty windows without a closed session do not end it
+
+    def empty_post(endpoint, payload):
+        return Reply(200, {"status": "success", "data": []})
+
+    stub = StubTransport()
+    stub.post = empty_post
+    fetcher = HistoryFetcher(stub, sleep=lambda seconds: None, clock=lambda: 0.0)
+    records, report = fetcher.collect(
+        series,
+        [(dt.date(2024, 1, 6), dt.date(2024, 1, 7))],
+        "api",
+        2,
+        0.0,
+        completed_sessions=lambda first, last: 0,
+    )  # a weekend window: no closed session, so the walk reads every window
+    assert len(records) == 0 and records is not None
+    assert report.windows_fetched == report.windows_planned
+    assert report.stop_reason is None
 
 
 # --- raw rows -----------------------------------------------------------------------
