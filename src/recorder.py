@@ -99,6 +99,99 @@ class Recorder:
                 target=self.device_loop, args=(d,), daemon=True
             ).start()
 
+    @staticmethod
+    def _safe_device_name(dev):
+        """Device name or None; a dying device may raise on .name."""
+        try:
+            return dev.name
+        except (OSError, AttributeError):
+            return None
+
+    def _note_device_failure(self, dev, reason):
+        """Records a device loss for the capture summary, once per device.
+
+        Only the first failure per device name is kept (a flapping device
+        must not flood the list). Degrades to log-only on bare instances
+        built via __new__ in tests, where the summary state is absent.
+        """
+        name = self._safe_device_name(dev) or "<unknown device>"
+        lock = self.__dict__.get("_capture_lock")
+        disconnected = self.__dict__.get("_capture_disconnected")
+        if lock is None or disconnected is None:
+            return
+        with lock:
+            if any(d["name"] == name for d in disconnected):
+                return
+            disconnected.append({
+                "name": name,
+                "reason": reason,
+                # Relative to recording start, like event timestamps.
+                "time": time.monotonic() - self.start_time,
+            })
+
+    def get_capture_summary(self):
+        """Returns a dict describing the current/last recording session:
+        participating devices, devices lost mid-recording, dedupe
+        eviction counters and the number of captured events. All lookups
+        go through __dict__ so bare __new__ test instances get an empty
+        summary instead of a RecursionError from tkinter's __getattr__.
+        """
+        lock = self.__dict__.get("_capture_lock")
+
+        def _disconnected_copy():
+            return [
+                dict(d)
+                for d in (self.__dict__.get("_capture_disconnected") or [])
+            ]
+
+        if lock is not None:
+            with lock:
+                disconnected = _disconnected_copy()
+        else:
+            disconnected = _disconnected_copy()
+        stats = self.__dict__.get("_dedupe_eviction_stats") or {}
+        devices = list(self.__dict__.get("_capture_devices") or [])
+        events_lock = self.__dict__.get("events_lock")
+        if events_lock is not None:
+            with events_lock:
+                events_captured = len(self.events)
+        else:
+            events_captured = len(self.__dict__.get("events") or [])
+        return {
+            "devices_total": len(devices),
+            "devices": devices,
+            "disconnected": disconnected,
+            "dedupe_eviction_passes": stats.get("passes", 0),
+            "dedupe_evicted_ids": stats.get("evicted", 0),
+            "events_captured": events_captured,
+        }
+
+    def log_capture_summary(self):
+        """Logs the capture summary so users can judge whether the
+        recorded macro is complete. Returns the summary dict."""
+        summary = self.get_capture_summary()
+        logger.info(
+            "Capture summary: %d device(s) listened, %d event(s) captured, "
+            "dedupe evictions: %d pass(es) / %d id(s).",
+            summary["devices_total"], summary["events_captured"],
+            summary["dedupe_eviction_passes"],
+            summary["dedupe_evicted_ids"],
+        )
+        if summary["disconnected"]:
+            for d in summary["disconnected"]:
+                logger.warning(
+                    "Device '%s' was lost %.3fs into the recording: %s",
+                    d["name"], d["time"], d["reason"],
+                )
+            logger.warning(
+                "%d of %d device(s) dropped out during recording; "
+                "the macro may be incomplete.",
+                len(summary["disconnected"]), summary["devices_total"],
+            )
+        else:
+            logger.info("All devices stayed connected for the whole recording.")
+        return summary
+
     def _event_id(self, event):
         return (event.sec, event.usec, event.type, event.code, event.value)
 
@@ -123,10 +216,22 @@ class Recorder:
                     # deduplicated (a full clear would reopen double-fire).
                     if len(self._processed_ids) > MAX_DEDUPE_IDS:
                         if order is not None:
+                            evicted = 0
                             for _ in range(min(len(order), MAX_DEDUPE_EVICT)):
-                                self._processed_ids.discard(order.popleft())
+                                oldest = order.popleft()
+                                if oldest in self._processed_ids:
+                                    self._processed_ids.discard(oldest)
+                                    evicted += 1
                                 if len(self._processed_ids) <= MAX_DEDUPE_IDS - MAX_DEDUPE_EVICT:
                                     break
+                            # Leave a trace in the capture summary: evicted
+                            # IDs may re-record if the same event reappears.
+                            # __dict__ lookup: bare __new__ test instances
+                            # have no stats dict — degrade to plain eviction.
+                            stats = self.__dict__.get("_dedupe_eviction_stats")
+                            if stats is not None:
+                                stats["passes"] += 1
+                                stats["evicted"] += evicted
                         else:
                             self._processed_ids.clear()
 
@@ -226,12 +331,17 @@ class Recorder:
                                 })
 
         except OSError as exc:
+            # This listener thread ends here, but the other devices keep
+            # capturing — the recording itself must not crash. The loss is
+            # recorded for the capture summary (once per device).
             logger.warning(
                 "Device '%s' disconnected or unavailable: %s",
-                dev.name, exc
+                self._safe_device_name(dev), exc
             )
+            self._note_device_failure(dev, str(exc))
         except Exception as exc:
             logger.error(
                 "Unexpected error on device '%s': %s",
-                dev.name, exc
+                self._safe_device_name(dev), exc
             )
+            self._note_device_failure(dev, str(exc))

@@ -177,6 +177,15 @@ class LinuxTaskApp(ctk.CTk, Recorder, Playback):
         # Insertion order of _processed_ids, for oldest-first eviction.
         self._processed_ids_order = deque()
         self._input_devices = []
+        # Per-recording capture bookkeeping, surfaced as a summary when
+        # recording stops so the user can judge whether the macro is
+        # complete: which devices took part, which dropped out (and when),
+        # and how often the dedupe set had to evict old event IDs.
+        self._capture_lock = threading.Lock()
+        self._capture_devices = []
+        self._capture_disconnected = []
+        self._dedupe_eviction_stats = {"passes": 0, "evicted": 0}
+        self.capture_summary = None
         # Thread-safe queue: evdev listener threads push "rec" / "play" /
         # "play_finished" actions here; the UI thread consumes them via
         # _poll_hotkeys(). Never call tkinter methods (after/configure)
@@ -887,6 +896,19 @@ class LinuxTaskApp(ctk.CTk, Recorder, Playback):
                 order = self.__dict__.get("_processed_ids_order")
                 if order is not None:
                     order.clear()
+            # Snapshot the devices taking part in this recording and reset
+            # the per-session failure/eviction bookkeeping. __dict__
+            # lookups: bare test instances lack these attrs (see
+            # device_loop note).
+            cap_lock = self.__dict__.get("_capture_lock")
+            if cap_lock is not None:
+                with cap_lock:
+                    self._capture_disconnected = []
+                    self._capture_devices = [
+                        self._safe_device_name(d) or "<unknown device>"
+                        for d in self.__dict__.get("_input_devices", [])
+                    ]
+            self._dedupe_eviction_stats = {"passes": 0, "evicted": 0}
             self.rec_tip = ToolTip(
                 self.btn_rec, RECORDING_TOOLTIP_TEXT)
             self.btn_rec.configure(text="■", fg_color="#b71c1c")
@@ -901,6 +923,10 @@ class LinuxTaskApp(ctk.CTk, Recorder, Playback):
             with self.events_lock:
                 ev_count = len(self.events)
             logger.info("Recording stopped. %d events captured.", ev_count)
+            # Per-session capture summary (devices, dropouts, dedupe
+            # evictions) — log-only, never written into the macro JSON,
+            # so the playback format is unchanged.
+            self.capture_summary = self.log_capture_summary()
 
     def get_key_name(self, code):
         """Returns human-readable key name from evdev code."""
