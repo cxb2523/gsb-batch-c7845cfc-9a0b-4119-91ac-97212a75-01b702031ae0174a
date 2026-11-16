@@ -79,11 +79,15 @@ function parseCheerioLinkNode(element: Cheerio<AnyNode>): ILink {
   if (element.is("img")) {
     link.type = "Image";
     link.text = element.attr("alt") ?? "";
-    link.href = element.attr("data-src") as string;
+    // A missing `data-src` would otherwise leave an undefined reference
+    // that breaks every later step assuming `href` is always a string
+    link.href = (element.attr("data-src") ?? "") as string;
   } else if (element.is("a")) {
     link.type = "Link";
     link.text = element.text().replace(/\s\s+/g, " ").trim();
-    link.href = element.attr("href") as string;
+    // An anchor without `href` is a malformed node: normalize the value
+    // to an empty string so downstream cleaning can safely skip it
+    link.href = (element.attr("href") ?? "") as string;
   }
 
   return link;

@@ -8,12 +8,9 @@ import { CheerioAPI, AnyNode } from "cheerio";
 import { ParameterError } from "../classes/errors";
 
 // Modules from file
-import { IPostElement } from "../interfaces";
+import { ILink, IPostElement } from "../interfaces";
 import parseCheerioNode from "./post-node-parse/node-parse";
 import { createEmptyElement } from "./post-node-parse/node-utility";
-
-// Global ID counter
-let idcounter = 0;
 
 /**
  * Node of a tree elements tree of a post on an HTML page.
@@ -40,58 +37,84 @@ interface TreeNode {
 
 /**
  * Given a post of a thread page it extracts the information contained in the body.
+ *
+ * Every malformed node (missing link reference, image-like link text,
+ * orphaned nodes during the cleaning steps, ...) is skipped instead of
+ * aborting the whole parsing. An empty array is returned when the post
+ * contains no valid entry or an unexpected error is encountered.
+ *
+ * The parsing is fully stateless: parsing multiple posts in sequence in
+ * the same process can never influence the result of subsequent calls.
  */
 export function extractDataFromFirstThreadPost($: CheerioAPI, post: AnyNode): IPostElement[] {
-  // Reset the global counter of the IDs
-  idcounter = 0;
+  try {
+    // First create the tree struct of the post.
+    // The ID counter is local so two consecutive calls can't share state.
+    let root = createTree($, post);
 
-  // First create the tree struct of the post
-  let root = createTree($, post);
+    // Remove all empty elements from the tree.
+    root = pruneTreeNode(root) as TreeNode; // Force TS to accept TreeNode as type
 
-  // Remove all empty elements from the tree.
-  root = pruneTreeNode(root) as TreeNode; // Force TS to accept TreeNode as type
+    // Clean all the nodes with a link element
+    root = cleanLinkNode(root);
 
-  // Clean all the nodes with a link element
-  root = cleanLinkNode(root);
+    // Clean the spoilers node
+    root = parseSpoilers(root);
 
-  // Clean the spoilers node
-  root = parseSpoilers(root);
+    // Remove unnecessary elements
+    pruneNodesWithUnnecessaryValues(root);
 
-  // Remove unnecessary elements
-  pruneNodesWithUnnecessaryValues(root);
-
-  // Convert from tree to list of properties of the post
-  return pairUpTitleWithContent(root);
+    // Convert from tree to list of properties of the post
+    return pairUpTitleWithContent(root);
+  } catch (e) {
+    // A malformed node must never prevent the caller from obtaining
+    // the (possibly empty) list of the entries that could be parsed
+    return [];
+  }
 }
 
 //#region Tree methods
 
 /**
  * Create recursively a tree with the information contained in a Cheerio node.
+ *
+ * The node ID counter is created fresh for every tree, therefore parsing
+ * multiple posts in the same process can never leave a residual counter
+ * (or a reference to an already cleaned node) that influences a later parse.
  * @returns Tree root
  */
 function createTree($: CheerioAPI, node: AnyNode, parent?: TreeNode): TreeNode {
-  // Create the element
-  const treenode = {
-    id: idcounter,
-    parent: parent ?? null,
-    element: parseCheerioNode($, node),
-    children: []
-  } as TreeNode;
+  // Local ID counter, shared only by the nodes of this tree
+  let idcounter = 0;
 
-  // Set the first node as root
-  if (idcounter === 0) treenode.element.type = "Root";
+  /**
+   * Recursive worker that assigns the IDs from the local counter.
+   */
+  function build(current: AnyNode, currentParent?: TreeNode): TreeNode {
+    // Create the element
+    const treenode = {
+      id: idcounter,
+      parent: currentParent ?? null,
+      element: parseCheerioNode($, current),
+      children: []
+    } as TreeNode;
 
-  // Increment the counter
-  idcounter = idcounter + 1;
+    // Set the first node as root
+    if (idcounter === 0) treenode.element.type = "Root";
 
-  // Parse the children of the element
-  treenode.children = $(node)
-    .contents()
-    .toArray()
-    .map((e) => createTree($, e, treenode));
+    // Increment the counter
+    idcounter = idcounter + 1;
 
-  return treenode;
+    // Parse the children of the element
+    treenode.children = $(current)
+      .contents()
+      .toArray()
+      .map((e) => build(e, treenode));
+
+    return treenode;
+  }
+
+  return build(node, parent);
 }
 
 /**
@@ -133,13 +156,21 @@ function printPairs(pairs: IPostElement[]) {
  * Removes the node passed by parameter from the tree,
  * removing any reference from the father and assigning
  * all their children to the father of this removed node.
+ *
+ * If the node has no parent or it is not referenced anymore
+ * among the children of its parent (i.e. it was already
+ * cleaned by a previous step) the call is a no-op so that a
+ * stale reference can't corrupt the rest of the tree.
  */
 function purgeNode(node: TreeNode) {
   // Check if the node has a parent
-  if (!node.parent) throw new Error("This node must have a parent");
+  if (!node.parent) return;
 
   // Find the index of this node in the array of children of its parent
   const cloneIndex = node.parent.children.findIndex((child) => child.id === node.id);
+
+  // The node is not a child of its parent anymore, nothing to purge
+  if (cloneIndex === -1) return;
 
   // Remove this node from the array of children of its parent
   node.parent.children.splice(cloneIndex, 1);
@@ -180,6 +211,31 @@ function purgeNode(node: TreeNode) {
     // Save the actual length of the parent's children
     lastChildrenLength = node.parent.children.length;
   }
+}
+
+/**
+ * Removes a node together with its whole subtree from the tree.
+ *
+ * Unlike `purgeNode`, the children of the node are NOT reassigned to
+ * its parent: a malformed node (for example a link without a valid
+ * reference) must disappear completely, leaving no orphaned text behind.
+ *
+ * The call is a no-op when the node has no parent or it is not
+ * referenced anymore among the children of its parent.
+ */
+function detachNode(node: TreeNode) {
+  // Check if the node has a parent
+  if (!node.parent) return;
+
+  // Find the index of this node in the array of children of its parent
+  const index = node.parent.children.findIndex((child) => child.id === node.id);
+
+  // The node is not a child of its parent anymore, nothing to remove
+  if (index === -1) return;
+
+  // Detach the node (and its subtree) from the tree
+  node.parent.children.splice(index, 1);
+  node.parent = null as any;
 }
 
 /**
@@ -285,37 +341,46 @@ function pairUpTitleWithContent(root: TreeNode): IPostElement[] {
   //  + Textual element ":"
   //  + Generic element CONTENT
   rootClone.children.forEach((child, index, children) => {
-    // Convert from TreeNode to IPostElement
-    const e = elementsToContent(child);
+    try {
+      // Convert from TreeNode to IPostElement
+      const e = elementsToContent(child);
 
-    // Get the next element (if any)
-    const isLastChild = index + 1 >= children.length;
-    const next = isLastChild ? null : children[index + 1].element;
+      // Get the next element (if any)
+      const isLastChild = index + 1 >= children.length;
+      const next = isLastChild ? null : children[index + 1].element;
 
-    // Check if this child's element is a title
-    const title = isTitle(e, next);
-    const isPunctuation = e.type === "Text" && e.text === ":";
+      // Check if this child's element is a title
+      const title = isTitle(e, next);
+      const isPunctuation = e.type === "Text" && e.text === ":";
 
-    // This element is a title:
-    //
-    // If no title is currently "active", set this element as "active title".
-    //
-    // If another title is currently active, this means that all the content
-    // of the currently active title is already been "seen". Save it in the
-    // list and manage the content of the new title (this element)
-    if (title) {
-      // Push a clean clone of the currently active title (if exists)
-      if (lastActiveTitle) pairs.push(parseTitleElement(lastActiveTitle));
+      // This element is a title:
+      //
+      // If no title is currently "active", set this element as "active title".
+      //
+      // If another title is currently active, this means that all the content
+      // of the currently active title is already been "seen". Save it in the
+      // list and manage the content of the new title (this element)
+      if (title) {
+        // Push a clean clone of the currently active title (if exists)
+        if (lastActiveTitle) pairs.push(parseTitleElement(lastActiveTitle));
 
-      // Set the current element as the active title
-      lastActiveTitle = e;
-    }
-    // This element is not a title nor a puntuaction,
-    // so that means that is content!
-    else if (lastActiveTitle && !isPunctuation && !title) {
-      lastActiveTitle.content.push(e);
+        // Set the current element as the active title
+        lastActiveTitle = e;
+      }
+      // This element is not a title nor a puntuaction,
+      // so that means that is content!
+      else if (lastActiveTitle && !isPunctuation && !title) {
+        lastActiveTitle.content.push(e);
+      }
+    } catch (e) {
+      // Skip this malformed node and keep parsing the remaining entries
     }
   });
+
+  // The last active title is only flushed when another title is found,
+  // therefore the title closing the post must be pushed explicitly or
+  // its entry (and all its content) would be lost
+  if (lastActiveTitle) pairs.push(parseTitleElement(lastActiveTitle));
 
   // Clean pairs and remove all the elements that haven't text AND content
   return pairs.filter((e) => e.text !== "" || e.content.length > 0);
@@ -361,9 +426,11 @@ function parseTitleElement(e: IPostElement): IPostElement {
   // Clone the element
   const clone = Object.assign({}, e);
 
-  // Regex values used to clean the texts
-  const RX_ENDS_SPECIAL_CHARS = /[-:]$/gmu;
-  const RX_STARTS_COLON = /^[:]/gmu;
+  // Regex values used to clean the texts.
+  // The patterns are anchored, so no global flag is needed; avoiding it
+  // also prevents any shared `lastIndex` state between calls.
+  const RX_ENDS_SPECIAL_CHARS = /[-:]$/mu;
+  const RX_STARTS_COLON = /^[:]/mu;
 
   // Clean the text of the element and swap it with the name
   clone.name = clone.text.replace(RX_ENDS_SPECIAL_CHARS, "").trim();
@@ -401,8 +468,12 @@ function parseTitleElement(e: IPostElement): IPostElement {
  * ie an element that identifies its content.
  */
 function isTitle(element: IPostElement, next: IPostElement | null): boolean {
-  // Regex value used to check for colon at the ends of the text
-  const RX_ENDS_COLON = /[:]$/gmu;
+  // Regex value used to check for colon at the ends of the text.
+  // NOTE: the global flag must NOT be used: a shared regex with `g`
+  // keeps a `lastIndex` between `.test()` calls, so consecutive titles
+  // (within a post or across posts parsed in the same process) would
+  // alternate between detected and missed, polluting later results.
+  const RX_ENDS_COLON = /[:]$/mu;
 
   // Parameter used to check if this element is a title or not
   const thisIsText = element.type === "Text";
@@ -461,7 +532,11 @@ function parseSingleSpoiler(node: TreeNode): TreeNode {
   const index = node.children
     .filter((child) => child.element)
     .findIndex((child) => child.element.type === "Text" && child.element.text === "Spoiler");
-  node.children.splice(index, 1);
+
+  // When no default "Spoiler" text is present there is nothing to remove.
+  // Guarding the index avoids an out-of-bound splice (which would silently
+  // remove the last child) when the node has already been partially cleaned
+  if (index !== -1) node.children.splice(index, 1);
 
   return node;
 }
@@ -472,16 +547,25 @@ function parseSingleSpoiler(node: TreeNode): TreeNode {
 
 /**
  * Recursively clean all the nodes of `Link` type in the tree.
+ *
+ * Every malformed link is handled by its dedicated cleaner so that a
+ * single broken node can never abort the cleaning of the remaining nodes.
  * @param node Tree root
  */
 function cleanLinkNode(node: TreeNode): TreeNode {
   // Remove every link node that is representing an image
   node.children
     .filter((child) => child.element.type === "Link")
-    .map((child) => cleanLinkImage(child));
+    .forEach((child) => {
+      try {
+        cleanLinkImage(child);
+      } catch (e) {
+        // Keep the (possibly invalid) node instead of aborting the parse
+      }
+    });
 
   // Clean every link node that is a children of this node
-  node.children.map((child) => (child = cleanLinkNode(child)));
+  node.children.forEach((child) => cleanLinkNode(child));
 
   // If this node is a link, clean it otherwise return it
   return node.element.type === "Link" ? cleanLinkTextChildren(node) : node;
@@ -489,6 +573,10 @@ function cleanLinkNode(node: TreeNode): TreeNode {
 
 /**
  * Removes nodes containing a text element that replicates this `Link` value.
+ *
+ * If no child matches the link text (the node was already cleaned or the
+ * markup is malformed) the node is returned unchanged instead of removing
+ * an unrelated child through an out-of-bound splice.
  */
 function cleanLinkTextChildren(node: TreeNode): TreeNode {
   // Check the node type
@@ -501,21 +589,44 @@ function cleanLinkTextChildren(node: TreeNode): TreeNode {
   // "Text" element with the same text as this link node
   const index = clone.children.findIndex((child) => child.element.text === clone.element.text);
 
-  // Remove the child
-  clone.children.splice(index, 1);
+  // Remove the child only when a matching one actually exists,
+  // otherwise leave the node untouched
+  if (index !== -1) clone.children.splice(index, 1);
 
   return clone;
 }
 
 /**
- * If a link contains as text the reference to
- * an image (`img` tag) is removed from it's tree.
+ * Cleans a link node that is either an image reference or a malformed
+ * text-only link without a valid `href`.
+ *
+ * - When the link text starts with `<img`, the link wrapper is removed
+ *   but its children (the actual image node) are lifted to the parent,
+ *   otherwise the cover/previews would be lost.
+ * - A text-only link without `href` carries no usable reference, so the
+ *   whole subtree (inner text node included) is detached to avoid
+ *   leaving orphaned content.
+ *
+ * An anchor without `href` can still be a valid image wrapper (the
+ * actual image is a child node), therefore only links with no image
+ * child are considered malformed.
  */
 function cleanLinkImage(node: TreeNode) {
   // Check the node type
   if (node.element.type != "Link") throw new ParameterError("This node is not a link");
 
-  if (node.element.text.startsWith("<img")) purgeNode(node);
+  const hasImageText =
+    typeof node.element.text === "string" && node.element.text.startsWith("<img");
+  const hasNoHref = !(node.element as ILink).href;
+  const hasImageChild = node.children.some(
+    (child) => child.element.type === "Image" || child.element.type === "Link"
+  );
+  const isMalformedTextLink = hasNoHref && !hasImageChild;
+
+  // Remove the link wrapper but keep the image it contains
+  if (hasImageText) purgeNode(node);
+  // Remove the malformed text-only link and its orphaned text
+  else if (isMalformedTextLink) detachNode(node);
 }
 
 //#endregion Clean node methods
