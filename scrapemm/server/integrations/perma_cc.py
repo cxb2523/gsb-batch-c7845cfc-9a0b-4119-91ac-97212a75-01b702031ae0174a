@@ -1,0 +1,1070 @@
+import asyncio
+import re
+from contextlib import suppress
+import logging
+import time
+from typing import Optional
+
+from playwright.async_api import TimeoutError, Page, Frame, Error as PlaywrightError
+
+from scrapemm.server import budget
+from scrapemm.server.config import get_setting
+from scrapemm.server.download.browser import MAX_IMAGE_BYTES, MAX_VIDEO_BYTES, BLOB_ATTR, install_stash
+from scrapemm.server.integrations.headed_browser import HeadedBrowser, ContentTarget, settle_dom, \
+    renderer_crashed, evaluate_within
+from scrapemm.common import RetrievalFailed
+from scrapemm.common.exceptions import TargetUnavailableError
+from scrapemm.common.scraping_response import Capture, ScrapedContent, utc_iso
+
+logger = logging.getLogger("scrapeMM")
+
+
+# Media fetched inside a frame at the same time
+STASH_CONCURRENCY = 6
+# How long a medium gets to arrive when it is fetched inside a frame, seconds: a slow one
+# is given up on, and the page returned without it, rather than the retrieval waiting for
+# it until its own limit fails the page as a whole (perma.cc/75EG-E5GK, a video that
+# took longer than ten minutes). Capped by what is left of the retrieval's time.
+STASH_IMAGE_TIMEOUT = 30
+STASH_VIDEO_TIMEOUT = 75
+# Large WARCs (e.g. 80MB+ Telegram videos) need a long wait for the innermost iframe.
+INNERMOST_FRAME_TIMEOUT_MS = 120_000
+# ...a record's screenshot view (`?type=image`) does not: it is one image, shown in 5 s.
+# Under load it sometimes stayed empty, and the full wait above went by before it was
+# loaded again -- which then took seconds (perma.cc/FD9Q-4S9Y: 130 s in a test run, 5 s
+# alone)
+SCREENSHOT_FRAME_TIMEOUT_MS = 20_000
+# How long Perma.cc's page gets to show its archive iframe, a reload included (see
+# `_archive_iframe()`). 20 s without a reload was not enough with dozens of other pages
+# loading at once: the whole retrieval then failed.
+ARCHIVE_IFRAME_TIMEOUT_MS = 60_000
+# How long the replay app gets to show its frame. It first installs its service worker
+# and loads the WARC; under load (and on a cold start) that took more than the 15 s this
+# used to be, and the empty app shell was taken instead -- no media at all.
+REPLAY_IFRAME_TIMEOUT_MS = 60_000
+# How long a replayed player gets to create its <video>, when the page's markup already
+# names the video file (see `_settle_media_frame()`)
+VIDEO_ELEMENT_TIMEOUT_MS = 15_000
+
+# Whether the frame names an MP4 in its markup but shows no <video> (yet): a player
+# such as Facebook's builds its element by script, only after the replay delivered it
+_VIDEO_PENDING_JS = r"""() => !document.querySelector('video')
+    && /https:(?:\\?\/){2}video[^"'\s<>]+?\.mp4/i.test(document.documentElement.outerHTML)"""
+
+
+# The media of a frame: <img> elements, how many have loaded, how many are large
+_MEDIA_STATE_JS = """() => {
+    const imgs = [...document.images];
+    return {imgs: imgs.length,
+            loaded: imgs.filter(i => i.complete && i.naturalWidth > 0).length,
+            large: imgs.filter(i => i.naturalWidth >= 128 && i.naturalHeight >= 128).length,
+            pending: imgs.filter(i => !i.complete).length,
+            videos: document.querySelectorAll('video').length,
+            text: document.body ? document.body.innerText.length : 0};
+}"""
+
+# Whether a frame shows anything: text, or a medium
+_SHOWS_CONTENT_JS = f"""() => !!(
+    (document.body && document.body.innerText.trim())
+    || document.querySelector('img, video, [{BLOB_ATTR}]'))"""
+
+# Whether a frame shows the replayer's "not in this archive" page (pywb's), rather than a
+# capture: that text, little else, and no media. Under load, the replay of a real capture
+# showed it for a while (its archive not yet indexed, or its app navigating), and that
+# page was taken for the result: "no capture", for records that have one.
+_REPLAY_MISS_JS = """() => {
+    const text = (document.body ? document.body.innerText : '').toLowerCase();
+    return text.length < 2000 && !document.querySelector('img, video')
+        && (text.includes('not found in this archive') || text.includes('archived page not found'));
+}"""
+# How long a frame showing that page gets to turn into the capture before a reload
+REPLAY_MISS_WAIT = 10
+# The same for a record's screenshot view, where the page is never the truth: the
+# screenshot is stored with every record that has one, and its replay showed the page
+# only under load (production suite, 2026-10-06), twice in a row
+SCREENSHOT_MISS_WAIT = 30
+SCREENSHOT_ATTEMPTS = 3
+# How long a record whose replay showed nothing gets to be sent back from its screenshot
+# view to the replay -- which is how Perma.cc says it has no screenshot
+SCREENSHOT_REDIRECT_WAIT_MS = 8_000
+
+# A retrieval is not tried again after this many seconds, so that the attempts (see
+# `PermaCC._extract_content()`) stay well within the browser's 10-minute limit
+RETRY_BUDGET = 240
+
+
+class PermaCC(HeadedBrowser):
+    name = "Perma.cc"
+    domains = ["perma.cc"]
+    retrieval_timeout_setting = "archive_retrieval_timeout"
+
+    # TODO: Implement PDF support, e.g., https://perma.cc/83VA-LTH9
+
+    async def _capture(self, url: str, **kwargs) -> Capture:
+        """The record's capture time and original URL, as its page showed them (see
+        `_note_record()`)."""
+        captured_at, original = _records.get(_guid(url) or "", (None, None))
+        return Capture(archive="Perma.cc", original_url=original, captured_at=captured_at,
+                       archive_url=url)
+
+    def _after_renderer_crash(self, url: str) -> str:
+        """Replays of YouTube watch pages crash the tab's renderer within seconds on the
+        production host, every time (SIGTRAP at ~800 MB, even alone in a fresh browser)
+        -- loading them again would only crash again. The capture's screenshot is a
+        light page."""
+        return _screenshot_url(url) or url
+
+    async def _extract_content(self, page: Page) -> Optional[ContentTarget]:
+        """The frame that shows the record's capture. Under load, the replay sometimes
+        came up empty (only the app's shell) or replaced one of its frames while it was
+        being read ("Frame was detached"). Either way, the record is loaded once more;
+        if the replay still shows nothing, the capture's screenshot is taken instead, which
+        Perma.cc keeps for most records (as `?type=image`).
+
+        Captures of YouTube's player pages go to the screenshot straight away: their
+        replay yields YouTube's page shell without the video, or crashes its tab's
+        renderer (at ~800 MB, on the production host) -- which under load also cost the
+        videos of other archive replays running at the same time."""
+        loop = asyncio.get_running_loop()
+        start = loop.time()
+        retry_budget = float(get_setting("perma_cc_retry_budget", RETRY_BUDGET))
+        shot = _screenshot_url(page.url)
+        captured_url = await _captured_url(page)
+        await _note_record(page, captured_url)
+        if shot and _replays_poorly(captured_url):
+            logger.info(f"{page.url} captures a YouTube player page; taking its screenshot "
+                        f"({shot}).")
+            with suppress(PlaywrightError):
+                await page.goto(shot, wait_until="domcontentloaded", timeout=60_000)
+                await self._pass_cloudflare(page)  # Asks again for the new address
+        missing = False
+        screenshot_view = "type=image" in page.url
+        attempts = SCREENSHOT_ATTEMPTS if screenshot_view else 2
+        for attempt in range(attempts):
+            try:
+                target = await self._extract_capture(page)
+            except PlaywrightError as e:
+                if "detached" not in str(e).lower():
+                    raise
+                logger.info(f"The replay at {page.url} replaced a frame while it was being "
+                            f"read; loading the record again.")
+                target = None
+            if renderer_crashed(page):
+                # Nothing on this page answers any more; `_browse()` retries on a new one
+                raise PlaywrightError("Target crashed")
+            missing = target is not None and await _shows_replay_miss(
+                target, SCREENSHOT_MISS_WAIT if screenshot_view else REPLAY_MISS_WAIT)
+            if target is not None and not missing and await _shows_content(target):
+                return target
+            if attempt < attempts - 1 and loop.time() - start < retry_budget:
+                if missing:
+                    logger.info(f"The replay at {page.url} says its page is not in the "
+                                f"archive; loading the record again.")
+                elif target is not None:
+                    logger.info(f"The replay at {page.url} came up empty; loading the "
+                                f"record again.")
+                with suppress(PlaywrightError):
+                    await page.reload(wait_until="domcontentloaded", timeout=60_000)
+                continue
+            break
+
+        # The replay rendered the capture, twice, and it holds nothing to show
+        replayed_empty = target is not None
+        shot = _screenshot_url(page.url)
+        if missing and screenshot_view:
+            # Not "missing": the record has its screenshot, the replay failed to show it
+            raise RetrievalFailed(
+                f"The replay of the Perma.cc screenshot at {page.url} kept saying it is "
+                f"not in the archive ({attempts} loads); the replay is failing, not the record.")
+        if missing and shot is None:
+            raise TargetUnavailableError(
+                f"The replay of the Perma.cc record at {page.url} says the page is not in "
+                f"its archive, twice.")
+        if shot is None or loop.time() - start >= retry_budget:
+            return None
+        logger.info(f"The replay at {page.url} "
+                    f"{'still says its page is not in the archive' if missing else 'shows nothing'}"
+                    f"; taking the capture's screenshot ({shot}).")
+        try:
+            await page.goto(shot, wait_until="domcontentloaded", timeout=60_000)
+            # First: on the challenge page, the address is still the one asked for, and a
+            # record without a screenshot -- which Perma.cc redirects back to its replay
+            # (`?type=standard`) -- looked as if it had one (perma.cc/55YA-N88K: an error
+            # after 87 s, instead of "empty" in 9)
+            await self._pass_cloudflare(page)
+            if replayed_empty:
+                # ...and behind the challenge, it does so only once the challenge passed:
+                # asked straight away, the address still read `type=image`, the record
+                # was taken for one with a screenshot, and failed after 44-138 s of
+                # looking for it (the same record: "empty" in 7-11 s otherwise)
+                with suppress(PlaywrightError):
+                    await page.wait_for_url(lambda address: "type=image" not in address,
+                                            timeout=SCREENSHOT_REDIRECT_WAIT_MS)
+            if replayed_empty and "type=image" not in page.url:
+                # Perma.cc sends a record without a screenshot back to the replay
+                raise TargetUnavailableError(
+                    f"The Perma.cc capture at {shot.split('?')[0]} is empty (the replay "
+                    f"{'says the page is not in its archive' if missing else 'shows nothing'}, "
+                    f"and there is no screenshot).")
+            target = await self._extract_capture(page)
+        except PlaywrightError:
+            logger.debug(f"The screenshot at {shot} could not be read.", exc_info=True)
+            return None
+        return target if target is not None and await _shows_content(target) else None
+
+    async def _extract_capture(self, page: Page) -> Optional[ContentTarget]:
+        # A Cloudflare challenge is solved, not waited out: waiting for it to clear by
+        # itself took the full 45 s whenever it asked for the click (perma.cc, since 10-10)
+        await self._pass_cloudflare(page)
+
+        # Prefer the content of the Perma.cc archive iframe specifically
+        outer_iframe_el = await self._archive_iframe(page)
+        if not outer_iframe_el:
+            return None
+
+        outer_frame = await outer_iframe_el.content_frame()
+        if not outer_frame:
+            return None
+
+        try:
+            await outer_frame.wait_for_load_state("domcontentloaded", timeout=15000)
+        except TimeoutError:
+            pass
+
+        # Inside the outer iframe there's a direct child
+        # custom element <replay-web-page> which hosts the inner iframe.
+        try:
+            middle_iframe_el = await outer_frame.wait_for_selector(
+                "replay-web-page iframe", timeout=REPLAY_IFRAME_TIMEOUT_MS
+            )
+        except TimeoutError:
+            middle_iframe_el = None
+
+        if not middle_iframe_el:
+            logger.debug("Perma.cc middle iframe not found; falling back to outer iframe.")
+            await _stash_media_in_frame(outer_frame)
+            return outer_frame
+
+        middle_frame = await middle_iframe_el.content_frame()
+        if not middle_frame:
+            logger.debug("Perma.cc middle iframe has no content frame; falling back to outer.")
+            await _stash_media_in_frame(outer_frame)
+            return outer_frame
+
+        try:
+            await middle_frame.wait_for_load_state("domcontentloaded", timeout=15000)
+        except TimeoutError:
+            pass
+
+        # Critical: wait until the third (innermost) iframe under replay-app-main
+        # has loaded usable archived content — do not fall back early on large WARCs.
+        started = time.monotonic()
+        inner_frame = await self._wait_for_innermost_frame(
+            middle_frame, SCREENSHOT_FRAME_TIMEOUT_MS if "type=image" in page.url
+            else INNERMOST_FRAME_TIMEOUT_MS)
+        if inner_frame is None or not await self._frame_has_usable_content(inner_frame):
+            logger.info(f"Perma.cc's replay at {page.url} showed no content after "
+                        f"{time.monotonic() - started:.0f} s.")
+        if inner_frame is None:
+            logger.debug("Perma.cc inner iframe not ready; falling back to middle iframe.")
+            await _stash_media_in_frame(middle_frame)
+            return middle_frame
+
+        # Prefer a nested media-rich descendant (e.g. Telegram embed) when present.
+        target = await self._pick_best_media_frame(inner_frame)
+        await _stash_media_in_frame(target)
+        return target
+
+    @staticmethod
+    async def _archive_iframe(page: Page):
+        """The record page's archive iframe, which the page adds by script. In busy
+        batches, it sometimes had not appeared after a minute, although the record page
+        itself was complete -- six Perma.cc URLs of one batch failed at once that way. A
+        reload then brings it: so after half the wait, the page is loaded once more."""
+        for attempt in range(2):
+            try:
+                return await page.wait_for_selector("iframe.archive-iframe",
+                                                    timeout=ARCHIVE_IFRAME_TIMEOUT_MS / 2)
+            except TimeoutError:
+                pass
+            if attempt == 0:
+                logger.info(f"Perma.cc's archive iframe is late at {page.url}; reloading.")
+                with suppress(Exception):
+                    await page.reload(wait_until="domcontentloaded", timeout=60_000)
+        logger.info(f"Perma.cc showed no archive iframe at {page.url}.")
+        return None
+
+    async def _wait_for_innermost_frame(
+            self, middle_frame: Frame, timeout_ms: int = INNERMOST_FRAME_TIMEOUT_MS
+    ) -> Optional[Frame]:
+        """Wait until replay-app-main's iframe exists and has usable document content."""
+        deadline = time.monotonic() + timeout_ms / 1000
+        inner_frame: Optional[Frame] = None
+
+        while time.monotonic() < deadline:
+            try:
+                inner_iframe_el = await middle_frame.query_selector("replay-app-main iframe")
+            except Exception:
+                inner_iframe_el = None
+
+            if inner_iframe_el is not None:
+                try:
+                    candidate = await inner_iframe_el.content_frame()
+                except Exception:
+                    candidate = None
+                if candidate is not None:
+                    inner_frame = candidate
+                    if await self._frame_has_usable_content(inner_frame):
+                        return inner_frame
+            await asyncio.sleep(0.5)
+
+        return inner_frame
+
+    @staticmethod
+    async def _frame_has_usable_content(frame: Frame) -> bool:
+        try:
+            info = await evaluate_within(
+                frame,
+                """() => {
+                    if (!document.body || document.readyState === 'loading') {
+                        return { ready: false };
+                    }
+                    const size = document.documentElement
+                        ? document.documentElement.outerHTML.length
+                        : 0;
+                    const textLen = (document.body.innerText || '').trim().length;
+                    const hasMedia = !!document.querySelector(
+                        'img[src], video[src], video source[src], '
+                        + '[style*="background-image"], '
+                        + '.tgme_widget_message_photo_wrap, .tgme_widget_message_video'
+                    );
+                    const hasNested = document.querySelectorAll('iframe').length > 0;
+                    return {
+                        ready: size > 1000 || textLen > 40 || hasMedia || hasNested
+                    };
+                }"""
+            )
+            return bool(info and info.get("ready"))
+        except Exception:
+            return False
+
+    async def _pick_best_media_frame(self, root: Frame) -> Frame:
+        """Prefer a descendant frame that actually hosts post media (e.g. Telegram embed)."""
+        # Only Telegram posts load their media in a late nested embed worth waiting for;
+        # everything else gets a single pass instead of burning the whole wait.
+        is_telegram = "t.me/" in root.url or "telegram" in root.url
+        deadline = time.monotonic() + (30 if is_telegram else 0)
+        best = root
+        best_score = await self._media_score(root)
+
+        while True:
+            # Asked at once: a frame busy with a heavy medium answers only when its
+            # time is up (see `evaluate_within()`), and those waits must not add up
+            frames = [f for f in root.page.frames
+                      if f != root and self._is_descendant_frame(f, root)]
+            scores = await asyncio.gather(*(self._media_score(f) for f in frames))
+            for frame, score in zip(frames, scores):
+                if score > best_score:
+                    best, best_score = frame, score
+
+            # Strong media signal found (photo wrap / video / embed)
+            if best_score >= 10:
+                return best
+            if time.monotonic() >= deadline:
+                return best
+            await asyncio.sleep(0.5)
+
+    @staticmethod
+    def _is_descendant_frame(frame: Frame, ancestor: Frame) -> bool:
+        parent = frame.parent_frame
+        while parent is not None:
+            if parent == ancestor:
+                return True
+            parent = parent.parent_frame
+        return False
+
+    @staticmethod
+    async def _media_score(frame: Frame) -> int:
+        try:
+            return int(
+                await evaluate_within(
+                    frame,
+                    """() => {
+                        let score = 0;
+                        const photos = document.querySelectorAll(
+                            '.tgme_widget_message_photo_wrap[style*="background-image"]'
+                        ).length;
+                        const videos = document.querySelectorAll(
+                            'video.tgme_widget_message_video[src], video[src]'
+                        ).length;
+                        const imgs = document.querySelectorAll('img[src]').length;
+                        score += photos * 10 + videos * 10 + Math.min(imgs, 3);
+                        if ((location.href || '').includes('embed=1')) score += 5;
+                        return score;
+                    }"""
+                )
+            )
+        except Exception:
+            return 0
+
+
+async def _shows_replay_miss(frame: Frame, wait: float = REPLAY_MISS_WAIT) -> bool:
+    """Whether the frame shows pywb's "not in this archive" page, and keeps showing it
+    for `wait` seconds (see `_REPLAY_MISS_JS`)."""
+    deadline = asyncio.get_running_loop().time() + wait
+    while True:
+        try:
+            if not await evaluate_within(frame, _REPLAY_MISS_JS):
+                return False
+        except PlaywrightError:
+            return False
+        if asyncio.get_running_loop().time() >= deadline:
+            return True
+        await asyncio.sleep(1)
+
+
+async def _shows_content(frame: Frame) -> bool:
+    try:
+        return bool(await evaluate_within(frame, _SHOWS_CONTENT_JS))
+    except PlaywrightError:
+        return False
+
+
+# Captured pages whose replay never shows their content: YouTube's player pages
+_POOR_REPLAYS = re.compile(
+    r"^https?://(?:(?:www|m)\.)?(?:youtube\.com/(?:watch|shorts/|live/|embed/)|youtu\.be/)",
+    re.IGNORECASE)
+
+
+def _replays_poorly(url: Optional[str]) -> bool:
+    return bool(url and _POOR_REPLAYS.match(url))
+
+
+# The record page states when it was made: "Captured" (or "Uploaded", for a file a user
+# uploaded) followed by insertLocalDateTime('date_...', <Unix seconds>, ...)
+_CREATION_JS = r"""() => {
+    const p = document.querySelector('p.creation');
+    const m = p && /insertLocalDateTime\([^,]+,\s*(\d+)/.exec(p.innerHTML);
+    return m ? Number(m[1]) : null;
+}"""
+# What the record pages said, by GUID: (captured_at, original URL). A record never changes.
+_records: dict[str, tuple[Optional[str], Optional[str]]] = {}
+MAX_RECORDS = 10_000
+
+
+def _guid(url: str) -> Optional[str]:
+    match = re.search(r"perma\.cc/([A-Z0-9]{4}-[A-Z0-9]{4})", url, re.IGNORECASE)
+    return match.group(1).upper() if match else None
+
+
+async def _note_record(page: Page, captured_url: Optional[str]) -> None:
+    """Keeps the record's capture time and original URL for its `Capture`. The replay runs
+    in a task of its own (see `HeadedBrowser._get()`), so they are kept by GUID."""
+    if not (guid := _guid(page.url)):
+        return
+    epoch = None
+    with suppress(Exception):
+        epoch = await page.evaluate(_CREATION_JS)
+    if len(_records) >= MAX_RECORDS:
+        _records.clear()
+    _records[guid] = (utc_iso(epoch) if epoch else None, captured_url)
+
+
+async def _captured_url(page: Page) -> Optional[str]:
+    """The URL a Perma.cc record captured, as its page's playback script names it."""
+    with suppress(Exception):
+        return await page.evaluate("""() => {
+            for (const s of document.querySelectorAll('script')) {
+                const m = /const url = "([^"]*)"/.exec(s.textContent);
+                if (m) return JSON.parse('"' + m[1] + '"');
+            }
+            return null;
+        }""")
+    return None
+
+
+def _screenshot_url(url: str) -> Optional[str]:
+    """The record's screenshot view (https://perma.cc/XXXX-XXXX?type=image), unless `url`
+    is that already or is no record."""
+    from urllib.parse import urlsplit
+    parts = urlsplit(url)
+    if parts.netloc.removeprefix("www.") != "perma.cc" or "type=image" in parts.query:
+        return None
+    guid = parts.path.strip("/").split("/")[0]
+    return f"https://perma.cc/{guid}?type=image" if guid else None
+
+
+async def _settle_media_frame(frame: Frame) -> None:
+    """Lets the replayed page finish building itself before its media are collected.
+    The innermost frame counts as ready as soon as it has some content, which under load
+    came well before the replayed player had created its <video>: the video was then
+    missing from the result (perma.cc/K5L8-V3LZ, a Facebook post, in a busy batch).
+    Also runs for the Internet Archive, which collects its media the same way."""
+    await settle_dom(frame)
+    try:
+        if await evaluate_within(frame, _VIDEO_PENDING_JS):
+            await frame.wait_for_selector("video", state="attached",
+                                          timeout=VIDEO_ELEMENT_TIMEOUT_MS)
+    except TimeoutError:
+        logger.debug(f"The replayed page at {frame.url[:120]} names a video but shows none.")
+    except Exception:
+        pass  # E.g. mid-navigation; the media are collected as they are
+    with suppress(Exception):
+        logger.debug(f"Replay frame {frame.url[:100]} before collecting: "
+                     f"{await frame.evaluate(_MEDIA_STATE_JS)}")
+
+
+# Stops a replayed page's players: they kept streaming the very videos being fetched here,
+# and an archive serves a client only so fast (web.archive.org ~330 KB/s, however many
+# connections), so both downloads crawled. A Kwai capture's 5.7 MB video took 71 s.
+_STOP_PLAYBACK_JS = """() => document.querySelectorAll('video, audio').forEach(m => {
+    try { m.pause(); m.autoplay = false; m.preload = 'none'; } catch (_) {}
+})"""
+
+
+def _playback_urls(frame) -> set[str]:
+    """The videos the page's players downloaded (see `BrowserMedia.watch_playback()`)."""
+    page = frame if isinstance(frame, Page) else getattr(frame, "page", None)
+    media = getattr(page, "_scrapemm_media", None)
+    return media.playback_urls() if media is not None else set()
+
+
+async def _stop_playback(frame: Frame) -> None:
+    """Pauses the media of the frame and of the frames within it. Best-effort: a frame
+    that does not answer keeps playing, which costs time, not the retrieval."""
+    frames = [frame, *frame.child_frames]
+    for f in frames:
+        with suppress(PlaywrightError, asyncio.TimeoutError):
+            await asyncio.wait_for(f.evaluate(_STOP_PLAYBACK_JS), 5)
+
+
+async def _stash_media_in_frame(frame, image_limit: int = MAX_IMAGE_BYTES, video_limit: int = MAX_VIDEO_BYTES,
+                                concurrency: int = STASH_CONCURRENCY) -> None:
+    """Fetches the frame's media inside the frame, where the replay's session and service
+    worker apply, and marks each element with the resulting Blob (`BLOB_ATTR`), which
+    `resolve_media()` then reads out of the browser in chunks. Also decides which media
+    are the real ones (e.g. the clear Telegram video, not TikTok's decoy clip).
+
+    Images the browser already rendered are left alone: their bytes are taken from the
+    browser's own copy (see `BrowserMedia`). This used to inline everything as data URIs
+    instead, which blew a single video's frame HTML up to 20 MB.
+    """
+    # First, as the page may still be building itself: collected too early, a video its
+    # player had not yet created was missing (see `_settle_media_frame()`)
+    await _settle_media_frame(frame)
+    await _stop_playback(frame)
+    # Leaves time to read them out. Never 0: the page takes that for no limit at all
+    video_seconds = budget.cap(STASH_VIDEO_TIMEOUT, reserve=30, floor=5)
+    image_seconds = min(STASH_IMAGE_TIMEOUT, video_seconds)
+    try:
+        await install_stash(frame)
+        # Bounded from outside as well, for a page that does not answer at all
+        result = await asyncio.wait_for(frame.evaluate(
+            """
+            async (opts) => {
+              const maxImageBytes = opts.maxImageBytes ?? 15728640;
+              const maxVideoBytes = opts.maxVideoBytes ?? 26214400;
+              const concurrency = Math.max(1, Math.min(16, opts.concurrency ?? 6));
+              const blobAttr = opts.blobAttr;
+              const stash = window.__scrapemmStash;
+
+              const abs = (u) => {
+                try { return new URL(u, document.baseURI).href; } catch (_) { return null; }
+              };
+
+              const pickFromSrcset = (srcset) => {
+                if (!srcset) return null;
+                // Choose the first candidate; simple and robust
+                const first = srcset.split(',')[0]?.trim();
+                if (!first) return null;
+                const url = first.split(' ')[0]?.trim();
+                return url || null;
+              };
+
+              const isEligibleBgUrl = (url) => {
+                if (!url || url.startsWith('data:')) return false;
+                const u = url.toLowerCase();
+                if (u.includes('/emoji/') || u.includes('/emojis/')) return false;
+                if (/\\.(svg|svgz|eps)(\\?|$)/i.test(u)) return false;
+                if (/\\.(jpe?g|png|gif|webp|bmp)(\\?|$)/i.test(u)) return true;
+                if (u.includes('telegram-cdn.org/file/') || (u.includes('/file/') && u.includes('cdn'))) {
+                  return true;
+                }
+                return false;
+              };
+
+              const bgUrlFromStyle = (style) => {
+                if (!style) return null;
+                const m = /background-image\\s*:\\s*url\\(\\s*['"]?([^'")\\s]+)['"]?\\s*\\)/i.exec(style);
+                if (!m) return null;
+                let url = m[1].trim();
+                if (url.startsWith('//')) url = 'https:' + url;
+                return isEligibleBgUrl(url) ? url : null;
+              };
+
+              const tasks = [];
+              let videoTaskCount = 0;
+
+              // Images (img[src] and img[srcset]). Rendered ones are in the browser already.
+              document.querySelectorAll('img').forEach((img) => {
+                const cur = img.currentSrc || '';
+                if (img.complete && img.naturalWidth > 0 && cur && !cur.startsWith('data:')) return;
+                let url = img.getAttribute('src');
+                if (!url) {
+                  const ss = img.getAttribute('srcset');
+                  url = pickFromSrcset(ss);
+                }
+                if (url) {
+                  const full = abs(url);
+                  if (full) {
+                    tasks.push({ el: img, attr: 'src', url: full, kind: 'image', cleanupSrcset: true });
+                  }
+                }
+              });
+
+              // CSS background images used as primary media (e.g. Telegram photo wraps)
+              document.querySelectorAll('[style*="background-image"]').forEach((el) => {
+                if (el.tagName === 'IMG' || el.tagName === 'VIDEO' || el.tagName === 'SOURCE') return;
+                const url = bgUrlFromStyle(el.getAttribute('style') || '');
+                if (!url) return;
+                const full = abs(url);
+                if (!full) return;
+                // Materialize as <img> so downstream HTML parsers see a normal image src.
+                const img = document.createElement('img');
+                img.setAttribute('src', full);
+                el.parentNode ? el.parentNode.insertBefore(img, el) : document.body.appendChild(img);
+                el.remove();
+                tasks.push({ el: img, attr: 'src', url: full, kind: 'image' });
+              });
+
+              // Prefer non-blurred Telegram videos when both variants exist
+              const preferClearTelegramVideo = () => {
+                const clear = document.querySelector('video.tgme_widget_message_video.js-message_video[src]');
+                const blurred = document.querySelector('video.tgme_widget_message_video.js-message_video_blured[src]');
+                if (clear && blurred) blurred.remove();
+              };
+              preferClearTelegramVideo();
+
+              // Drop TikTok login-shell decoy clips so they are not preferred over the real player.
+              document.querySelectorAll('video').forEach((video) => {
+                const s = ((video.getAttribute('src') || '') + ' ' + (video.currentSrc || '')).toLowerCase();
+                if (s.includes('playback1.mp4') || s.includes('ttwstatic.com')
+                    || s.includes('webapp-desktop/playback')) {
+                  video.remove();
+                }
+              });
+
+              // Video sources: <video src> and <video><source src>
+              // Skip blob: URLs here — wombat's patched fetch cannot read them; handled below.
+              // Prefer currentSrc when the attribute still points at a live CDN URL while the
+              // archive rewriter has already bound a replayable URL on currentSrc (Wayback).
+              document.querySelectorAll('video[src]').forEach((video) => {
+                const attr = video.getAttribute('src') || '';
+                if (attr.startsWith('blob:')) return;
+                const cur = video.currentSrc || '';
+                let url = attr;
+                if (cur && !cur.startsWith('blob:') && cur.includes('web.archive.org')
+                    && attr && !attr.includes('web.archive.org')) {
+                  url = cur;
+                  video.setAttribute('src', cur);
+                }
+                const full = abs(url);
+                if (full) { tasks.push({ el: video, attr: 'src', url: full, kind: 'video' }); videoTaskCount++; }
+              });
+              document.querySelectorAll('video source[src]').forEach((source) => {
+                const url = source.getAttribute('src');
+                if (url && url.startsWith('blob:')) return;
+                const full = abs(url);
+                if (full) { tasks.push({ el: source, attr: 'src', url: full, kind: 'video' }); videoTaskCount++; }
+              });
+
+              const isStreaming = (url, contentType) => {
+                if (!url) return false;
+                const u = url.toLowerCase();
+                if (u.endsWith('.m3u8') || u.includes('m3u8')) return true;
+                const ct = (contentType || '').toLowerCase();
+                return ct.includes('mpegurl') || ct.includes('application/vnd.apple.mpegurl');
+              };
+
+              const stashFor = (url, kind) => stash(url, {
+                limit: kind === 'image' ? maxImageBytes : maxVideoBytes, skipStreaming: true,
+                timeoutMs: kind === 'image' ? opts.imageTimeoutMs : opts.videoTimeoutMs });
+              // Media an earlier pass over the page gave up on are not waited for again
+              const skip = new Set(opts.skipUrls || []);
+              const timedOut = [];
+              window.__scrapemmStashTimeout = opts.videoTimeoutMs;
+              const hasBlob = (el) => el.hasAttribute(blobAttr);
+
+              let idx = 0;
+              let inlined = 0;
+              let skipped = 0;
+              let videoInlined = 0;
+
+              const worker = async () => {
+                while (true) {
+                  const i = idx++;
+                  if (i >= tasks.length) break;
+                  const t = tasks[i];
+                  if (skip.has(t.url)) { skipped++; continue; }
+                  try {
+                    const res = await stashFor(t.url, t.kind);
+                    if (res && res.reason === 'timeout') timedOut.push(t.url);
+                    if (res && res.ok) {
+                      t.el.setAttribute(blobAttr, res.id);
+                      if (t.cleanupSrcset) t.el.removeAttribute('srcset');
+                      inlined++;
+                      if (t.kind === 'video') videoInlined++;
+                    } else {
+                      skipped++;
+                    }
+                  } catch (_) {
+                    skipped++;
+                  }
+                }
+              };
+
+              const workers = Array.from({ length: concurrency }, () => worker());
+              await Promise.all(workers);
+
+              // If no video was inlined via direct <video/src> or <source>,
+              // attempt a TikTok-specific fallback: hydration JSON and/or playAddr
+              // strings embedded in the archived HTML (Wayback often rewrites those
+              // even when webapp.video-detail is missing from __UNIVERSAL_DATA__).
+              const tryInlineTikTok = async () => {
+                try {
+                  const cand = [];
+                  const decodeArchived = (u) => {
+                    let s = String(u);
+                    // Decode JSON-style \\uXXXX escapes left in Wayback HTML (\\u002F, \\u0026, …).
+                    s = s.replace(new RegExp('\\\\u([0-9a-fA-F]{4})', 'g'), (_, h) =>
+                      String.fromCharCode(parseInt(h, 16)));
+                    s = s.split('\\\\/').join('/');
+                    s = s.split('&amp;').join('&');
+                    return s;
+                  };
+                  const pushUrl = (u) => {
+                    if (!u) return;
+                    try {
+                      const href = abs(decodeArchived(u));
+                      if (!href) return;
+                      const low = href.toLowerCase();
+                      if (isStreaming(href)) return;
+                      if (low.includes('playback1.mp4') || low.includes('ttwstatic.com')) return;
+                      cand.push(href);
+                    } catch (_) { /* noop */ }
+                  };
+
+                  const sc = document.querySelector('#__UNIVERSAL_DATA_FOR_REHYDRATION__');
+                  if (sc && sc.textContent) {
+                    try {
+                      const j = JSON.parse(sc.textContent);
+                      const v = j?.__DEFAULT_SCOPE__?.["webapp.video-detail"]?.itemInfo?.itemStruct?.video;
+                      if (v) {
+                        pushUrl(v.playAddr);
+                        pushUrl(v.downloadAddr);
+                        if (Array.isArray(v.bitrateInfo)) {
+                          for (const bi of v.bitrateInfo) {
+                            const list = bi?.PlayAddr?.UrlList;
+                            if (Array.isArray(list)) {
+                              for (const u of list) pushUrl(u);
+                            }
+                          }
+                        }
+                      }
+                    } catch (_) { /* ignore */ }
+                  }
+
+                  // Wayback TikTok captures often keep playAddr only as a rewritten
+                  // string in page HTML, not under webapp.video-detail. Prefer longer
+                  // signed CDN URLs when present (truncated playAddr alone often 404s).
+                  let html = document.documentElement?.outerHTML || '';
+                  html = decodeArchived(html);
+                  let m;
+                  const playRe = /"playAddr"\\s*:\\s*"([^"]+)"/g;
+                  while ((m = playRe.exec(html)) !== null) {
+                    pushUrl(m[1]);
+                  }
+                  const signedRe = /https:\\/\\/web\\.archive\\.org\\/web\\/\\d+(?:id_|mp_|if_)?\\/https:\\/\\/v16[^\\s\"'<>]*signature=[^\\s\"'<>]+/gi;
+                  while ((m = signedRe.exec(html)) !== null) {
+                    pushUrl(m[0]);
+                  }
+                  const v16Re = /https:\\/\\/(?:web\\.archive\\.org\\/web\\/\\d+(?:id_|mp_|if_)?\\/)?https:\\/\\/v16[^\\s\"'<>]+/gi;
+                  while ((m = v16Re.exec(html)) !== null) {
+                    pushUrl(m[0]);
+                  }
+
+                  const seen = new Set();
+                  let urls = cand.filter(u => (seen.has(u) ? false : (seen.add(u), true)));
+                  // Also try Wayback id_ raw-media form of each archived URL.
+                  const expanded = [];
+                  for (const u of urls) {
+                    expanded.push(u);
+                    const idForm = u.replace(/(\\/web\\/\\d+)(\\/https?:)/i, '$1id_$2');
+                    if (idForm !== u) expanded.push(idForm);
+                  }
+                  urls = expanded;
+                  urls.sort((a, b) => {
+                    const score = (u) => (u.includes('signature=') ? 1000 : 0)
+                      + (u.includes('id_/') ? 100 : 0)
+                      + Math.min(u.length, 500);
+                    return score(b) - score(a);
+                  });
+                  for (const u of urls) {
+                    try {
+                      const res = await stash(u, {
+                        limit: maxVideoBytes, minSize: 1000, requireVideo: true });
+                      if (!res.ok) continue;
+                      let vEl = document.querySelector('video');
+                      if (!vEl) {
+                        vEl = document.createElement('video');
+                        vEl.setAttribute('controls', '');
+                        vEl.setAttribute('preload', 'metadata');
+                        const host = document.querySelector('#app') || document.body;
+                        if (host.firstChild) host.insertBefore(vEl, host.firstChild); else host.appendChild(vEl);
+                      } else {
+                        vEl.querySelectorAll('source').forEach(s => s.remove());
+                      }
+                      vEl.setAttribute(blobAttr, res.id);
+                      videoInlined++;
+                      inlined++;
+                      return true;
+                    } catch (_) {
+                      continue;
+                    }
+                  }
+                  return false;
+                } catch (_) { return false; }
+              };
+
+              if (videoInlined === 0) {
+                try { await tryInlineTikTok(); } catch (_) { /* ignore */ }
+              }
+
+              // Facebook (and similar) players often expose only blob: src under ReplayWeb.
+              // Wombat's patched fetch cannot read blob: URLs, but the original MP4 is usually
+              // still present in the archived HTML and reachable via the replay id_/mp_/if_ proxy.
+              const tryInlineReplayMp4 = async () => {
+                const needs = [...document.querySelectorAll('video')].filter((v) => !hasBlob(v));
+                if (!needs.length) return false;
+
+                const loc = location.href || '';
+                // Since 10-2026 with a segment of its own in front of /replay-web-page/
+                // (rejouer.perma.cc/6a1b84c3250d/replay-web-page/...)
+                const prefixMatch = loc.match(
+                  /^(https:\\/\\/rejouer\\.perma\\.cc\\/(?:[^/]+\\/)?replay-web-page\\/w\\/id-[^/]+)\\//
+                );
+                if (!prefixMatch) return false;
+                const replayBase = prefixMatch[1];
+
+                let html = document.documentElement.outerHTML || '';
+                html = html
+                  .replace(/\\\\u([0-9a-fA-F]{4})/g, (_, h) => String.fromCharCode(parseInt(h, 16)))
+                  .replace(/\\\\\\//g, '/');
+                const found = [...html.matchAll(/https:\\/\\/video[^\"'\\s<>]+\\.mp4[^\"'\\s<>]*/gi)]
+                  .map((m) => m[0].replace(/&amp;/g, '&').split('<')[0]);
+                const uniq = [...new Set(found)];
+                if (!uniq.length) return false;
+
+                uniq.sort((a, b) => {
+                  const score = (u) =>
+                    (u.includes('t42.') ? -10 : 0)
+                    + (u.includes('audio') ? 20 : 0)
+                    + (u.includes('vabr=') ? 5 : 0);
+                  return score(a) - score(b);
+                });
+
+                for (const video of needs) {
+                  for (const mp4 of uniq) {
+                    for (const kind of ['id_', 'mp_', 'if_']) {
+                      try {
+                        const res = await stashFor(`${replayBase}/${kind}/${mp4}`, 'video');
+                        if (res && res.ok) {
+                          video.querySelectorAll('source').forEach((s) => s.remove());
+                          video.setAttribute(blobAttr, res.id);
+                          videoInlined++;
+                          inlined++;
+                          return true;
+                        }
+                      } catch (_) { /* try next */ }
+                    }
+                  }
+                }
+                return false;
+              };
+
+              const stillNeedsVideo = [...document.querySelectorAll('video')].some((v) => {
+                const s = v.getAttribute('src') || '';
+                return !hasBlob(v) && (s.startsWith('blob:') || videoInlined === 0);
+              });
+              if (stillNeedsVideo) {
+                try { await tryInlineReplayMp4(); } catch (_) { /* ignore */ }
+              }
+
+              return { total: tasks.length, inlined, skipped, videoInlined, timedOut };
+            }
+            """,
+            {
+                "maxImageBytes": int(image_limit),
+                "maxVideoBytes": int(video_limit),
+                "concurrency": int(concurrency),
+                "blobAttr": BLOB_ATTR,
+                "imageTimeoutMs": int(image_seconds * 1000),
+                "videoTimeoutMs": int(video_seconds * 1000),
+                # Also what a player downloaded: completed later, not fetched again
+                "skipUrls": sorted(budget.abandoned() | _playback_urls(frame)),
+            },
+        ), timeout=video_seconds + 15)
+        logger.debug(f"Fetched in {frame.url[:120]}: {result}")
+        if gave_up := (result or {}).get("timedOut"):
+            budget.abandoned().update(gave_up)
+            logger.info(f"Gave up on {len(gave_up)} medium/media in {frame.url[:100]} that took "
+                        f"longer than {video_seconds:.0f} s: {', '.join(u[:80] for u in gave_up[:3])}")
+    except asyncio.TimeoutError:
+        logger.info(f"The media of {frame.url[:100]} took longer than {video_seconds:.0f} s to "
+                    f"fetch inside it; the page goes on with those that arrived.")
+    except Exception:
+        # Best-effort; if anything fails, just proceed without inlining
+        logger.debug("Fetching the frame's media in the frame failed; resolve_media() "
+                     "fetches them instead.", exc_info=True)
+
+
+# --- Finding Perma.cc archives of arbitrary URLs --------------------------------------
+#
+# Perma.cc answers Memento TimeMap requests without an account:
+#   GET https://perma.cc/timemap/json/<url>  ->  200 JSON {"mementos": {"list": [...]}}
+#                                                or 404 (plain text) if none exists
+# Matching follows the usual archive canonicalisation: scheme, "www." and a trailing
+# slash do not matter, the query string does (exactly). The site sits behind Cloudflare,
+# which answers plain HTTP clients with a JavaScript challenge, so the lookup goes
+# through curl_cffi's browser TLS impersonation, which it lets through. (The REST API at
+# api.perma.cc lists only an account's own archives, and rate-limits hard: HTTP 429.)
+
+PERMA_TIMEMAP = "https://perma.cc/timemap/json/"
+# How long a lookup's outcome is reused. Misses shorter: somebody may archive it meanwhile.
+LOOKUP_HIT_TTL = 3600
+LOOKUP_MISS_TTL = 600
+# Perma.cc is one small service; lookups queue rather than burst
+LOOKUP_CONCURRENCY = 2
+# After HTTP 429, Perma.cc is not asked again for this long
+LOOKUP_RATE_LIMIT_PAUSE = 300
+
+_lookups: dict[str, tuple[Optional[str], float]] = {}  # URL -> (Perma link or None, expiry)
+_lookup_gate: Optional[asyncio.Semaphore] = None
+_rate_limited_until = 0.0
+
+
+# Query parameters that only track how a link was shared, never which content it is
+_TRACKING_PARAMS = re.compile(
+    r"^(utm_.*|fbclid|gclid|dclid|msclkid|mc_cid|mc_eid|igsh|igshid|si|s|t|ref|ref_src|"
+    r"ref_url|feature|lang|is_from_webapp|is_copy_url|sender_device|share_.*|_rdc|_rdr|"
+    r"rdid|mibextid|xmt|__cft__.*|__tn__)$", re.IGNORECASE)
+
+
+def _lookup_candidates(url: str) -> list[str]:
+    """The spellings of `url` worth looking up, in order: as given; without the query
+    parameters that only track sharing (utm_*, fbclid, ?s=, ...) and the fragment; and
+    for X the other of its two domains.
+
+    Only tracking parameters go: the query often *is* the content -- a YouTube video
+    is `watch?v=...`. Dropping the whole query once matched three different videos to
+    the same Perma.cc capture of some other video.
+    """
+    from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+    candidates = [url]
+    parts = urlsplit(url)
+    kept = [(k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True)
+            if not _TRACKING_PARAMS.match(k)]
+    cleaned = parts._replace(query=urlencode(kept), fragment="")
+    candidates.append(urlunsplit(cleaned))
+    host = parts.netloc.lower().removeprefix("www.")
+    swap = {"x.com": "twitter.com", "twitter.com": "x.com"}.get(host)
+    if swap:
+        candidates.append(urlunsplit(cleaned._replace(netloc=swap)))
+    return list(dict.fromkeys(candidates))
+
+
+async def _timemap_newest(url: str) -> Optional[str]:
+    """The newest Perma.cc link in the TimeMap of exactly `url`, or None if there is none.
+    Raises RateLimitError when Perma.cc throttles, RetrievalFailed when it cannot be
+    asked (unreachable, or an answer that is not a TimeMap)."""
+    global _rate_limited_until
+    import json
+    from scrapemm.common.exceptions import RateLimitError
+    from scrapemm.server.download.requests import _request_via_curl_cffi
+
+    result = await _request_via_curl_cffi(PERMA_TIMEMAP + url, {"Accept": "application/json"},
+                                          lookup=True)
+    if result is None:
+        raise RetrievalFailed("Perma.cc could not be asked for archives (no answer).")
+    status, headers, body = result
+    if status == 404:
+        return None
+    if status == 429:
+        pause = float(get_setting("perma_cc_rate_limit_pause", LOOKUP_RATE_LIMIT_PAUSE))
+        _rate_limited_until = time.time() + pause
+        raise RateLimitError("Perma.cc is rate-limiting archive lookups; paused for "
+                             f"{pause / 60:.0f} min.")
+    if status != 200:
+        raise RetrievalFailed(f"Perma.cc answered the archive lookup with HTTP {status}.")
+    try:
+        mementos = json.loads(body)["mementos"]["list"]
+    except (ValueError, KeyError, TypeError):
+        raise RetrievalFailed("Perma.cc's archive lookup answered with something other "
+                              "than a TimeMap (a Cloudflare challenge?).")
+    dated = [m for m in mementos if m.get("uri") and m.get("datetime")]
+    return max(dated, key=lambda m: m["datetime"])["uri"] if dated else None
+
+
+async def find_perma_archive(url: str, session=None) -> Optional[str]:
+    """Returns the newest Perma.cc link (https://perma.cc/XXXX-XXXX) archiving `url`, or
+    None if Perma.cc has none. Needs no account. Outcomes are cached (hits for an hour,
+    misses for ten minutes), and at most LOOKUP_CONCURRENCY lookups run at once.
+
+    Raises RateLimitError while Perma.cc throttles, RetrievalFailed if it cannot be asked.
+    `session` is accepted for symmetry with other lookups and not used: Perma.cc has to be
+    asked with a browser's TLS fingerprint (see above)."""
+    global _lookup_gate
+    from scrapemm.common.exceptions import RateLimitError
+
+    now = time.time()
+    if (cached := _lookups.get(url)) and cached[1] > now:
+        return cached[0]
+    if _rate_limited_until > now:
+        raise RateLimitError("Perma.cc is rate-limiting archive lookups; try again later.")
+    if _lookup_gate is None:
+        _lookup_gate = asyncio.Semaphore(LOOKUP_CONCURRENCY)
+
+    async with _lookup_gate:
+        link = None
+        for candidate in _lookup_candidates(url):
+            if link := await _timemap_newest(candidate):
+                break
+    ttl = (get_setting("perma_cc_lookup_hit_ttl", LOOKUP_HIT_TTL) if link
+           else get_setting("perma_cc_lookup_miss_ttl", LOOKUP_MISS_TTL))
+    _lookups[url] = (link, time.time() + ttl)
+    if len(_lookups) > 10_000:  # Keep it bounded: drop the expired ones
+        for key in [k for k, (_, expiry) in _lookups.items() if expiry <= time.time()]:
+            del _lookups[key]
+    logger.debug(f"Perma.cc archive of {url}: {link or 'none'}")
+    return link
+
+
+_perma: Optional[PermaCC] = None
+
+
+async def retrieve_archived_copy(url: str, session=None, **kwargs) -> ScrapedContent:
+    """Retrieves the newest Perma.cc archive of `url` (any URL), through the Perma.cc
+    integration. `kwargs` are the integration's (e.g. output_format, max_video_size).
+
+    Raises TargetUnavailableError if Perma.cc has no archive of the URL, RateLimitError
+    while Perma.cc throttles lookups, and whatever the integration raises otherwise."""
+    global _perma
+    from scrapemm.common.exceptions import TargetUnavailableError
+
+    link = await find_perma_archive(url, session)
+    if link is None:
+        raise TargetUnavailableError(f"Perma.cc has no archive of {url}.")
+    logger.info(f"Retrieving {url} from its Perma.cc archive {link}.")
+    if _perma is None:
+        _perma = PermaCC()
+    return await _perma.get(link, **kwargs)
