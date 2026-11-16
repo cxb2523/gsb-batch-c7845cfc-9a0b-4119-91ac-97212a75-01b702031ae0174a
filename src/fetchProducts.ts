@@ -8,6 +8,9 @@ import { camelCaseKeys } from './utils/camelCaseKeys.js'
 import { endpoint, request } from './request.js'
 import { parse } from 'valibot'
 
+const DEFAULT_PAGE_SIZE = 99_999
+const DEFAULT_MAX_PAGES = 100
+
 /** A complete category snapshot, suitable for reconciliation by importers. */
 export async function getProductSnapshot(
   category: `${Category}`,
@@ -21,30 +24,57 @@ export async function getProductSnapshot(
     (typeof storeCode !== 'string' || !/^\d{3}$/.test(storeCode))
   )
     throw new Error('Invalid store code')
-  const url = new URL('DoSearch', endpoint)
-  url.search = new URLSearchParams({
-    skip: '0',
-    count: '99999',
-    category,
-  }).toString()
-  if (storeCode) url.searchParams.set('shop', storeCode)
+  const pageSize = options.pageSize ?? DEFAULT_PAGE_SIZE
+  const maxPages = options.maxPages ?? DEFAULT_MAX_PAGES
+  if (!Number.isSafeInteger(pageSize) || pageSize <= 0)
+    throw new Error('pageSize must be a positive integer')
+  if (!Number.isSafeInteger(maxPages) || maxPages <= 0)
+    throw new Error('maxPages must be a positive integer')
+
   const fetchedAt = new Date().toISOString()
-  const raw = await request(url.href, options)
-  if (
-    !raw ||
-    typeof raw !== 'object' ||
-    !('data' in raw) ||
-    !Array.isArray(raw.data) ||
-    !('total' in raw) ||
-    typeof raw.total !== 'number' ||
-    !Number.isSafeInteger(raw.total) ||
-    raw.total < 0 ||
-    raw.data.length !== raw.total
-  ) {
-    throw new Error('Incomplete or invalid Vínbúðin product snapshot')
+  const items: unknown[] = []
+  let total: number | null = null
+  // Page through DoSearch so one truncated or failed page cannot silently
+  // discard the rest of the category; any failure rejects the whole snapshot.
+  for (let page = 0; ; page++) {
+    if (page >= maxPages)
+      throw new Error(
+        `Vínbúðin snapshot exceeded the maximum of ${maxPages} pages`,
+      )
+    const url = new URL('DoSearch', endpoint)
+    url.search = new URLSearchParams({
+      skip: String(items.length),
+      count: String(pageSize),
+      category,
+    }).toString()
+    if (storeCode) url.searchParams.set('shop', storeCode)
+    const raw = await request(url.href, options)
+    if (
+      !raw ||
+      typeof raw !== 'object' ||
+      !('data' in raw) ||
+      !Array.isArray(raw.data) ||
+      !('total' in raw) ||
+      typeof raw.total !== 'number' ||
+      !Number.isSafeInteger(raw.total) ||
+      raw.total < 0 ||
+      raw.data.length > pageSize
+    ) {
+      throw new Error('Incomplete or invalid Vínbúðin product snapshot')
+    }
+    if (total === null) total = raw.total
+    else if (raw.total !== total)
+      throw new Error('Vínbúðin product total changed during pagination')
+    items.push(...raw.data)
+    if (items.length >= total) break
+    if (raw.data.length < pageSize)
+      throw new Error('Incomplete or invalid Vínbúðin product snapshot')
   }
+  if (items.length !== total)
+    throw new Error('Incomplete or invalid Vínbúðin product snapshot')
+
   const seen = new Set<number>()
-  const products = raw.data.map((item) => {
+  const products = items.map((item) => {
     const product = parse(productSchema, camelCaseKeys(item), {
       abortEarly: true,
     })
@@ -80,7 +110,7 @@ export async function getProductSnapshot(
     category,
     storeCode: storeCode ?? null,
     fetchedAt,
-    total: raw.total,
+    total,
     products,
   }
 }

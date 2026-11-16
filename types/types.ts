@@ -112,6 +112,16 @@ export interface RequestOptions {
 export interface ProductRequestOptions extends RequestOptions {
   /** Vínbúðin's three-digit store code (not its news/article ID). */
   storeCode?: string
+  /**
+   * Products requested per DoSearch page. Defaults to 99999, which keeps
+   * the historical single-request behavior for categories below that size.
+   */
+  pageSize?: number
+  /**
+   * Maximum number of pages fetched for one snapshot; exceeding it rejects
+   * rather than silently truncating. Defaults to 100.
+   */
+  maxPages?: number
 }
 
 export interface ProductSnapshot {
