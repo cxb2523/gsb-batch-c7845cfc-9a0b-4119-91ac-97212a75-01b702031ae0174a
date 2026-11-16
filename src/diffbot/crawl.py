@@ -4,20 +4,28 @@ import asyncio
 import csv
 import io
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from typing import TYPE_CHECKING, Any, AsyncIterator, Dict, Iterator, List, Optional
 
-from .errors import APIError
+from .errors import APIError, CrawlMonitorError, ValidationError
 
 if TYPE_CHECKING:
     from .client import Diffbot, DiffbotAsync
+
+#: Default number of retries for a failing status / URL-list poll in watch mode.
+DEFAULT_CRAWL_MAX_RETRIES = 3
+#: Default delay (seconds) between poll retries in watch mode.
+DEFAULT_CRAWL_RETRY_INTERVAL = 1.0
 
 
 class CrawlEventType(Enum):
     JOB_CREATED = "job_created"
     URL_PROCESSED = "url_processed"
+    #: Emitted once when watch-mode polling gives up after retries are exhausted,
+    #: immediately before CrawlMonitorError is raised.
+    MONITOR_INTERRUPTED = "monitor_interrupted"
 
 
 @dataclass
@@ -26,6 +34,15 @@ class CrawlEvent:
     event_type: CrawlEventType
     timestamp: str
     details: Dict[str, Any]
+
+
+@dataclass
+class _PollOutcome:
+    """Result of one successful poll iteration."""
+    jobs_present: bool
+    status_code: int = 0
+    message: str = ""
+    events: List[CrawlEvent] = field(default_factory=list)
 
 
 def crawl(
@@ -45,9 +62,22 @@ def crawl(
     custom_headers: Optional[str] = None,
     watch: bool = False,
     poll_interval: float = 2.0,
+    max_retries: int = DEFAULT_CRAWL_MAX_RETRIES,
+    retry_interval: float = DEFAULT_CRAWL_RETRY_INTERVAL,
 ) -> Iterator[CrawlEvent]:
     """Create a crawler job and yield a JOB_CREATED event. If watch=True, poll until
-    completion and yield URL_PROCESSED events for each crawled URL."""
+    completion and yield URL_PROCESSED events for each crawled URL.
+
+    While watching, a failed status query or URL-list download does not abort the
+    generator immediately: the poll is retried up to ``max_retries`` times, waiting
+    ``retry_interval`` seconds between attempts. If every attempt fails, a
+    MONITOR_INTERRUPTED event is yielded (so the interruption shows up in the event
+    stream) and :class:`CrawlMonitorError` is raised; events yielded before the
+    interruption are unaffected. A job that the API reports as failed still raises
+    :class:`APIError`.
+    """
+    _validate_watch_options(max_retries, retry_interval)
+
     if not site.startswith("http"):
         site = f"https://{site}"
     if not job_name:
@@ -73,34 +103,96 @@ def crawl(
     seen_urls: set = set()
 
     while True:
-        status_response = client._http.get(
-            client.crawler_url,
-            params={"token": client.token, "name": job_name},
-        )
-        client._raise_for_status(status_response)
-        jobs = status_response.json().get("jobs", [])
-        if not jobs:
+        try:
+            outcome = _poll_with_retries(
+                client, job_name, seen_urls, max_retries, retry_interval,
+            )
+        except CrawlMonitorError:
+            yield _monitor_interrupted_event(job_name)
+            raise
+
+        if not outcome.jobs_present:
             break
-        job_status = jobs[0].get("jobStatus", {})
-        status_code = job_status.get("status", 0)
 
-        urls_response = client._http.get(
-            f"{client.crawler_url}/data",
-            params={"token": client.token, "name": job_name, "type": "urls"},
-            follow_redirects=True,
-        )
-        client._raise_for_status(urls_response)
-        if urls_response.content:
-            for event in _parse_url_csv(urls_response.text, seen_urls):
-                yield event
+        for event in outcome.events:
+            yield event
 
-        if status_code not in (0, 7):
-            message = job_status.get("message", "")
-            if "fail" in message.lower() or "error" in message.lower():
-                raise APIError(500, f"Crawler job failed: {message}")
+        if outcome.status_code not in (0, 7):
+            if "fail" in outcome.message.lower() or "error" in outcome.message.lower():
+                raise APIError(500, f"Crawler job failed: {outcome.message}")
             break
 
         time.sleep(poll_interval)
+
+
+def _validate_watch_options(max_retries: int, retry_interval: float) -> None:
+    if max_retries < 0:
+        raise ValidationError("max_retries must be >= 0")
+    if retry_interval < 0:
+        raise ValidationError("retry_interval must be >= 0")
+
+
+def _monitor_interrupted_event(job_name: str) -> CrawlEvent:
+    return CrawlEvent(
+        event_type=CrawlEventType.MONITOR_INTERRUPTED,
+        timestamp=datetime.now().isoformat(),
+        details={"job_name": job_name, "reason": "poll retries exhausted"},
+    )
+
+
+def _poll_once(
+    client: "Diffbot", job_name: str, seen_urls: set,
+) -> _PollOutcome:
+    """Perform one status + URL-list poll. Raises on any transport/API failure."""
+    status_response = client._http.get(
+        client.crawler_url,
+        params={"token": client.token, "name": job_name},
+    )
+    client._raise_for_status(status_response)
+    jobs = status_response.json().get("jobs", [])
+    if not jobs:
+        return _PollOutcome(jobs_present=False)
+
+    job_status = jobs[0].get("jobStatus", {})
+    status_code = job_status.get("status", 0)
+    message = job_status.get("message", "")
+
+    urls_response = client._http.get(
+        f"{client.crawler_url}/data",
+        params={"token": client.token, "name": job_name, "type": "urls"},
+        follow_redirects=True,
+    )
+    client._raise_for_status(urls_response)
+    events: List[CrawlEvent] = []
+    if urls_response.content:
+        events = _parse_url_csv(urls_response.text, seen_urls)
+
+    return _PollOutcome(
+        jobs_present=True,
+        status_code=status_code,
+        message=message,
+        events=events,
+    )
+
+
+def _poll_with_retries(
+    client: "Diffbot",
+    job_name: str,
+    seen_urls: set,
+    max_retries: int,
+    retry_interval: float,
+) -> _PollOutcome:
+    """Poll once, retrying transient failures up to ``max_retries`` times."""
+    last_error: Optional[BaseException] = None
+    # The initial attempt plus max_retries retries.
+    for attempt in range(max_retries + 1):
+        try:
+            return _poll_once(client, job_name, seen_urls)
+        except Exception as exc:  # noqa: BLE001 - any request failure is retryable
+            last_error = exc
+            if attempt < max_retries:
+                time.sleep(retry_interval)
+    raise CrawlMonitorError(job_name, max_retries + 1, last_error) from last_error  # type: ignore[arg-type]
 
 
 def _build_crawl_params(client: Any, job_name: str, site: str, max_to_crawl: int,
@@ -166,7 +258,12 @@ async def crawl_async(
     custom_headers: Optional[str] = None,
     watch: bool = False,
     poll_interval: float = 2.0,
+    max_retries: int = DEFAULT_CRAWL_MAX_RETRIES,
+    retry_interval: float = DEFAULT_CRAWL_RETRY_INTERVAL,
 ) -> AsyncIterator[CrawlEvent]:
+    """Async counterpart of :func:`crawl` with the same watch-mode retry semantics."""
+    _validate_watch_options(max_retries, retry_interval)
+
     if not site.startswith("http"):
         site = f"https://{site}"
     if not job_name:
@@ -192,34 +289,81 @@ async def crawl_async(
     seen_urls: set = set()
 
     while True:
-        status_response = await client._http.get(
-            client.crawler_url,
-            params={"token": client.token, "name": job_name},
-        )
-        client._raise_for_status(status_response)
-        jobs = status_response.json().get("jobs", [])
-        if not jobs:
+        try:
+            outcome = await _poll_with_retries_async(
+                client, job_name, seen_urls, max_retries, retry_interval,
+            )
+        except CrawlMonitorError:
+            yield _monitor_interrupted_event(job_name)
+            raise
+
+        if not outcome.jobs_present:
             break
-        job_status = jobs[0].get("jobStatus", {})
-        status_code = job_status.get("status", 0)
 
-        urls_response = await client._http.get(
-            f"{client.crawler_url}/data",
-            params={"token": client.token, "name": job_name, "type": "urls"},
-            follow_redirects=True,
-        )
-        client._raise_for_status(urls_response)
-        if urls_response.content:
-            for event in _parse_url_csv(urls_response.text, seen_urls):
-                yield event
+        for event in outcome.events:
+            yield event
 
-        if status_code not in (0, 7):
-            message = job_status.get("message", "")
-            if "fail" in message.lower() or "error" in message.lower():
-                raise APIError(500, f"Crawler job failed: {message}")
+        if outcome.status_code not in (0, 7):
+            if "fail" in outcome.message.lower() or "error" in outcome.message.lower():
+                raise APIError(500, f"Crawler job failed: {outcome.message}")
             break
 
         await asyncio.sleep(poll_interval)
+
+
+async def _poll_once_async(
+    client: "DiffbotAsync", job_name: str, seen_urls: set,
+) -> _PollOutcome:
+    """Async counterpart of :func:`_poll_once`."""
+    status_response = await client._http.get(
+        client.crawler_url,
+        params={"token": client.token, "name": job_name},
+    )
+    client._raise_for_status(status_response)
+    jobs = status_response.json().get("jobs", [])
+    if not jobs:
+        return _PollOutcome(jobs_present=False)
+
+    job_status = jobs[0].get("jobStatus", {})
+    status_code = job_status.get("status", 0)
+    message = job_status.get("message", "")
+
+    urls_response = await client._http.get(
+        f"{client.crawler_url}/data",
+        params={"token": client.token, "name": job_name, "type": "urls"},
+        follow_redirects=True,
+    )
+    client._raise_for_status(urls_response)
+    events: List[CrawlEvent] = []
+    if urls_response.content:
+        events = _parse_url_csv(urls_response.text, seen_urls)
+
+    return _PollOutcome(
+        jobs_present=True,
+        status_code=status_code,
+        message=message,
+        events=events,
+    )
+
+
+async def _poll_with_retries_async(
+    client: "DiffbotAsync",
+    job_name: str,
+    seen_urls: set,
+    max_retries: int,
+    retry_interval: float,
+) -> _PollOutcome:
+    """Async counterpart of :func:`_poll_with_retries`."""
+    last_error: Optional[BaseException] = None
+    # The initial attempt plus max_retries retries.
+    for attempt in range(max_retries + 1):
+        try:
+            return await _poll_once_async(client, job_name, seen_urls)
+        except Exception as exc:  # noqa: BLE001 - any request failure is retryable
+            last_error = exc
+            if attempt < max_retries:
+                await asyncio.sleep(retry_interval)
+    raise CrawlMonitorError(job_name, max_retries + 1, last_error) from last_error  # type: ignore[arg-type]
 
 
 async def crawl_list_jobs_async(client: "DiffbotAsync") -> List[Dict[str, Any]]:

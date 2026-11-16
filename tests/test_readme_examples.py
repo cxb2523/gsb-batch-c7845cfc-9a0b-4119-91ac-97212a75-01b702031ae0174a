@@ -124,6 +124,30 @@ def test_readme_sync_crawl():
     assert events[0].event_type == CrawlEventType.JOB_CREATED
 
 
+def test_readme_sync_crawl_watch_interruption():
+    from diffbot import CrawlMonitorError
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "seeds" in request.url.params:
+            return httpx.Response(200, json={"jobs": [{"name": "test-job"}]})
+        raise httpx.ConnectError("offline")
+
+    db = Diffbot(token="test-token", transport=httpx.MockTransport(handler))
+    seen = []
+    with pytest.raises(CrawlMonitorError) as exc_info:
+        for event in db.crawl(
+            "https://www.example.com",
+            job_name="test-job",
+            watch=True,
+            poll_interval=0,
+            max_retries=5,
+            retry_interval=0,
+        ):
+            seen.append(event)
+    assert exc_info.value.attempts == 6
+    assert seen[-1].event_type == CrawlEventType.MONITOR_INTERRUPTED
+
+
 def test_readme_sync_dql():
     def handler(request: httpx.Request) -> httpx.Response:
         assert "Diffbot" in request.url.params["query"]

@@ -3,7 +3,6 @@
 import json
 from typing import Optional
 
-
 class DiffbotError(Exception):
     """Base class for all Diffbot SDK errors."""
 
@@ -49,3 +48,24 @@ class ExtractionError(DiffbotError):
         self.error_code = error_code
         self.error = error
         super().__init__(f"Diffbot extraction error {error_code}: {error}")
+
+
+class CrawlMonitorError(DiffbotError):
+    """Watch-mode polling for a crawler job was interrupted.
+
+    Raised by ``crawl(..., watch=True)`` / ``crawl_async(..., watch=True)``
+    when a status or URL-list request keeps failing after the configured
+    number of retries. The crawler job itself is still running on Diffbot's
+    side; only the local monitoring stopped. Events already yielded before
+    the interruption remain valid, and the last underlying error is kept on
+    ``__cause__`` as well as on ``last_error``.
+    """
+
+    def __init__(self, job_name: str, attempts: int, last_error: BaseException):
+        self.job_name = job_name
+        self.attempts = attempts
+        self.last_error = last_error
+        super().__init__(
+            f"Crawl monitoring for job {job_name!r} was interrupted after "
+            f"{attempts} failed attempt(s): {last_error}"
+        )

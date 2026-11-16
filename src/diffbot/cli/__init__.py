@@ -3,6 +3,7 @@ import re
 import sys
 import textwrap
 from email.utils import parsedate_to_datetime
+from typing import Optional
 
 import click
 from rich.console import Console
@@ -15,6 +16,7 @@ from diffbot import (
     __version__,
     CrawlEventType,
     AuthError,
+    CrawlMonitorError,
     ExtractionError,
     APIError,
     ValidationError,
@@ -213,6 +215,7 @@ def crawl(site, hops, job_name, max_to_crawl, max_to_process, restrict_domain,
     """Crawl a website using the Diffbot Crawler API."""
     db = get_client()
     events = []
+    monitor_error: Optional[CrawlMonitorError] = None
     try:
         with Progress(SpinnerColumn(), TextColumn("[progress.description]{task.description}"), transient=True) as progress:
             progress.add_task(description=f"Crawling {site}...", total=None)
@@ -240,32 +243,49 @@ def crawl(site, hops, job_name, max_to_crawl, max_to_process, restrict_domain,
                     status = event.details.get("status", "")
                     icon = "✓" if status == "Success" else "!"
                     progress.console.print(f"  [{icon}] {event.details['url']}")
-
-        if fmt == "json":
-            output_str = json.dumps(
-                [{"event_type": e.event_type.value, "timestamp": e.timestamp, "details": e.details} for e in events],
-                indent=2,
-            )
-        else:
-            lines = []
-            for event in events:
-                if event.event_type == CrawlEventType.JOB_CREATED:
-                    lines.append(f"# Job: {event.details['job_name']}\n")
-                elif event.event_type == CrawlEventType.URL_PROCESSED:
-                    lines.append(f"- [{event.details.get('status', 'unknown')}] {event.details['url']}")
-            output_str = "\n".join(lines)
-
-        if output:
-            with open(output, "w") as f:
-                f.write(output_str)
-            click.echo(f"Output written to {output}")
-        else:
-            print_markdown(output_str)
+                elif event.event_type == CrawlEventType.MONITOR_INTERRUPTED:
+                    progress.console.print(
+                        f"[yellow]Monitoring interrupted for job {event.details['job_name']}; "
+                        "keeping the events collected so far.[/yellow]"
+                    )
+    except CrawlMonitorError as e:
+        monitor_error = e
+        click.echo(
+            f"Warning: monitoring of crawl job {e.job_name!r} was interrupted after "
+            f"{e.attempts} failed attempt(s); writing the {len(events)} event(s) collected so far.",
+            err=True,
+        )
     except AuthError:
         click.echo("Error: Invalid or unauthorized API token.", err=True)
         raise click.Abort()
     except APIError as e:
         click.echo(f"API error {e.status_code}: {e.message or e.body}", err=True)
+        raise click.Abort()
+
+    if fmt == "json":
+        output_str = json.dumps(
+            [{"event_type": e.event_type.value, "timestamp": e.timestamp, "details": e.details} for e in events],
+            indent=2,
+        )
+    else:
+        lines = []
+        for event in events:
+            if event.event_type == CrawlEventType.JOB_CREATED:
+                lines.append(f"# Job: {event.details['job_name']}\n")
+            elif event.event_type == CrawlEventType.URL_PROCESSED:
+                lines.append(f"- [{event.details.get('status', 'unknown')}] {event.details['url']}")
+            elif event.event_type == CrawlEventType.MONITOR_INTERRUPTED:
+                lines.append(f"# Monitoring interrupted: {event.details.get('reason', '')}")
+        output_str = "\n".join(lines)
+
+    if output:
+        with open(output, "w") as f:
+            f.write(output_str)
+        click.echo(f"Output written to {output}")
+    else:
+        print_markdown(output_str)
+
+    if monitor_error is not None:
         raise click.Abort()
 
 

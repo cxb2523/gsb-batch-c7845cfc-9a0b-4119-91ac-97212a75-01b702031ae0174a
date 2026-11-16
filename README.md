@@ -171,6 +171,26 @@ for event in db.crawl("https://www.example.com", hops=1):
     print(event)
 ```
 
+Pass `watch=True` to poll the job until it finishes and receive `URL_PROCESSED`
+events as pages are crawled. A transient failure of a status or URL-list request
+is retried rather than killing the generator: `max_retries` (default 3) controls
+how many retries follow the initial attempt and `retry_interval` (default 1.0s)
+controls the wait between them. If every attempt fails, the events already
+yielded are kept, a final `MONITOR_INTERRUPTED` event is emitted, and
+`CrawlMonitorError` is raised — the job itself keeps running on Diffbot's side.
+A job that the API reports as failed still raises `APIError`.
+
+```python
+from diffbot import CrawlMonitorError
+
+try:
+    for event in db.crawl("https://www.example.com", watch=True,
+                          max_retries=5, retry_interval=2.0):
+        print(event)
+except CrawlMonitorError as e:
+    print(f"monitoring stopped after {e.attempts} attempts: {e.last_error}")
+```
+
 ### Query the Knowledge Graph
 ```python
 from diffbot import Diffbot

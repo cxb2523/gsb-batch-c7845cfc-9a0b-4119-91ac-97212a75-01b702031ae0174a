@@ -39,6 +39,7 @@ from .crawl import CrawlEvent, CrawlEventType
 from .errors import (
     APIError,
     AuthError,
+    CrawlMonitorError,
     DiffbotError,
     ExtractionError,
     RateLimitError,
@@ -59,5 +60,6 @@ __all__ = [
     "ExtractionError",
     "RateLimitError",
     "APIError",
+    "CrawlMonitorError",
     "ValidationError",
 ]

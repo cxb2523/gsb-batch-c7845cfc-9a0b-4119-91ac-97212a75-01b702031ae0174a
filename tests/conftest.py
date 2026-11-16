@@ -3,6 +3,13 @@ import pytest
 from diffbot import Diffbot, resolve_token
 
 
+@pytest.fixture
+def anyio_backend():
+    # The SDK's async code is built on asyncio (e.g. asyncio.sleep), so only
+    # run the anyio-marked tests against the asyncio backend.
+    return "asyncio"
+
+
 @pytest.fixture(scope="session")
 def live_token():
     token = resolve_token()
