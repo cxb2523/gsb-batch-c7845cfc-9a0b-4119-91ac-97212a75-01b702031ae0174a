@@ -10,6 +10,11 @@ worker has to answer, otherwise through the browser's own network stack.
 Measured on real retrievals: the bytes of a rendered image read back from the browser are
 identical to a fresh download, also for service-worker replays (Perma.cc, Ghostarchive),
 and take tens of milliseconds where a second download took seconds.
+
+A medium that cannot be had leaves exactly one info line behind (see `_Trace` and
+`BrowserMedia._settle()`): the host, the strategies tried in turn (loaded, stashed,
+frame, network, http) and how each ended -- HTTP 403, no answer within the budget, too
+large. A medium that comes back logs nothing extra.
 """
 
 import asyncio
@@ -29,7 +34,7 @@ from yarl import URL
 from scrapemm.server.download.common import HEADERS
 from scrapemm.server import budget
 from scrapemm.server.download.requests import MEDIA_TIMEOUT
-from scrapemm.server.download.util import media_kind, report_omitted, stream
+from scrapemm.server.download.util import MediaTooLarge, media_kind, report_omitted, stream
 
 from scrapemm.server.download.images import decode_image
 from scrapemm.server.download.videos import video_from_binary, download_hls_video, is_hls
@@ -87,9 +92,9 @@ if (!window.__scrapemmStash) {
         return { ok: false, reason: 'not a video' };
       }
       const length = parseInt(res.headers.get('content-length') || '', 10);
-      if (opts.limit && length > opts.limit) return { ok: false, reason: 'too large' };
+      if (opts.limit && length > opts.limit) return { ok: false, reason: 'too large', size: length, type };
       const blob = await res.blob();
-      if (opts.limit && blob.size > opts.limit) return { ok: false, reason: 'too large' };
+      if (opts.limit && blob.size > opts.limit) return { ok: false, reason: 'too large', size: blob.size, type };
       if (opts.minSize && blob.size < opts.minSize) return { ok: false, reason: 'too small' };
       const id = String(++seq);
       window.__scrapemmBlobs[id] = { blob, type: blob.type || type };
@@ -161,13 +166,25 @@ async def annotate_rendered_media(target) -> None:
         await target.evaluate(_ANNOTATE_JS)
 
 
-async def read_stashed(frame: MediaSource, blob_id: str,
-                       limit: Optional[int] = None) -> tuple[Optional[bytes], Optional[str]]:
+async def read_stashed(frame: MediaSource, blob_id: str, limit: Optional[int] = None,
+                       trace: Optional["_Trace"] = None, label: str = "stashed",
+                       url: Optional[str] = None) -> tuple[Optional[bytes], Optional[str]]:
     """Reads a Blob kept by `window.__scrapemmStash()` out of the frame, chunk by chunk,
-    and releases it. Returns (content, content type), or (None, None)."""
+    and releases it. Returns (content, content type), or (None, None). A Blob over `limit`
+    is reported as left out (see `report_omitted()`) under `url`, if given."""
     try:
         info = await frame.evaluate(_BLOB_INFO_JS, blob_id)
-        if not info or not info["size"] or (limit and info["size"] > limit):
+        if not info or not info["size"]:
+            if trace is not None:
+                trace.step(label, "no such Blob in the frame")
+            return None, None
+        if limit and info["size"] > limit:
+            if url:
+                report_omitted(url, limit, info["size"],
+                               kind=media_kind(info.get("type")))
+            if trace is not None:
+                trace.step(label, f"too large ({info['size']} bytes > limit {limit})")
+                trace.omit()
             return None, None
         chunks = []
         for start in range(0, info["size"], READ_CHUNK):
@@ -175,11 +192,16 @@ async def read_stashed(frame: MediaSource, blob_id: str,
             data = await asyncio.wait_for(frame.evaluate(
                 _BLOB_READ_JS, {"id": blob_id, "start": start, "end": end}), timeout=60)
             if data is None:
+                if trace is not None:
+                    trace.step(label, "the Blob vanished while it was read")
                 return None, None
             chunks.append(base64.b64decode(data))
+        if trace is not None:
+            trace.step(label, f"{info['size']} bytes")
         return b"".join(chunks), info.get("type")
-    except Exception:
-        logger.debug(f"Could not read the stashed medium {blob_id}", exc_info=True)
+    except Exception as e:
+        if trace is not None:
+            trace.step(label, _outcome(e, 60))
         return None, None
     finally:
         with suppress(Exception):
@@ -193,14 +215,91 @@ def _header(headers: dict, name: str) -> Optional[str]:
     return None
 
 
-def _too_large(headers: dict, limit: Optional[int], url: str) -> bool:
+def _too_large(headers: dict, limit: Optional[int], url: str,
+               trace: Optional["_Trace"] = None, strategy: str = "") -> bool:
     """Whether the response announces more than `limit` bytes; if so, the medium is
-    reported as left out (see `report_omitted()`)."""
+    reported as left out (see `report_omitted()`) and the trace records where that was
+    seen, so that no later strategy fetches the same medium again."""
     length = _header(headers, "content-length")
     if limit and length and length.isdigit() and int(length) > limit:
         report_omitted(url, limit, int(length), kind=media_kind(_header(headers, "content-type")))
+        if trace is not None:
+            trace.step(strategy, f"too large ({int(length)} bytes > limit {limit})")
+            trace.omit()
         return True
     return False
+
+
+def _host_of(url: str, *documents: Optional[str]) -> str:
+    """The host a medium belongs to, for the settlement log: its URL's own, or -- for a
+    Blob that exists only inside a frame -- the host of the document holding it."""
+    host = "" if url.startswith(BLOB_SCHEME) else urlparse(url).netloc
+    if not host:
+        for document in documents:
+            if isinstance(document, str) and document.startswith(("http://", "https://")):
+                if host := urlparse(document).netloc:
+                    break
+    return host or "unknown host"
+
+
+def _outcome(error: BaseException, timeout: float) -> str:
+    """How a strategy ended, for the trace: a timeout says so, everything else by name."""
+    if isinstance(error, TimeoutError):
+        return f"no answer within {timeout:.0f} s"
+    return f"{type(error).__name__}: {error}"
+
+
+class _Trace:
+    """How the retrieval of one medium went: every strategy tried, in the order tried,
+    and how each ended. Collected for a single medium only, and rendered only if that
+    medium is finally dropped -- one info line that says whether it was a rate limit, a
+    timeout or the size limit (`BrowserMedia._settle()`). A medium that comes back logs
+    nothing extra.
+
+    `pending` names the strategy that is running, so a timeout can say which one was cut
+    off rather than losing it from the account."""
+
+    def __init__(self, url: str):
+        self.url = url
+        self.candidate = url  # The URL whose strategies are being tried now
+        self.steps: list[tuple[str, str, str]] = []  # (strategy, candidate, outcome)
+        self.pending: Optional[str] = None
+        self.oversize = False  # The medium exceeded its size limit: no further attempts
+        self.skipped = False  # The retrieval's time was up before the medium was tried
+
+    def begin(self, strategy: str) -> None:
+        self.pending = strategy
+
+    def step(self, strategy: str, outcome: Optional[str] = None) -> None:
+        self.steps.append((strategy, self.candidate, outcome or "failed"))
+        if self.pending == strategy:
+            self.pending = None
+
+    def cut_off(self, reason: str) -> None:
+        """Records that the medium's time ran out: on the strategy that was still
+        running, or on the medium itself if it ran out between two strategies. One that
+        already reported its own timeout is not recorded twice."""
+        if self.pending is not None:
+            self.steps.append((self.pending, self.candidate, reason))
+            self.pending = None
+        elif not self.steps or self.steps[-1][2] != reason:
+            self.steps.append(("budget", self.candidate, reason))
+
+    def omit(self) -> None:
+        """The medium exceeded its size limit: the remaining strategies are not tried
+        for it, so that a size limit is never worked around by another attempt."""
+        self.oversize = True
+
+    def render(self, host: str) -> str:
+        tried = []
+        for strategy, candidate, outcome in self.steps:
+            where = f" ({candidate[:80]})" if candidate != self.url else ""
+            tried.append(f"{strategy}{where}: {outcome}")
+        body = "; ".join(tried) if tried else "nothing was tried"
+        # Over the size limit is not "could not be had": the file is simply too large for
+        # the result, and says so instead of leaving a failure to guess at
+        verdict = "Left out" if self.oversize else "Dropped"
+        return f"{verdict} the medium {self.url[:150]} from {host}: {body}."
 
 
 class BrowserMedia:
@@ -218,7 +317,6 @@ class BrowserMedia:
         self._http: Optional[aiohttp.ClientSession] = None  # See `_http_session()`
         self._cookie_hosts: set[str] = set()
         self.stats: Counter = Counter()  # Where the media came from, for the log
-        self._last_failure: dict[str, str] = {}  # Why fetching a medium failed, by URL
         try:
             page.on("response", self._record)
         except Exception:
@@ -323,27 +421,40 @@ class BrowserMedia:
                            max_size: Optional[int], source_url: Optional[str],
                            timeout: float) -> Optional[Video]:
         limit = max_size or MAX_VIDEO_BYTES
-        content, content_type = await self.get(url, frame, limit, fallback, timeout)
+        trace = _Trace(url)
+        content, content_type = await self.get(url, frame, limit, fallback, timeout, trace=trace)
 
-        if content is None and (capture := await _nearest_wayback_video(self.page, url)):
+        if content is None and not trace.oversize and not trace.skipped and \
+                (capture := await _nearest_wayback_video(self.page, url)):
             logger.debug(f"{url} does not replay; using the capture {capture} instead.")
-            content, content_type = await self.get(capture, frame, limit, timeout=timeout)
+            content, content_type = await self.get(capture, frame, limit, timeout=timeout,
+                                                   trace=trace)
 
         # HLS playlists are plain text manifests, not raw video: remux via ffmpeg. The
         # segments are downloaded directly, with the browser's cookies: through
         # Playwright's request context, each segment blocked the event loop (READ_CHUNK)
         if content_type and is_hls(content_type) and not url.startswith(BLOB_SCHEME):
-            return await download_hls_video(url, session=await self._http_session(url),
-                                            max_video_size=max_size)
+            video = await download_hls_video(url, session=await self._http_session(url),
+                                             max_video_size=max_size)
+            if video is None:
+                # The playlist was had, the video could not be assembled from it; its own
+                # log line says why. This one still names the medium and how it went
+                trace.step("hls", "the video could not be assembled from its playlist")
+                self._settle(trace, frame)
+            return video
 
         if not content:
+            # One line for the medium as a whole, including a Wayback capture tried after it
+            if not trace.skipped:
+                self._settle(trace, frame)
             return None
         # Writes the file: off the event loop
         return await asyncio.to_thread(video_from_binary, content, source_url or url)
 
     async def get(self, url: str, frame: Optional[MediaSource] = None,
                   limit: Optional[int] = None, fallback: Optional[str] = None,
-                  timeout: float = 180.0) -> tuple[Optional[bytes], Optional[str]]:
+                  timeout: float = 180.0,
+                  trace: Optional["_Trace"] = None) -> tuple[Optional[bytes], Optional[str]]:
         """Returns (content, content type) of the medium at `url`, or (None, None).
         `fallback` is another URL of the same medium, typically the one the browser
         rendered (`CURRENT_ATTR`). For each URL, the browser's own copy comes first, then
@@ -352,15 +463,31 @@ class BrowserMedia:
         On a live page, `url` is fetched before the fallback's copy is taken: the two are
         usually different srcset variants, and `url` is the larger one. In a replay
         archive, both name the same archived file, so any copy the browser has is taken
-        before anything is fetched."""
-        found = await self._get(url, frame, limit, fallback, timeout)
+        before anything is fetched.
+
+        A trace passed in collects the steps for a caller that settles several calls as
+        one medium (see `_fetch_video()`); otherwise the medium is settled here."""
+        own = trace is None
+        trace = trace if trace is not None else _Trace(url)
+        found = await self._get(url, frame, limit, fallback, timeout, trace)
         if not found[0]:
             # An archived capture's result without it is not kept for good
             from scrapemm.server.cache import note_failed_medium
             for candidate in (url, fallback):
                 if candidate:
                     note_failed_medium(candidate, self._page_url())
+        if own and not found[0] and not trace.skipped:
+            self._settle(trace, frame)
         return found
+
+    def _settle(self, trace: "_Trace", frame: Optional[MediaSource] = None) -> None:
+        """Accounts for one medium that is finally dropped: a single info line with the
+        host, every strategy tried in turn and how each ended -- whether the site
+        throttled it, the browser's stream broke off, or the size limit was hit. A
+        medium that was taken successfully logs nothing here."""
+        host = _host_of(trace.url, getattr(frame, "url", None), self._page_url())
+        self.stats["omitted" if trace.oversize else "failed"] += 1
+        logger.info(trace.render(host))
 
     def _page_url(self) -> Optional[str]:
         return getattr(self.page, "url", None)
@@ -386,10 +513,12 @@ class BrowserMedia:
                 await immutable.keep_item(candidate, item, self._page_url(), variant)
 
     async def _get(self, url: str, frame: Optional[MediaSource], limit: Optional[int],
-                   fallback: Optional[str], timeout: float) -> tuple[Optional[bytes], Optional[str]]:
+                   fallback: Optional[str], timeout: float,
+                   trace: "_Trace") -> tuple[Optional[bytes], Optional[str]]:
         timeout = budget.cap(timeout)  # No longer than the retrieval has time for
         if timeout <= 0:
             self.stats["skipped"] += 1
+            trace.skipped = True
             return None, None  # The retrieval's time is up: the page comes back without it
         steps = [(self._copy, url), (self._fetch, url)]
         if fallback and fallback != url:
@@ -403,65 +532,89 @@ class BrowserMedia:
         try:
             async with asyncio.timeout(timeout):
                 for step, candidate in steps:
-                    if found := await step(candidate, frame, limit, timeout):
+                    if trace.oversize:
+                        break  # Over the size limit: no other attempt may get around it
+                    trace.candidate = candidate
+                    if found := await step(candidate, frame, limit, timeout, trace):
                         return found
         except TimeoutError:
-            self._last_failure[url] = f"no answer within {timeout:.0f} s"
-
-        # Visible at info level: a medium silently missing from a result is hard to trace
-        # (archive.org once stopped serving an image its index still listed, HTTP 404)
-        reason = self._last_failure.get(url) or (fallback and self._last_failure.get(fallback))
-        logger.info(f"Dropped the medium {url[:150]}: "
-                    f"{reason or 'the browser has no copy and could not fetch it'}.")
-        self.stats["failed"] += 1
+            trace.cut_off(f"no answer within {timeout:.0f} s")
         return None, None
 
     async def _copy(self, url: str, frame: Optional[MediaSource], limit: Optional[int],
-                    _timeout: float) -> Optional[tuple[bytes, Optional[str]]]:
+                    _timeout: float,
+                    trace: Optional["_Trace"] = None) -> Optional[tuple[bytes, Optional[str]]]:
         """A copy the browser holds already: a Blob stashed in the frame, or a response
         the page received."""
         if url.startswith(BLOB_SCHEME):
+            label = "stashed"
+            if trace is not None:
+                trace.begin(label)
             if frame is None:
+                if trace is not None:
+                    trace.step(label, "no frame to read it from")
                 return None
-            content, content_type = await read_stashed(frame, url[len(BLOB_SCHEME):], limit)
+            content, content_type = await read_stashed(frame, url[len(BLOB_SCHEME):], limit,
+                                                       trace, label)
             if not content:
                 return None
             self.stats["stashed"] += 1
             return content, content_type
-        if found := await self._from_loaded(url, limit):
+        if trace is not None:
+            trace.begin("loaded")
+        found = await self._from_loaded(url, limit, trace)
+        if found:
             self.stats["loaded"] += 1
         return found
 
-    async def _from_loaded(self, url: str, limit: Optional[int]) -> Optional[tuple[bytes, Optional[str]]]:
+    async def _from_loaded(self, url: str, limit: Optional[int],
+                           trace: Optional["_Trace"] = None) -> Optional[tuple[bytes, Optional[str]]]:
         """The bytes of a response the page already received. If the browser is still
         receiving it, waits for that instead of starting a second download."""
         response = self._loaded.get(url)
-        if response is None or _too_large(response.headers, limit, url):
+        if response is None:
+            if trace is not None:
+                trace.step("loaded", "the browser has no copy")
+            return None
+        if _too_large(response.headers, limit, url, trace, "loaded"):
             return None
         # One message: only for bodies known to be small (see MAX_BODY_MESSAGE). Images
         # of unknown size are small in practice; a video of unknown size is not.
         length = _header(response.headers, "content-length")
         if length and length.isdigit():
             if int(length) > MAX_BODY_MESSAGE:
+                if trace is not None:
+                    trace.step("loaded", f"not read in one message ({int(length)} bytes)")
                 return None
         elif not (response.headers.get("content-type", "").startswith("image/")
                   or response.request.resource_type == "image"):
+            if trace is not None:
+                trace.step("loaded", "size unknown, not read in one message")
             return None
         try:
             body = await asyncio.wait_for(response.body(), timeout=LOADED_BODY_TIMEOUT)
         except Exception as e:
-            logger.debug(f"The browser's copy of {url} is not available: {e}")
+            if trace is not None:
+                trace.step("loaded", _outcome(e, LOADED_BODY_TIMEOUT))
             return None
         if not body:
+            if trace is not None:
+                trace.step("loaded", "empty body")
             return None
         if limit and len(body) > limit:
             report_omitted(url, limit, len(body),
                            kind=media_kind(response.headers.get("content-type")))
+            if trace is not None:
+                trace.step("loaded", f"too large ({len(body)} bytes > limit {limit})")
+                trace.omit()
             return None
+        if trace is not None:
+            trace.step("loaded", f"{len(body)} bytes")
         return body, response.headers.get("content-type")
 
     async def _fetch(self, url: str, frame: Optional[MediaSource], limit: Optional[int],
-                     timeout: float) -> Optional[tuple[bytes, Optional[str]]]:
+                     timeout: float,
+                     trace: Optional["_Trace"] = None) -> Optional[tuple[bytes, Optional[str]]]:
         """Fetches through the browser. In-frame first where that works: in a replay
         frame (whose service worker or rewriting only in-frame requests reach) or for
         same-origin media. Elsewhere, an in-frame fetch fails on CORS for nearly every
@@ -470,11 +623,15 @@ class BrowserMedia:
             return None  # Exists only inside the frame, see `_copy()`
         strategies = [("network", self._from_network), ("http", self._from_http)]
         if frame is not None:
-            in_frame = ("frame", lambda u, l, t: self._from_frame(frame, u, l, t))
+            in_frame = ("frame", lambda u, l, t, tr: self._from_frame(frame, u, l, t, tr))
             first = _same_origin(url, frame.url) or await self._is_replay_frame(frame)
             strategies.insert(0 if first else 1, in_frame)
         for name, strategy in strategies:
-            if found := await strategy(url, limit, timeout):
+            if trace is not None:
+                if trace.oversize:
+                    return None  # Over the size limit: no other attempt may get around it
+                trace.begin(name)
+            if found := await strategy(url, limit, timeout, trace):
                 self.stats[name] += 1
                 return found
         return None
@@ -488,17 +645,27 @@ class BrowserMedia:
         return self._replay_frames[frame]
 
     async def _from_frame(self, frame: MediaSource, url: str, limit: Optional[int],
-                          timeout: float) -> Optional[tuple[bytes, Optional[str]]]:
+                          timeout: float,
+                          trace: Optional["_Trace"] = None) -> Optional[tuple[bytes, Optional[str]]]:
+        label = "frame"
         try:
             result = await asyncio.wait_for(
                 frame.evaluate(_FETCH_JS, {"url": url, "opts": {"limit": limit}}), timeout=timeout)
         except Exception as e:
-            logger.debug(f"In-frame fetch of {url} failed: {e}")
+            if trace is not None:
+                trace.step(label, _outcome(e, timeout))
             return None
         if not result or not result.get("ok"):
-            logger.debug(f"In-frame fetch of {url} failed: {(result or {}).get('reason')}")
+            reason = (result or {}).get("reason") or "failed"
+            if trace is not None:
+                trace.step(label, reason)
+                if reason == "too large":
+                    trace.omit()
+            if result and reason == "too large" and limit:
+                report_omitted(url, limit, result.get("size"),
+                               kind=media_kind(result.get("type")))
             return None
-        content, content_type = await read_stashed(frame, result["id"], limit)
+        content, content_type = await read_stashed(frame, result["id"], limit, trace, label, url)
         return (content, content_type or result.get("type")) if content else None
 
     async def _cdp(self):
@@ -513,10 +680,13 @@ class BrowserMedia:
             return self._session
 
     async def _from_network(self, url: str, limit: Optional[int],
-                            timeout: float) -> Optional[tuple[bytes, Optional[str]]]:
+                            timeout: float,
+                            trace: Optional["_Trace"] = None) -> Optional[tuple[bytes, Optional[str]]]:
         """`Network.loadNetworkResource`: the browser's own network stack -- its TLS
         fingerprint, cookies and HTTP cache -- without CORS, streamed in chunks. Bypasses
         service workers, so it cannot replay archived media."""
+        label = "network"
+        retries = 0
         for attempt in range(len(THROTTLE_BACKOFF) + 1):
             try:
                 session = await self._cdp()
@@ -525,8 +695,8 @@ class BrowserMedia:
                     "options": {"disableCache": False, "includeCredentials": True},
                 }), timeout=timeout))["resource"]
             except Exception as e:
-                logger.debug(f"Browser network fetch of {url} failed: {e}")
-                self._last_failure[url] = f"{type(e).__name__}: {e}"
+                if trace is not None:
+                    trace.step(label, _outcome(e, timeout))
                 return None
             status = resource.get("httpStatusCode")
             if status not in THROTTLE_STATUSES or attempt == len(THROTTLE_BACKOFF):
@@ -536,6 +706,7 @@ class BrowserMedia:
                     await session.send("IO.close", {"handle": stream})
             logger.info(f"{urlparse(url).netloc} throttles media (HTTP {status}); retrying "
                         f"{url[:120]} in {THROTTLE_BACKOFF[attempt]:.0f} s.")
+            retries += 1
             await asyncio.sleep(THROTTLE_BACKOFF[attempt])
 
         stream = resource.get("stream")
@@ -543,10 +714,11 @@ class BrowserMedia:
         try:
             if not resource.get("success") or not stream:
                 reason = f"HTTP {resource.get('httpStatusCode')} {resource.get('netErrorName', '')}"
-                logger.debug(f"Browser network fetch of {url} failed: {reason}")
-                self._last_failure[url] = reason.strip()
+                if trace is not None:
+                    trace.step(label, f"{reason.strip()}"
+                                      f"{f' after {retries} retries' if retries else ''}")
                 return None
-            if _too_large(headers, limit, url):
+            if _too_large(headers, limit, url, trace, label):
                 return None
             chunks, size = [], 0
             while True:
@@ -558,12 +730,22 @@ class BrowserMedia:
                 size += len(data)
                 if limit and size > limit:
                     report_omitted(url, limit, kind=media_kind(_header(headers, "content-type")))
+                    if trace is not None:
+                        trace.step(label, f"too large (over the limit of {limit} bytes)")
+                        trace.omit()
                     return None
                 if chunk.get("eof"):
                     break
-            return (b"".join(chunks), _header(headers, "content-type")) if size else None
+            if not size:
+                if trace is not None:
+                    trace.step(label, "empty body")
+                return None
+            if trace is not None:
+                trace.step(label, f"{size} bytes")
+            return b"".join(chunks), _header(headers, "content-type")
         except Exception as e:
-            logger.debug(f"Reading {url} from the browser failed: {e}")
+            if trace is not None:
+                trace.step(label, _outcome(e, 60))
             return None
         finally:
             if stream:
@@ -571,10 +753,12 @@ class BrowserMedia:
                     await session.send("IO.close", {"handle": stream})
 
     async def _from_http(self, url: str, limit: Optional[int],
-                         timeout: float) -> Optional[tuple[bytes, Optional[str]]]:
+                         timeout: float,
+                         trace: Optional["_Trace"] = None) -> Optional[tuple[bytes, Optional[str]]]:
         """A direct download with the browser's user agent and cookies: the last resort,
         as it is not the browser's network stack. Replaces Playwright's request context,
         whose bodies pass through its pipe in one message (see `READ_CHUNK`)."""
+        label = "http"
         try:
             session = await self._http_session(url)
             for attempt in range(len(THROTTLE_BACKOFF) + 1):
@@ -585,19 +769,38 @@ class BrowserMedia:
                                     f"{THROTTLE_BACKOFF[attempt]:.0f} s.")
                         await asyncio.sleep(THROTTLE_BACKOFF[attempt])
                         continue
+                    if response.status in THROTTLE_STATUSES:
+                        # Still throttled after the last pause: not "not at all", but no
+                        # further attempt is made
+                        if trace is not None:
+                            trace.step(label, f"HTTP {response.status} after "
+                                              f"{len(THROTTLE_BACKOFF)} retries")
+                        return None
                     if response.status != 200:
-                        self._last_failure[url] = f"HTTP {response.status}"
+                        if trace is not None:
+                            trace.step(label, f"HTTP {response.status}")
                         return None
-                    if _too_large(dict(response.headers), limit, url):
+                    if _too_large(dict(response.headers), limit, url, trace, label):
                         return None
-                    content = await asyncio.wait_for(stream(response, max_size=limit), timeout=timeout)
+                    try:
+                        content = await asyncio.wait_for(stream(response, max_size=limit),
+                                                         timeout=timeout)
+                    except MediaTooLarge:
+                        if trace is not None:
+                            trace.step(label, f"too large (over the limit of {limit} bytes)")
+                            trace.omit()
+                        return None
                     if not content:
+                        if trace is not None:
+                            trace.step(label, "empty body")
                         return None
+                    if trace is not None:
+                        trace.step(label, f"{len(content)} bytes")
                     return content, response.headers.get("content-type")
             return None
         except Exception as e:
-            logger.debug(f"Direct download of {url} failed: {type(e).__name__}: {e}")
-            self._last_failure[url] = f"{type(e).__name__}: {e}"
+            if trace is not None:
+                trace.step(label, _outcome(e, timeout))
             return None
 
 
