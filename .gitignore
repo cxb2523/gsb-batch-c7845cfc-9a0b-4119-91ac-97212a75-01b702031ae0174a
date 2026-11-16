@@ -1,0 +1,24 @@
+# Python generated files
+__pycache__
+*.pyc
+*.egg-info
+build
+.mypy_cache
+.pytest_cache
+.ruff_cache
+dist/
+
+# Virtual environement
+venv
+
+# VSCode
+.vscode/
+
+# Coverage
+.coverage
+htmlcov/
+
+node_modules
+
+# Btac generated files
+*.btac.bib

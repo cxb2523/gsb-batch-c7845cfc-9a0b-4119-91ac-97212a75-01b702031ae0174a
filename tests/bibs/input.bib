@@ -1,0 +1,148 @@
+@misc{entry_basic,
+  title = {My awesome article},
+  author = {Yours Truly},
+}
+
+@article{entry_basic2,
+  title = {Something},
+  author = {Someone},
+}
+
+@book{empty_entry,
+}
+
+@booklet{almost_empty,
+  note = {This entry shouldn't be queried, no useful data},
+}
+
+@techreport{also_almost_empty,
+  foo = {bar: no standard field at all},
+}
+
+@article{doi,
+  doi = {10.5432/hello},
+}
+
+@inproceedings{giberish,
+  title = {giberish},
+  issn = {not a number},
+  isbn = {also not a number},
+  doi = {invalid format},
+  pages = {not a number},
+  date = {long ago},
+  month = {brumaire},
+  author = {1789},
+}
+
+Outside of entries, text is just a comment
+
+@article{full,
+  title = {Full entry, never queried, but field order changed},
+  booktitle = {full},
+  issn = {not a number},
+  isbn = {also not a number},
+  doi = {invalid format},
+  edition = {full},
+  pages = {not a number},
+  journal = {full},
+  date = {long ago},
+  month = {brumaire},
+  author = {1789},
+  note = {full},
+  organization = {full},
+  volume = {full},
+  url = {present},
+}
+
+@misc{marked,
+  title = {marked entry is not queried},
+  pages = {1--150},
+  journal = {Something},
+  btacqueried = {2024-07-19},
+}
+
+@article{markedbis,
+  title = {marked entry is not queried},
+  doi = {10.22222/123456789},
+  btacqueried = {not necessarily a data},
+}
+
+@misc{all_fields_for_misc,
+  author = {My Guy},
+  title = {Test for filter-by-entrytype},
+  howpublished = {Somehow},
+  month = {June},
+  year = {2015},
+  note = {Shouldn't be queried with "-b all" flag},
+  doi = {10.12345/hello},
+}
+
+@misc{opt_field_for_misc,
+  author = {My Guy},
+  title = {Test for filter-by-entrytype},
+  howpublished = {Somehow},
+  month = {June},
+  year = {2015},
+  note = {Shouldn't be queried with "-b optional" flag, but queried for "-b all"},
+}
+
+@misc{req_field_for_misc,
+  title = {Test for filter-by-entrytype},
+}
+
+@article{entry0,
+  title = {Title of entry 0},
+}
+
+@book{entry1,
+  title = {Title of entry 1},
+}
+
+@booklet{entry2,
+  title = {Title of entry 2},
+}
+
+@conference{entry3,
+  title = {Title of entry 3},
+}
+
+@inbook{entry4,
+  title = {Title of entry 4},
+}
+
+@incollection{entry5,
+  title = {Title of entry 5},
+}
+
+@manual{entry6,
+  title = {Title of entry 6},
+}
+
+@mastersthesis{entry7,
+  title = {Title of entry 7},
+}
+
+@misc{entry8,
+  title = {Title of entry 8},
+}
+
+@techreport{entry9,
+  title = {Title of entry 9},
+}
+
+@unpublished{entry10,
+  title = {Title of entry 10},
+}
+
+@inproceedings{entry11,
+  title = {Title of entry 11},
+}
+
+@phdthesis{entry12,
+  title = {Title of entry 12},
+}
+
+@misc{with_accents,
+  title = {Lots OF accents AnD Capitalization: éàêïæøçÉÀÊÏÆØÇ},
+  author = {Somebody},
+}
