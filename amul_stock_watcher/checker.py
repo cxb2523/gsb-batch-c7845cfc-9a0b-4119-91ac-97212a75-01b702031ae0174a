@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from .api_client import AmulAPIClient
 from .config import Config
@@ -60,10 +60,21 @@ class ProductAvailabilityChecker:
 
         return extracted
 
-    def _create_product_objects(self, raw_products: List[Dict[str, Any]], store: str) -> List[Product]:
+    def _create_product_objects(
+        self, raw_products: List[Dict[str, Any]], store: str
+    ) -> Tuple[List[Product], Set[str]]:
+        """Build Product objects from the raw list response.
+
+        Products whose detail page could not be fetched (``None`` in the
+        detail map) are still returned: detail-only fields fall back to the
+        safe defaults from :meth:`_extract_detailed_info`, while list-level
+        fields (``available``, ``price``, ...) are preserved. The second
+        return value is the set of aliases with missing details.
+        """
         products: List[Product] = []
         aliases = [product.get("alias", "") for product in raw_products if product.get("alias")]
         detailed_info_map = self.api_client.get_product_details_parallel(aliases, max_workers=Config.MAX_WORKERS)
+        missing_aliases: Set[str] = set()
 
         for product in raw_products:
             alias = product.get("alias", "")
@@ -71,6 +82,8 @@ class ProductAvailabilityChecker:
                 continue
 
             detailed_info = detailed_info_map.get(alias)
+            if detailed_info is None:
+                missing_aliases.add(alias)
             info = self._extract_detailed_info(detailed_info)
 
             product_obj = Product(
@@ -84,7 +97,55 @@ class ProductAvailabilityChecker:
             )
             products.append(product_obj)
 
-        return products
+        succeeded = len(products) - len(missing_aliases)
+        logger.info(
+            "Product details: %s succeeded, %s missing out of %s products",
+            succeeded,
+            len(missing_aliases),
+            len(products),
+        )
+        if missing_aliases:
+            logger.warning(
+                "Details missing for %s product(s), keeping list-level fields: %s",
+                len(missing_aliases),
+                ", ".join(sorted(missing_aliases)),
+            )
+
+        return products, missing_aliases
+
+    def _retain_previous_availability(
+        self, products: List[Product], missing_aliases: Set[str]
+    ) -> None:
+        """Carry over the previous round's availability for failed fetches.
+
+        A product whose detail fetch failed must not be treated as confirmed
+        out of stock. When state management is available, reuse the previous
+        round's "available set": aliases present there stay available,
+        others stay unavailable. With no previous state recorded we
+        conservatively keep them unavailable so a transient failure cannot
+        fabricate a restock notification.
+        """
+        if not missing_aliases or not self.use_state_management or not self.state_manager:
+            return
+
+        # Previous state is keyed per store using exactly the store value
+        # carried on the products (which may be an empty string); match the
+        # keying used by RedisStateManager instead of assuming a default.
+        store = products[0].store if products else Config.DEFAULT_STORE
+        previous_available = self.state_manager.get_previous_state(store)
+        for product in products:
+            if product.alias not in missing_aliases:
+                continue
+            previous_state = product.alias in previous_available
+            if product.available != previous_state:
+                logger.info(
+                    "Detail fetch failed for %s; retaining previous availability "
+                    "(available=%s) instead of list value (available=%s)",
+                    product.alias,
+                    previous_state,
+                    product.available,
+                )
+            product.available = previous_state
 
     def check_availability(self) -> Tuple[List[Product], List[Product]]:
         if Config.PINCODE is None:
@@ -95,7 +156,11 @@ class ProductAvailabilityChecker:
         if not raw_products:
             raise ValueError("No products found in the API response")
         logger.info("Retrieved %s products from API for store: %s", len(raw_products), store)
-        products = self._create_product_objects(raw_products, store)
+        products, missing_aliases = self._create_product_objects(raw_products, store)
+        # Failed detail fetches must not be treated as confirmed out of
+        # stock: keep the previous round's availability for those aliases so
+        # the Redis baseline is not polluted.
+        self._retain_previous_availability(products, missing_aliases)
         available = [p for p in products if p.available]
         unavailable = [p for p in products if not p.available]
 

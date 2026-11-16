@@ -198,28 +198,53 @@ class AmulAPIClient:
     def get_product_details_parallel(
         self, aliases: List[str], max_workers: int = 4
     ) -> Dict[str, Optional[Dict[str, Any]]]:
-        """Get product details for multiple aliases in parallel."""
-        results: Dict[str, Optional[Dict[str, Any]]] = {}
+        """Get product details for multiple aliases in parallel.
+
+        A failure while fetching a single product is contained: the
+        exception is logged, that alias maps to ``None`` and every other
+        product is still fetched. Browser instances borrowed from the pool
+        are always returned, even when the fetch raises.
+        """
+        # Pre-seed every alias so the mapping stays complete even if an
+        # unexpected error escapes the worker's own handling.
+        results: Dict[str, Optional[Dict[str, Any]]] = {alias: None for alias in aliases}
 
         def fetch_single_product(alias: str) -> Tuple[str, Optional[Dict[str, Any]]]:
-            driver = self._get_driver_from_pool()
+            driver: Optional[webdriver.Chrome] = None
             try:
+                driver = self._get_driver_from_pool()
                 return alias, self._get_product_details_with_driver(alias, driver)
+            except Exception as exc:  # noqa: BLE001 - contain per-product failures
+                logger.warning("Failed to fetch details for product %s: %s", alias, exc)
+                logger.debug("Detail fetch error for %s", alias, exc_info=True)
+                return alias, None
             finally:
-                self._return_driver_to_pool(driver)
+                # Guarantee every borrowed browser instance goes back to the
+                # pool, including when the fetch raised.
+                if driver is not None:
+                    self._return_driver_to_pool(driver)
 
         logger.info("Fetching detailed info for %s products using %s workers", len(aliases), max_workers)
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             future_to_alias = {executor.submit(fetch_single_product, alias): alias for alias in aliases}
             for future in as_completed(future_to_alias):
-                alias, result = future.result()
-                results[alias] = result
+                alias = future_to_alias[future]
+                try:
+                    fetched_alias, result = future.result()
+                    results[fetched_alias] = result
+                except Exception as exc:  # noqa: BLE001 - defensive backstop
+                    logger.warning("Unexpected worker failure for product %s: %s", alias, exc)
+                    logger.debug("Worker error for %s", alias, exc_info=True)
+                    results[alias] = None
                 logger.debug("Completed fetching details for: %s", alias)
 
+        succeeded = len([r for r in results.values() if r is not None])
+        missing = len(results) - succeeded
         logger.info(
-            "Successfully fetched details for %s/%s products",
-            len([r for r in results.values() if r is not None]),
+            "Fetched details for %s/%s products (%s missing)",
+            succeeded,
             len(aliases),
+            missing,
         )
         return results
 
