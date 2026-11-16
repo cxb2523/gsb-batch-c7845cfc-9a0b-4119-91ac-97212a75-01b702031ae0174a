@@ -56,6 +56,32 @@ To tweak the behavior, edit `src/automate.ts`. And watch for changes with:
 npm run dev:watch
 ```
 
+#### How failures are reported
+
+The automation runs each collection step as its own settled stage, so one broken
+step no longer throws away the whole batch. Every run returns:
+
+- `footerLinks` — the links that were collected cleanly (bad anchors are skipped
+  one by one rather than poisoning the batch);
+- `imageFile` / `pdfFile` / `videoFile` — the produced files, or `''` when that
+  stage failed (see `missingFiles` for the empty ones);
+- `failures` — one entry per problem, naming the stage, the error message, the
+  stages that had already completed, and the files that already existed. Footer
+  link problems carry the offending `text`/`href` with `scope: 'footerLink'`;
+- `stageResults` / `completed` — the per-stage settlement record.
+
+You can also inject a stage, which is how the tests simulate a broken step:
+
+```ts
+await automate(browser, {
+  stages: {
+    screenshot: async () => {
+      throw new Error('screenshot unavailable');
+    },
+  },
+});
+```
+
 ### 3. Run Your Script in the Cloud
 
 In the previous step, you ran the script locally, using local headless browsers. But managing those browsers in the cloud is a huge pain.
