@@ -14,4 +14,6 @@ If you just need the raw registry data, you may not need this project at all: th
 
 That's also how the scraper works. It takes the bulk of the data from that open-data dataset — a single, official request — and enriches it with `type` and `is_active` from the registry's RSC (React Server Components) list endpoint, requested via the `RSC` header and read out of the React Flight payload it returns. Leaning on the open data keeps things resilient: the RSC endpoint is an internal implementation detail of the website that can change without notice, while the open data is a documented, stable interface.
 
+The enrichment degrades gracefully per record. If the RSC list comes back truncated or a record can't be matched against it, the affected records are still exported from the open data with `type` and/or `is_active` set to `null` (never guessed) and flagged with `"partial": true`, so you can tell them apart from fully enriched records.
+
 I'm curious what changes I'm about to see!

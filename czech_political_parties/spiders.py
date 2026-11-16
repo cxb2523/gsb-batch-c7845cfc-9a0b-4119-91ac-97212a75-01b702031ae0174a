@@ -37,16 +37,24 @@ class CzechPoliticalPartiesSpider(scrapy.Spider):
         yield self._list_request(ALL_STATES, self.parse_types, parties=parties)
 
     def parse_types(self, response, parties):
-        types = {party['id']: party['typ'] for party in self._list(response)}
+        types = {}
+        for record in self._list(response)[0]:
+            try:
+                types[record['id']] = record['typ']
+            except KeyError:
+                # A single malformed record must not abort the whole batch;
+                # the affected parties just get `type: None` later on.
+                self.logger.warning(f'Skipping a list record without id/typ: {record!r}')
         # ...and the list filtered to active records tells us which are active.
         yield self._list_request(
             ACTIVE_STATE, self.parse_active, parties=parties, types=types
         )
 
     def parse_active(self, response, parties, types):
-        active_ids = {party['id'] for party in self._list(response)}
+        records, active_complete = self._list(response)
+        active_ids = {record['id'] for record in records if 'id' in record}
         for party in parties:
-            yield build_item(party, types, active_ids)
+            yield build_item(party, types, active_ids, active_complete)
 
     def _list_request(self, states, callback, **cb_kwargs):
         query = urlencode({'Stavy': states, 'PageSize': 1000, 'PageNo': 1})
@@ -58,6 +66,12 @@ class CzechPoliticalPartiesSpider(scrapy.Spider):
         )
 
     def _list(self, response):
+        """Parse the RSC list response into ``(records, complete)``.
+
+        ``complete`` is ``False`` when the endpoint returned fewer records than
+        its own pagination total — the caller then treats anything missing from
+        the list as unknown instead of failing the whole scrape.
+        """
         payload = FlightPayload(response.text)
         parties = payload.find('"politickeStranyList":')
         if parties is None:
@@ -65,27 +79,68 @@ class CzechPoliticalPartiesSpider(scrapy.Spider):
                 f"Couldn't find the list of parties at {response.url}. "
                 "The website's structure has probably changed."
             )
+        complete = True
         paging = payload.find('"pagingInfo":')
         if paging and len(parties) < paging['itemCount']:
-            raise ValueError(
+            complete = False
+            self.logger.warning(
                 f"Got only {len(parties)} of {paging['itemCount']} records at "
-                f"{response.url}. The 'PageSize' is no longer large enough."
+                f"{response.url}. The 'PageSize' is no longer large enough; "
+                "the missing records will be exported with unknown "
+                "type/is_active."
             )
-        return parties
+        return parties, complete
 
 
-def build_item(party, types, active_ids):
-    party_id = int(parse_qs(urlparse(party['url']).query)['id'][0])
-    people = [
-        {
-            'name': person['jméno'].strip(),
-            'role': person['funkce'].rstrip(':').strip(),
-        }
-        for person in (party.get('osoby') or [])
-        if person['jméno'].strip()
-    ]
+def build_item(party, types, active_ids, active_complete=True):
+    """Build one output item from an open-data record and the RSC enrichment.
+
+    Fields that can't be computed for this particular record (because the list
+    endpoint was truncated, or the record lacks `url`/`typ`/`osoby`) are set to
+    ``None`` — never guessed — and the item is flagged with ``partial: True``
+    so degraded records stay distinguishable from fully enriched ones.
+    """
+    partial = False
+    try:
+        party_id = int(parse_qs(urlparse(party['url']).query)['id'][0])
+    except (KeyError, IndexError, TypeError, ValueError):
+        party_id = None
+
+    osoby = party.get('osoby')
+    if osoby is None:
+        # Without `osoby` we can't tell whether the party really has no
+        # people listed, so flag the record instead of guessing.
+        partial = True
+        osoby = []
+    people = []
+    for person in osoby:
+        name = (person.get('jméno') or '').strip()
+        if name:
+            people.append({
+                'name': name,
+                'role': (person.get('funkce') or '').rstrip(':').strip(),
+            })
+
+    if party_id is None:
+        # No `url` (or an unparseable one) means we can't match the record
+        # against the RSC list at all.
+        party_type, is_active = None, None
+        partial = True
+    else:
+        party_type = TYPE_MAPPING.get(types.get(party_id))
+        if party_type is None:
+            partial = True
+        if party_id in active_ids:
+            is_active = True
+        elif active_complete:
+            is_active = False
+        else:
+            # The active-states list was truncated, so absence proves nothing.
+            is_active = None
+            partial = True
+
     ico = party['identifikační_číslo']
-    return {
+    item = {
         'name': party['název'].strip('"„”“'),
         'code': party['zkratka'].strip('"„”“'),
         # Parties without an IČO come with the literal string "None"; the rest
@@ -95,9 +150,12 @@ def build_item(party, types, active_ids):
         'reg_date': arrow.get(party['den_registrace']).date(),
         'address': party['adresa_sídla'],
         'people': sorted(people, key=itemgetter('name')),
-        'type': TYPE_MAPPING[types[party_id]],
-        'is_active': party_id in active_ids,
+        'type': party_type,
+        'is_active': is_active,
     }
+    if partial:
+        item['partial'] = True
+    return item
 
 
 class FlightPayload:
