@@ -14,18 +14,15 @@ from src.data_loader import load_from_database, load_pos_csv, load_weekly_csv
 from src.forecasting import forecast_weekly_sales
 # Cleaning and summary helpers. All of them live in src/transform.py.
 from src.transform import (
-    # Tells weekly data apart from POS data by looking at column names.
-    detect_dataset_type,
+    # Detects weekly or POS data from the column names, then cleans it.
+    # The upload path and the database path both use it.
+    clean_dataset,
     # How strongly each economic column moves together with sales.
     economic_correlations,
     # Percent gap between holiday weeks and normal weeks.
     holiday_uplift,
     # Sales added up per month.
     monthly_sales,
-    # Cleans a raw POS table.
-    normalize_pos_columns,
-    # Cleans a raw weekly table.
-    normalize_weekly_columns,
     # The four numbers for the cards at the top of the page.
     sales_kpis,
     # Stores ranked from highest to lowest total sales.
@@ -104,14 +101,9 @@ def load_dashboard_data() -> tuple[pd.DataFrame, str]:
             st.stop()
         # Read the uploaded file into a table.
         raw = pd.read_csv(uploaded)
-        # Decide from the column names: weekly or POS.
-        dataset_type = detect_dataset_type(raw)
-        # Check which kind it is.
-        if dataset_type == "weekly":
-            # Weekly file: use the weekly cleaning rules.
-            return normalize_weekly_columns(raw), "weekly"
-        # Everything else is cleaned as POS data.
-        return normalize_pos_columns(raw), "pos"
+        # Decide from the column names whether this is weekly or POS data, then clean it.
+        # clean_dataset() hands back the cleaned table and the label that main() uses.
+        return clean_dataset(raw)
 
     # Only "Database" is left at this point, so it needs no if.
     # Text box for the connection URL. type="password" shows dots, because the URL has the password in it.
@@ -133,14 +125,8 @@ def load_dashboard_data() -> tuple[pd.DataFrame, str]:
         st.stop()
     # Run the query and get the rows back as a table.
     raw = load_from_database(db_url, query)
-    # Same weekly-or-POS check as for uploads.
-    dataset_type = detect_dataset_type(raw)
-    # Check which kind it is.
-    if dataset_type == "weekly":
-        # Weekly rows: use the weekly cleaning rules.
-        return normalize_weekly_columns(raw), "weekly"
-    # Other rows are cleaned as POS data.
-    return normalize_pos_columns(raw), "pos"
+    # The same weekly-or-POS check and cleaning as for uploads, so both paths always agree.
+    return clean_dataset(raw)
 
 
 # The page for weekly store data. df is already cleaned.

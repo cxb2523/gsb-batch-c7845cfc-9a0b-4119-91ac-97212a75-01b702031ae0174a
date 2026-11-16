@@ -86,7 +86,7 @@ The command is `streamlit run app.py`. Streamlit then runs `app.py` from top to 
 4. The cleaned table comes back together with the label `"weekly"`. `main()` sees the label and calls `weekly_dashboard(df)`. For the label `"pos"` it would call `pos_dashboard(df)`.
 5. `weekly_dashboard` draws the title, four number cards and six tabs. Each tab calls one or two functions from `src/transform.py` or `src/forecasting.py` and gives the result to a Plotly chart or a table.
 
-The other three modes change step 2 only. "Sample POS CSV" reads the 10-row file. "Upload CSV" and "Database" do not know in advance what kind of data they will get, so they call `detect_dataset_type`, which answers "weekly" when the columns include `weekly_sales` and `store`, and "pos" otherwise. Both modes show a hint and stop the run with `st.stop()` until a file or a URL has been given.
+The other three modes change step 2 only. "Sample POS CSV" reads the 10-row file. "Upload CSV" and "Database" do not know in advance what kind of data they will get, so both hand the raw table to `clean_dataset`. That function calls `detect_dataset_type`, which answers "weekly" when the columns include `weekly_sales` and `store`, and "pos" otherwise, then runs the matching cleaning function and returns the cleaned table with its label. Column names are compared after a small cleanup (`clean_column_name`): lower case, no spaces at the ends, and spaces or hyphens turned into underscores. So `Weekly Sales`, ` WEEKLY_SALES ` and `weekly-sales` are all found as `weekly_sales`. Both modes show a hint and stop the run with `st.stop()` until a file or a URL has been given.
 
 | Tab | Function behind it | What you see |
 | --- | --- | --- |
@@ -103,7 +103,7 @@ The POS page has four tabs: Overview (sales per day and per branch), Products (s
 
 `normalize_weekly_columns` does six things, in this order.
 
-It renames the columns with `WEEKLY_COLUMN_MAP`, so `Weekly_Sales` becomes `weekly_sales`. Lowercase names with underscores are easier to type and they match the column names in the SQL tables.
+It renames the columns with `WEEKLY_COLUMN_MAP`, so `Weekly_Sales` becomes `weekly_sales`. Lowercase names with underscores are easier to type and they match the column names in the SQL tables. The match ignores case and treats spaces and hyphens like underscores, so `WEEKLY SALES`, ` Weekly_Sales ` and `Weekly-Sales` all arrive as `weekly_sales`. `normalize_pos_columns` uses the same rule with `POS_COLUMN_MAP`.
 
 It checks that all eight columns exist. If one is missing it raises `ValueError` and names the missing columns. Without this check, a wrong file would fail much later inside a chart with an error that is hard to read.
 
@@ -290,7 +290,7 @@ The URL contains your password. The sidebar box hides it and the app does not st
 
 ### Loading the data a second time
 
-`weekly_store_sales` accepts one row per store and date, so a second run of the weekly ETL stops with a duplicate key error. That protects the totals from being doubled. To reload, run `01_schema.sql`, `02_indexes.sql` and `03_views.sql` again in that order, then the ETL. `01_schema.sql` deletes all rows in the six tables.
+`weekly_store_sales` accepts one row per store and date. Before writing, `load_weekly` reads the `(store, date)` pairs already in the table and drops the matching rows from the file. A second run of the weekly ETL therefore writes nothing and prints `Added 0 rows, skipped ... duplicate rows.`; a file that overlaps an earlier one gets its new weeks added and its repeated weeks skipped. Nothing is rolled back because of a repeated row. To start from empty tables instead, run `01_schema.sql`, `02_indexes.sql` and `03_views.sql` again in that order, then the ETL. `01_schema.sql` deletes all rows in the six tables.
 
 ### The two optional scripts
 
@@ -319,7 +319,7 @@ All of this was done on 21 and 22 September 2026 with Python 3.13.5, pandas 2.2.
 | MySQL: schema, indexes, views, weekly ETL, POS ETL, query file | All ran. 6,435 rows, sum 6,737,218,987.11 |
 | MySQL: run 01, 02, 03 again, then ETL again | Worked |
 | MySQL: `02_indexes.sql` a second time without 01 | Fails with "Duplicate key name", as the file's comment says |
-| Weekly ETL a second time without a reset | Fails with a duplicate key error, by design |
+| Weekly ETL a second time without a reset | Adds nothing and reports the skipped rows instead of failing |
 | `python -m src.generate_assets` (in a scratch copy) | Wrote 2 SVG, 2 PNG and 1 PPTX |
 | `python run.py test` on Python 3.13 and 3.14 | 21 passed on both |
 | `run.command` in a copy whose path has a space: only Python 3.9 on the PATH; first run with 3.13; second run; a `.venv` made with 3.9; a `.venv` whose Python was removed; a `.venv` without pip; a link to the file started elsewhere | Refused with exit 1; made `.venv` and ran `--help`; reused `.venv`; refused with exit 1; rebuilt; rebuilt; refused with exit 1 |

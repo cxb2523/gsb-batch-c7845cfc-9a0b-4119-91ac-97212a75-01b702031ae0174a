@@ -77,5 +77,5 @@ create table weekly_store_sales (
     fuel_price decimal(8, 3),                      -- fuel price, 3 decimals like 2.572
     cpi decimal(10, 6),                            -- Consumer Price Index, 6 decimals like 211.096358
     unemployment decimal(8, 3),                    -- unemployment rate in percent
-    unique key uq_weekly_store_date (store, date)  -- a store can have one row per week; a second load of the same file is refused
+    unique key uq_weekly_store_date (store, date)  -- a store can have one row per week; src.etl skips rows that already exist
 );

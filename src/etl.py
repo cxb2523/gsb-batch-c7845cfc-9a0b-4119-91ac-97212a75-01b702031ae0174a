@@ -7,10 +7,25 @@ import argparse
 # pandas reads the CSV and writes the rows to the database.
 import pandas as pd
 # create_engine sets up the database connection from a URL.
-from sqlalchemy import create_engine
+# text() wraps a plain SQL string so SQLAlchemy accepts it.
+from sqlalchemy import create_engine, inspect, text
 
 # The cleaning step, the T in ETL. Extract is read_csv and Load is to_sql.
 from src.transform import normalize_pos_columns, normalize_weekly_columns
+
+
+# The (store, date) pairs that weekly_store_sales already holds.
+# The table allows one row per store and date, so these are the keys a second load would collide with.
+def _existing_weekly_keys(engine) -> set[tuple[int, pd.Timestamp]]:
+    # A fresh database has no table yet. Nothing is there, so nothing can collide.
+    if not inspect(engine).has_table("weekly_store_sales"):
+        return set()
+    # Read only the two key columns. That is a cheap query even for the full 6,435 rows.
+    with engine.connect() as conn:
+        rows = pd.read_sql_query(text("select store, date from weekly_store_sales"), conn)
+    # Turn each row into the same shape the cleaned CSV uses, so comparing works:
+    # store as a whole number, date as a pandas Timestamp without a time of day.
+    return {(int(store), pd.Timestamp(day)) for store, day in zip(rows["store"], rows["date"])}
 
 
 # Weekly CSV into the weekly_store_sales table.
@@ -19,11 +34,24 @@ def load_weekly(csv_path: str, db_url: str) -> None:
     df = normalize_weekly_columns(pd.read_csv(csv_path))
     # Works for PostgreSQL and MySQL alike. The start of the URL decides which one.
     engine = create_engine(db_url)
+    # Rows of the file itself can repeat a store and date as well, so keep only the first of each.
+    unique = df.drop_duplicates(subset=["store", "date"], keep="first")
+    # Skip what the table already has. A second import of the same file, or a file that
+    # overlaps an earlier one, then adds the new weeks and leaves the old rows alone.
+    already_there = _existing_weekly_keys(engine)
+    # One key per row, built the same way _existing_weekly_keys builds its keys.
+    keys = list(zip(unique["store"].astype(int), pd.to_datetime(unique["date"])))
+    # A True for every row whose store and date are not in the table yet.
+    keep = [key not in already_there for key in keys]
+    new_rows = unique.loc[keep]
     # Load. "append" adds rows to the table that 01_schema.sql created.
     # index=False leaves out the pandas row numbers.
-    # The table allows one row per store and date, so loading the same file twice fails
-    # with a duplicate key error. Run 01_schema.sql again first to start from empty tables.
-    df.to_sql("weekly_store_sales", engine, if_exists="append", index=False)
+    # to_sql with an empty table would still send a statement, so only call it when there is work.
+    if not new_rows.empty:
+        new_rows.to_sql("weekly_store_sales", engine, if_exists="append", index=False)
+    # Report both numbers, so a repeated import shows clearly that nothing was written twice.
+    # Rows are counted after cleaning, so a row without store, date or sales is not in either number.
+    print(f"Added {len(new_rows)} rows, skipped {len(df) - len(new_rows)} duplicate rows.")
 
 
 # POS CSV into two tables: branches and pos_sales_staging.

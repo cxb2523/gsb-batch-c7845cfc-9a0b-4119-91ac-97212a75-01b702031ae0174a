@@ -1,6 +1,9 @@
 # Keep type hints as plain text, so newer hint syntax also works on older Python.
 from __future__ import annotations
 
+# re builds the pattern that cleans up column names.
+import re
+
 # pandas does all the table work in this file.
 import pandas as pd
 
@@ -65,27 +68,83 @@ POS_COLUMN_MAP = {
 }
 
 
+# Column names do not always arrive exactly as written in the maps above. A file may
+# spell them "WEEKLY SALES", " weekly_sales " or "Weekly-Sales". They all mean weekly_sales.
+# This turns any spelling into the same simple form before it is compared with a map:
+#   lowercase -> trim the ends -> spaces and hyphens become underscores -> no doubled underscores.
+# It is done to a copy of the name, never to the data itself.
+def clean_column_name(name: object) -> str:
+    # str() keeps a number-like header from breaking the pattern below.
+    text = str(name).strip().lower()
+    # "Weekly Sales" and "Weekly-Sales" both become "weekly_sales".
+    text = re.sub(r"[\s\-]+", "_", text)
+    # "Weekly  Sales" or "weekly__sales" become "weekly_sales".
+    text = re.sub(r"_+", "_", text)
+    # A name that only differs by underscores at the ends still matches.
+    return text.strip("_")
+
+
+# The two maps, keyed by the cleaned form of the old name.
+# One lookup serves both the detection step and the renaming step, so they can never disagree.
+WEEKLY_COLUMN_LOOKUP = {clean_column_name(old): new for old, new in WEEKLY_COLUMN_MAP.items()}
+POS_COLUMN_LOOKUP = {clean_column_name(old): new for old, new in POS_COLUMN_MAP.items()}
+
+
+# Renames every column the map knows, whatever case, spacing or hyphen spelling it uses.
+# Columns the map does not know keep their old name, exactly as before.
+# The caller's table is not changed: pandas builds a new one.
+def _rename_known_columns(df: pd.DataFrame, lookup: dict[str, str]) -> pd.DataFrame:
+    # Each column name is cleaned before the lookup is asked for its new name.
+    # .get() with two arguments means "use the new name if known, else keep the old name".
+    return df.rename(columns=lambda col: lookup.get(clean_column_name(col), col))
+
+
+# The names the table holds after the known columns have been renamed.
+# Used to answer "is this weekly or POS data?".
+# It only reads the column names, so no data is copied, even for a large database result.
+def _known_column_names(df: pd.DataFrame, lookup: dict[str, str]) -> set[str]:
+    return {lookup.get(clean_column_name(col), col) for col in df.columns}
+
+
+# The weekly columns that no POS file has. Used to recognise a weekly file whose
+# weekly_sales column is missing, so the error can name the weekly column instead of
+# listing POS columns the file was never meant to have.
+WEEKLY_ONLY_COLUMN_NAMES = set(WEEKLY_COLUMN_LOOKUP.values()).difference({"store", "date"})
+
+
 # Returns "weekly" or "pos". Used when the app cannot know the file type in advance
 # (an uploaded CSV or a database query).
 def detect_dataset_type(df: pd.DataFrame) -> str:
-    # Lowercase every column name, so "Store" and "store" count as the same.
-    lowered = {col.lower() for col in df.columns}
-    # Weekly data must have both weekly_sales and store. First test the lowercased names.
-    if {"weekly_sales", "store"}.issubset(lowered) or {"weekly_sales", "store"}.issubset(
-        # Second test: rename through the weekly map first, then lowercase.
-        # .get(col, col) means "use the new name if the map has one, else keep the old name".
-        {WEEKLY_COLUMN_MAP.get(col, col).lower() for col in df.columns}
-    ):
-        # Both columns found.
+    # The column names after renaming, so any case, spacing or hyphen spelling matches.
+    found = _known_column_names(df, WEEKLY_COLUMN_LOOKUP)
+    # The sales column is the clearest sign of a weekly file.
+    if "weekly_sales" in found:
+        return "weekly"
+    # A weekly file can be missing weekly_sales. If it has store and at least two other
+    # weekly-only columns (holiday_flag, temperature, fuel_price, cpi, unemployment),
+    # it is still weekly, and the cleaner then names the missing weekly_sales column.
+    if "store" in found and len(found.intersection(WEEKLY_ONLY_COLUMN_NAMES)) >= 2:
         return "weekly"
     # Anything else is handled as POS data.
     return "pos"
 
 
+# Detect the kind of data and clean it in one step.
+# The upload path and the database path in app.py both use this, so they cannot drift apart.
+# Returns the cleaned table and the label "weekly" or "pos".
+def clean_dataset(df: pd.DataFrame) -> tuple[pd.DataFrame, str]:
+    # Ask the column names which kind of data this is.
+    if detect_dataset_type(df) == "weekly":
+        # Weekly file: use the weekly cleaning rules.
+        return normalize_weekly_columns(df), "weekly"
+    # Everything else is cleaned as POS data.
+    return normalize_pos_columns(df), "pos"
+
+
 # Turns a raw weekly table into a clean one. Every weekly chart depends on this.
 def normalize_weekly_columns(df: pd.DataFrame) -> pd.DataFrame:
     # Rename the columns. .copy() makes a new table, so the caller's table is not changed.
-    normalized = df.rename(columns=WEEKLY_COLUMN_MAP).copy()
+    normalized = _rename_known_columns(df, WEEKLY_COLUMN_LOOKUP).copy()
     # The eight clean names that must be present.
     required = set(WEEKLY_COLUMN_MAP.values())
     # Names from that set that the table does not have.
@@ -117,8 +176,9 @@ def normalize_weekly_columns(df: pd.DataFrame) -> pd.DataFrame:
 
 # Turns a raw POS table into a clean one.
 def normalize_pos_columns(df: pd.DataFrame) -> pd.DataFrame:
-    # Rename the columns and work on a copy.
-    normalized = df.rename(columns=POS_COLUMN_MAP).copy()
+    # Rename the columns and work on a copy. "invoice id", "Invoice-ID" and "Invoice ID"
+    # all become invoice_id here.
+    normalized = _rename_known_columns(df, POS_COLUMN_LOOKUP).copy()
     # Only these six are needed by the POS page. The other columns are optional.
     required = {"invoice_id", "branch", "product_line", "total", "date", "payment"}
     # Required names the table does not have.
@@ -159,10 +219,17 @@ def sales_kpis(df: pd.DataFrame, sales_col: str) -> dict[str, float]:
     }
 
 
+# True for a table that still needs the weekly cleaning step.
+# A table that already has a weekly_sales column is clean and is left as it is.
+# Otherwise the column names are checked for weekly data in any spelling.
+def _needs_weekly_cleaning(df: pd.DataFrame) -> bool:
+    return "weekly_sales" not in df.columns and detect_dataset_type(df) == "weekly"
+
+
 # One row per month with the sales of all stores added up.
 def monthly_sales(df: pd.DataFrame) -> pd.DataFrame:
-    # A raw table still has the Weekly_Sales column. Clean it first in that case. Otherwise just copy.
-    weekly = normalize_weekly_columns(df) if "Weekly_Sales" in df.columns else df.copy()
+    # A raw table still has a Weekly_Sales column. Clean it first in that case. Otherwise just copy.
+    weekly = normalize_weekly_columns(df) if _needs_weekly_cleaning(df) else df.copy()
     # Add a month column. to_period("M") cuts a date down to its month,
     # and to_timestamp() turns that into the first day of the month, e.g. 2010-02-01.
     monthly = weekly.assign(month=weekly["date"].dt.to_period("M").dt.to_timestamp())
@@ -173,7 +240,7 @@ def monthly_sales(df: pd.DataFrame) -> pd.DataFrame:
 # One row per store, best seller first.
 def store_performance(df: pd.DataFrame) -> pd.DataFrame:
     # Clean first if the table is still raw.
-    weekly = normalize_weekly_columns(df) if "Weekly_Sales" in df.columns else df.copy()
+    weekly = normalize_weekly_columns(df) if _needs_weekly_cleaning(df) else df.copy()
     # The brackets let the chain of steps run over several lines.
     ranking = (
         # Put all rows of the same store together.
@@ -203,7 +270,7 @@ def store_performance(df: pd.DataFrame) -> pd.DataFrame:
 # How much higher (or lower) holiday weeks are than normal weeks, in percent.
 def holiday_uplift(df: pd.DataFrame) -> float:
     # Clean first if the table is still raw.
-    weekly = normalize_weekly_columns(df) if "Weekly_Sales" in df.columns else df.copy()
+    weekly = normalize_weekly_columns(df) if _needs_weekly_cleaning(df) else df.copy()
     # Average sales for flag 0 and for flag 1. means.loc[0] is the normal-week average.
     means = weekly.groupby("holiday_flag")["weekly_sales"].mean()
     # No comparison is possible if one group is missing. A zero average would mean dividing by zero.
@@ -218,7 +285,7 @@ def holiday_uplift(df: pd.DataFrame) -> float:
 # Correlation runs from -1 to 1. Close to 0 means the two numbers barely move together.
 def economic_correlations(df: pd.DataFrame) -> pd.DataFrame:
     # Clean first if the table is still raw.
-    weekly = normalize_weekly_columns(df) if "Weekly_Sales" in df.columns else df.copy()
+    weekly = normalize_weekly_columns(df) if _needs_weekly_cleaning(df) else df.copy()
     # The four columns to compare with sales.
     signals = ["temperature", "fuel_price", "cpi", "unemployment"]
     # Build a list with one small dictionary per signal.

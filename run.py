@@ -1427,8 +1427,8 @@ def action_database(db: dict, reset: bool) -> int:
             show_tables(counts)
             # Explain why nothing was done, and name the way out.
             raise Stop(2, (
-                "Loading the file again would stop with a duplicate key error, and rebuilding the tables\n"
-                "would delete those rows. I changed nothing.\n"
+                "Loading the same file again would add nothing (rows already in the table are skipped),\n"
+                "and rebuilding the tables would delete those rows. I changed nothing.\n"
                 "To wipe the tables and load from scratch: python run.py database --reset"
             ))
         # --reset: show what will be deleted.

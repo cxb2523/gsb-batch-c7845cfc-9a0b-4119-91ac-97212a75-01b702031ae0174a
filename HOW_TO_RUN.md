@@ -542,7 +542,7 @@ The `database` word is safe to repeat. When the tables already hold the right ro
 | `Could not connect to ... Is the server running?` | Server off, wrong port, wrong password, or the database does not exist | Start the server, check the address, create the database (sections 4.5, 4.6, 5.5, 5.6) |
 | `role "postgres" does not exist` (Mac) | Postgres.app and Homebrew use your Mac user name, not `postgres` | Put your Mac user name in the address |
 | `These tables already hold rows` | The database was loaded before | Nothing is wrong. Use `database --reset` only if you want to start over |
-| `duplicate key value violates unique constraint` (PostgreSQL) or `Duplicate entry ... for key` (MySQL) | `src.etl` was run twice by hand | Run the three SQL files again, then the ETL once. Or use `run.py database` |
+| `Added 0 rows, skipped N duplicate rows.` | `src.etl` was run again on a file whose store and date rows are already loaded | Nothing is wrong. Rows already in the table are skipped, so no totals are doubled |
 | `Terminate batch job (Y/N)?` (Windows) | Ctrl+C reached the batch file as well | Type `N` so the batch file can finish; `Y` closes a double-clicked window at once |
 | The window closes at once (Windows) | `run.py` was double-clicked instead of `run.bat` | Double-click `run.bat`, which waits for a key press before it closes |
 | Streamlit asks for an e-mail | First start of `streamlit run` | Press Enter. `run.py` skips the question |
