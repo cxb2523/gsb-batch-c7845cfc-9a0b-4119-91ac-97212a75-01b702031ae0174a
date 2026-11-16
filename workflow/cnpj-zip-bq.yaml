@@ -1,0 +1,230 @@
+main:
+  params: [config]
+  steps:
+    - set_variables:
+        assign:
+          - globals: ${config}
+
+    - send_initial_alert:
+        call: log_and_alert
+        args:
+          message: "🏂 Workflow de ingestão iniciado."
+          severity: "INFO"
+          globals: ${globals}
+
+    - start_ingestion_job:
+        try:
+          call: googleapis.run.v1.namespaces.jobs.run
+          args:
+            name: ${"namespaces/" + globals.project_id + "/jobs/" + globals.ingestion_job_name}
+            location: ${globals.location}
+            connector_params:
+              timeout: 43200
+          result: job_response
+        except:
+          as: job_error
+          steps:
+            - send_ingestion_job_status_failure_alert:
+                call: log_and_alert
+                args:
+                  message: ${"❌ O Cloud Run Job " + globals.ingestion_job_name + " finalizou com falha."}
+                  severity: "ERROR"
+                  globals: ${globals}
+                next: workflow_end
+
+    - send_job_status_success_alert:
+        call: log_and_alert
+        args:
+          message: ${"✅ O Cloud Run Job " + globals.ingestion_job_name + " finalizou com sucesso e os transfers iniciaram..."}
+          severity: "INFO"
+          globals: ${globals}
+        next: trigger_transfers
+
+    - trigger_transfers:
+        parallel:
+          branches:
+            - process_transfer_0:
+                steps:
+                  - execute_transfer_0:
+                      call: execute_transfer
+                      args:
+                        transfer_id: ${globals.transfer_configs[0].id}
+                        transfer_name: ${globals.transfer_configs[0].name}
+                        globals: ${globals}
+            - process_transfer_1:
+                steps:
+                  - execute_transfer_1:
+                      call: execute_transfer
+                      args:
+                        transfer_id: ${globals.transfer_configs[1].id}
+                        transfer_name: ${globals.transfer_configs[1].name}
+                        globals: ${globals}
+            - process_transfer_2:
+                steps:
+                  - execute_transfer_2:
+                      call: execute_transfer
+                      args:
+                        transfer_id: ${globals.transfer_configs[2].id}
+                        transfer_name: ${globals.transfer_configs[2].name}
+                        globals: ${globals}
+            - process_transfer_3:
+                steps:
+                  - execute_transfer_3:
+                      call: execute_transfer
+                      args:
+                        transfer_id: ${globals.transfer_configs[3].id}
+                        transfer_name: ${globals.transfer_configs[3].name}
+                        globals: ${globals}
+            - process_transfer_4:
+                steps:
+                  - execute_transfer_4:
+                      call: execute_transfer
+                      args:
+                        transfer_id: ${globals.transfer_configs[4].id}
+                        transfer_name: ${globals.transfer_configs[4].name}
+                        globals: ${globals}
+            - process_transfer_5:
+                steps:
+                  - execute_transfer_5:
+                      call: execute_transfer
+                      args:
+                        transfer_id: ${globals.transfer_configs[5].id}
+                        transfer_name: ${globals.transfer_configs[5].name}
+                        globals: ${globals}
+            - process_transfer_6:
+                steps:
+                  - execute_transfer_6:
+                      call: execute_transfer
+                      args:
+                        transfer_id: ${globals.transfer_configs[6].id}
+                        transfer_name: ${globals.transfer_configs[6].name}
+                        globals: ${globals}
+            - process_transfer_7:
+                steps:
+                  - execute_transfer_7:
+                      call: execute_transfer
+                      args:
+                        transfer_id: ${globals.transfer_configs[7].id}
+                        transfer_name: ${globals.transfer_configs[7].name}
+                        globals: ${globals}
+            - process_transfer_8:
+                steps:
+                  - execute_transfer_8:
+                      call: execute_transfer
+                      args:
+                        transfer_id: ${globals.transfer_configs[8].id}
+                        transfer_name: ${globals.transfer_configs[8].name}
+                        globals: ${globals}
+            - process_transfer_9:
+                steps:
+                  - execute_transfer_9:
+                      call: execute_transfer
+                      args:
+                        transfer_id: ${globals.transfer_configs[9].id}
+                        transfer_name: ${globals.transfer_configs[9].name}
+                        globals: ${globals} 
+
+    - execute_scheduled_query:
+        call: execute_transfer
+        args:
+          transfer_id: ${globals.scheduled_query.id}
+          transfer_name: ${globals.scheduled_query.name}
+          globals: ${globals}
+
+    - start_use_job:
+        try:
+          call: googleapis.run.v1.namespaces.jobs.run
+          args:
+            name: ${"namespaces/" + globals.project_id + "/jobs/" + globals.use_job_name}
+            location: ${globals.location}
+            connector_params:
+              timeout: 43200
+          result: job_response
+        except:
+          as: job_error
+          steps:
+            - send_use_job_status_failure_alert:
+                call: log_and_alert
+                args:
+                  message: ${"❌ O Cloud Run Job " + globals.use_job_name + " finalizou com falha."}
+                  severity: "ERROR"
+                  globals: ${globals}
+                next: workflow_end
+
+    - send_final_alert:
+        call: log_and_alert
+        args:
+          message: "🫡 O workflow foi finalizado. Verifique as logs para obter mais detalhes."
+          severity: "INFO"
+          globals: ${globals}
+        next: workflow_end
+
+    - workflow_end:
+        return:
+            status: "unknown"
+            message: "🫡 O workflow foi finalizado. Verifique as logs para obter mais detalhes."
+
+log_and_alert:
+  params: [message, severity, globals]
+  steps:
+    - log_message:
+        call: sys.log
+        args:
+          text: ${message}
+          severity: ${severity}
+    - check_webhook:
+        switch:
+          - condition: ${map.get(globals, "slack_webhook_url") != null and map.get(globals, "slack_webhook_url") != ""}
+            next: send_alert
+        next: exit_alert
+    - send_alert:
+        try:
+          call: http.post
+          args:
+            url: ${globals.slack_webhook_url}
+            body:
+              text: ${message}
+        except:
+          as: alert_error
+          steps:
+            - log_alert_failure:
+                call: sys.log
+                args:
+                  text: '${"⚠️ Não foi possível enviar a notificação para o webhook - " + json.encode_to_string(alert_error)}'
+                  severity: "WARNING"
+    - exit_alert:
+        return:
+
+execute_transfer:
+  params: [transfer_id, transfer_name, globals]
+  steps:
+    - start_transfer:
+        try:
+          call: googleapis.bigquerydatatransfer.v1.projects.locations.transferConfigs.startManualRuns
+          args:
+            parent: ${"projects/" + globals.project_id + "/locations/" + globals.location + "/transferConfigs/" + transfer_id}
+            body:
+              requestedRunTime: ${time.format(sys.now())}
+          result: transfer_response
+        except:
+          as: transfer_error
+          steps:
+            - handle_tranfer_error:
+                call: log_and_alert
+                args:
+                  message: ${"❌ Erro ao executar o transfer " + transfer_name + "."}
+                  severity: "ERROR"
+                  globals: ${globals}
+            - exit_transfer:
+                return:
+
+    - extract_transfer_state:
+        assign:
+          - transfer_state: ${transfer_response.runs[0].state}
+
+    - send_transfer_alert:
+        call: log_and_alert
+        args:
+          message: ${"🔄 Transferência " + transfer_name + " concluída com status " + transfer_state + "."}
+          severity: "INFO"
+          globals: ${globals}

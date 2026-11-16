@@ -1,0 +1,27 @@
+{
+  "name": "cnpr-data-fetcher",
+  "version": "1.0.0",
+  "description": "Job para baixar e extrair os dados públicos de CNPJs do site oficial da Receita Federal.",
+  "main": "src/main.js",
+  "type": "module",
+  "license": "MIT",
+  "keywords": ["empresa", "brasil", "cnpj", "receita federal", "job"],
+  "scripts": {
+    "start": "node --no-warnings src/main.js"
+  },
+  "dependencies": {
+    "@google-cloud/logging": "11.2.1",
+    "@google-cloud/storage": "7.19.0",
+    "@slack/webhook": "7.0.7",
+    "axios": "1.13.5",
+    "axios-retry": "4.5.0",
+    "dotenv": "17.3.1",
+    "iconv-lite": "0.7.2",
+    "unzipper": "0.12.3"
+  },
+  "author": {
+    "name": "Bruno Tortato Furtado",
+    "email": "brunotfurtado@gmail.com",
+    "url": "https://www.linkedin.com/in/brunofurtado"
+  }
+}
