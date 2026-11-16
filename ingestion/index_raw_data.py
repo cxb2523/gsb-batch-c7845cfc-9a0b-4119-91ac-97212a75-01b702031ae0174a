@@ -26,12 +26,8 @@ if end_date.lower() == 'today':
 else:
     end_date = end_date
 
-# generate run_id 
+# generate run_id
 run_id = f"{config['ingestion']['run_id_nifty_prefix']}_{uuid.uuid4().hex[:8]}"
-
-
-# Fetch data from yfinance
-df = yf.download(symbol, start=start_date, end=end_date, interval=interval)
 
 # prepare mysql connection
 con = mysql.connector.connect(
@@ -58,20 +54,57 @@ INSERT IGNORE INTO index_prices
 VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
 """
 
+# per-symbol settlement counters
+success_count = 0   # symbols successfully written
+no_data_count = 0   # symbols for which Yahoo returned no data
+error_count = 0     # symbols that failed during write
+records_loaded = 0
+fatal_error = None
 
-# iterate row and insert
-for trade_date, row in df.iterrows():
-    payload = (
-        index_name,
-        trade_date.date(),
-        round(float(row["Open"]), 2),
-        round(float(row["High"]), 2),
-        round(float(row["Low"]), 2),
-        round(float(row["Close"]), 2),
-        int(row["Volume"]) if not str(row["Volume"]) == 'nan' else None,
-        run_id
-    )
-    cursor.execute(query, payload)
+try:
+    # Fetch data from yfinance
+    df = yf.download(symbol, start=start_date, end=end_date, interval=interval)
+
+    if df is None or df.empty:
+        no_data_count += 1
+        print(f"WARNING: {symbol}: Yahoo returned no data for this run.")
+    else:
+        try:
+            rows = []
+            for trade_date, row in df.iterrows():
+                rows.append((
+                    index_name,
+                    trade_date.date(),
+                    round(float(row["Open"]), 2),
+                    round(float(row["High"]), 2),
+                    round(float(row["Low"]), 2),
+                    round(float(row["Close"]), 2),
+                    int(row["Volume"]) if not str(row["Volume"]) == 'nan' else None,
+                    run_id
+                ))
+            cursor.executemany(query, rows)
+            con.commit()
+            records_loaded = cursor.rowcount if cursor.rowcount and cursor.rowcount > 0 else 0
+            success_count += 1
+        except Exception as write_err:
+            con.rollback()
+            error_count += 1
+            records_loaded = 0
+            print(f"ERROR: {symbol}: failed to write rows to index_prices: {write_err}")
+except Exception as e:
+    # unexpected failure (e.g. download blew up) -> the whole run failed
+    fatal_error = e
+    error_count += 1
+    records_loaded = 0
+    print(f"ERROR: index ingestion failed unexpectedly: {e}")
+
+# settle the run status from the per-symbol counters
+if success_count > 0 and no_data_count == 0 and error_count == 0:
+    status = "SUCCESS"
+elif success_count > 0:
+    status = "PARTIAL"
+else:
+    status = "FAILED"
 
 # log ingestion end time
 end_time = datetime.now()
@@ -79,9 +112,16 @@ cursor.execute("""
     UPDATE ingestion_logs
     SET end_time=%s, status=%s, records_loaded=%s
     WHERE run_id=%s
-    """, 
-    (end_time, "SUCCESS", len(df), run_id))
+    """,
+    (end_time, status, records_loaded, run_id))
 
 con.commit()
 cursor.close()
 con.close()
+
+print(f"\nIndex ingestion settled: status={status}, records_loaded={records_loaded} "
+      f"(success={success_count}, no_data={no_data_count}, errors={error_count})")
+print(f"Run ID: {run_id}")
+
+if fatal_error is not None:
+    raise fatal_error
