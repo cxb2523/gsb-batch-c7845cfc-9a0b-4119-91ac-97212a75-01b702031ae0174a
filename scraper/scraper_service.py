@@ -7,6 +7,7 @@ from league import get_league_parser
 from models.base_event_info import BaseEventInfo
 from models.fetch_odds_response import FetchOddsResponse
 from models.league_match import LeagueMatch
+from models.league_section_status import LeagueSectionState, LeagueSectionStatus
 from models.odds.odds_factory import get_odds_enum
 from models.odds_filter import OddsFilter
 from models.odds_result import OddsResult
@@ -104,11 +105,19 @@ class ScraperService:
         return event
 
     def fetch_and_parse_league(self, league_url: str) -> dict[str, Any]:
-        """Fetches the league results and fixtures pages and returns all matches (finished and scheduled) in one list."""
+        """Fetches the league results and fixtures pages and returns all matches (finished and scheduled) in one list.
+
+        Successful responses include a `section_statuses` list describing each section
+        (results/fixtures): `ok` when it contributed matches to the de-duplicated list,
+        `empty` when it parsed without matches that survived de-duplication, and `failed`
+        when the page could not be fetched. When every section fails, the legacy
+        ``{"error", "url"}`` response is returned instead, without `section_statuses`.
+        """
         league_parser = get_league_parser(self.parser.sport_type)
         sport = self.parser.sport_type
         matches: dict[str, LeagueMatch] = {}
-        errors: list[str] = []
+        section_statuses: list[LeagueSectionStatus] = []
+        failed_sections: list[str] = []
 
         for section in LEAGUE_SECTIONS:
             url = FlashscoreUrlBuilder.build_league_url(sport, league_url, section)
@@ -117,15 +126,34 @@ class ScraperService:
             except Exception as e:
                 # No matches in a section (e.g. no fixtures at season end) makes Playwright time out on the wait selector
                 self.logger.warning(f"Failed to fetch league page {url}: {e}", exc_info=True)
-                errors.append(url)
+                failed_sections.append(url)
+                section_statuses.append(LeagueSectionStatus(section=section, url=url, status=LeagueSectionState.FAILED))
                 continue
+
+            # Count only matches that survive event_url de-duplication so the status reflects
+            # what this section actually contributes to the final `matches` list.
+            contributed = 0
             for match in league_parser.parse(page_content):
-                matches.setdefault(match.event_url, match)
+                if match.event_url not in matches:
+                    matches[match.event_url] = match
+                    contributed += 1
+            section_statuses.append(
+                LeagueSectionStatus(
+                    section=section,
+                    url=url,
+                    status=LeagueSectionState.OK if contributed else LeagueSectionState.EMPTY,
+                    matches_count=contributed,
+                )
+            )
 
-        if len(errors) == len(LEAGUE_SECTIONS):
-            return {"error": f"Failed to fetch league pages for {league_url}", "url": errors[0]}
+        if len(failed_sections) == len(LEAGUE_SECTIONS):
+            return {"error": f"Failed to fetch league pages for {league_url}", "url": failed_sections[0]}
 
-        return {"league_url": league_url, "matches": list(matches.values())}
+        return {
+            "league_url": league_url,
+            "matches": list(matches.values()),
+            "section_statuses": section_statuses,
+        }
 
     def _fetch_and_parse_stats(self, event_url: str, stats_parser: BaseStatsParser) -> dict[str, Any]:
         """Fetches and parses the stats page, raises ValueError when the event has no stats."""

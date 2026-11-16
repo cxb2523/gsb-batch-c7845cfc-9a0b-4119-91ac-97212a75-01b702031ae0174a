@@ -66,6 +66,27 @@ uv run main.py event <url> [--with-stats] [--sport <sport>] [--engine <engine>] 
 uv run main.py event-info <url> [--sport <sport>] [--engine <engine>] [--timeout <seconds>]
 ```
 
+### Scrape League Matches
+```
+uv run main.py league <url> [--sport <sport>] [--engine <engine>] [--timeout <seconds>]
+```
+
+The `league` command merges the `results` and `fixtures` sections into one `matches`
+list, de-duplicated by `event_url` (the first occurrence is kept). Each section's
+outcome is reported in `section_statuses` so callers can spot sections that failed or
+returned no matches:
+
+| `status` | Meaning |
+|---|---|
+| `ok` | Section fetched and parsed; `matches_count` matches from it survived de-duplication |
+| `empty` | Section fetched and parsed, but none of its matches appear in the final list (no rows, or all rows were duplicates) |
+| `failed` | Section page could not be fetched (e.g. a timeout) |
+
+`matches_count` counts only matches the section contributed to the final de-duplicated
+list. When **every** section fails, the response keeps the legacy error shape
+`{"error": ..., "url": ...}` and contains no `section_statuses` field; a single failing
+section never fails the whole response.
+
 ### Options
 
 | Option | Description | Default |
