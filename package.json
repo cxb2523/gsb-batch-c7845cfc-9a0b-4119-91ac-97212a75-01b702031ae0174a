@@ -1,0 +1,40 @@
+{
+  "name": "vinbudin",
+  "version": "3.1.0",
+  "description": "Fetches product data from www.vinbudin.is",
+  "homepage": "https://github.com/valgeirb/vinbudin",
+  "engines": {
+    "node": ">=16.0.0"
+  },
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsup src/index.ts",
+    "release": "npm run build && npm publish && git push --follow-tags",
+    "test": "pnpm build && node --test tests/*.test.mjs",
+    "typecheck": "tsc --noEmit"
+  },
+  "author": {
+    "name": "Valgeir Björnsson",
+    "email": "valgeir@hey.com",
+    "url": "https://github.com/valgeirb"
+  },
+  "license": "MIT",
+  "keywords": [
+    "vinbudin",
+    "vinbudin scraper"
+  ],
+  "devDependencies": {
+    "prettier": "^2.8.8",
+    "ts-node": "^10.9.2",
+    "tsup": "^8.0.2",
+    "typescript": "^5.3.3"
+  },
+  "dependencies": {
+    "valibot": "^0.29.0"
+  }
+}
