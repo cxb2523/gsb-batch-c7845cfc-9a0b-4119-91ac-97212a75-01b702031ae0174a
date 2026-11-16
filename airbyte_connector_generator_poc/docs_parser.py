@@ -9,12 +9,20 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
-openai = OpenAI()
+openai_client = None
+
+
+def _get_openai_client():
+    """Create the OpenAI client lazily so importing this module needs no key."""
+    global openai_client
+    if openai_client is None:
+        openai_client = OpenAI()
+    return openai_client
 
 
 def elect_main_section_selector(html_tree_str: str):
     # Get selector for the main area we want to keep
-    response = openai.chat.completions.create(
+    response = _get_openai_client().chat.completions.create(
         messages=[{
             "role": "system",
             "content": """
@@ -40,7 +48,7 @@ def elect_main_section_selector(html_tree_str: str):
 
 
 def get_irrelevant_sections_selectors(html_tree_str: str):
-    response = openai.chat.completions.create(
+    response = _get_openai_client().chat.completions.create(
         messages=[{
             "role": "system",
             "content": """
@@ -102,8 +110,8 @@ def extract_relevant_html(raw_html: str, main_section_selector=None, irrelevant_
 
     # TODO: self heal
     if html_main_content is None:
-        raise ValueError(f"No main content found with selector `{
-                         main_section_selector}`.")
+        raise ValueError(
+            f"No main content found with selector `{main_section_selector}`.")
 
     html_main_content_tree = build_html_tree(html_main_content)
 

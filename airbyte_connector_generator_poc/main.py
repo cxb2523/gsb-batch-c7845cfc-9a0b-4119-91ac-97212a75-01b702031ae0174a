@@ -1,9 +1,15 @@
 import traceback
+from typing import Optional
+
 import yaml
 from dotenv import load_dotenv
 import typer
-from airbyte_connector_generator_poc.utils import check_env_for_key, write_debug_file, write_env_variable, validate_urls, nuke_debug_directory
+from airbyte_connector_generator_poc.utils import (check_env_for_key, write_debug_file, write_env_variable, split_urls,
+                                                   nuke_debug_directory, remove_stale_output_files)
 from airbyte_connector_generator_poc.scraper import scrape_urls
+from airbyte_connector_generator_poc.report import PageReport
+from airbyte_connector_generator_poc.errors import (
+    ScrapeBatchFailedError, SkyffelError)
 from asyncio import run
 from airbyte_connector_generator_poc.logger import logger
 from rich.console import Console
@@ -16,8 +22,73 @@ load_dotenv()
 console = Console(log_time=False)
 
 
+def _record_invalid_urls(page_report: PageReport, invalid_urls: list[str]) -> None:
+    for url in invalid_urls:
+        logger.warning("Failed to scrape %s: %s", url, "invalid URL")
+        page_report.record_scrape_failure(url, "invalid URL")
+
+
+async def build_openapi_spec(goal: str, urls: list[str], report: Optional[PageReport] = None):
+    """Scrape + preprocess the documentation pages and generate an OpenAPI spec.
+
+    Individual page failures are tolerated; the batch only aborts when every
+    page failed. The per-page report is written to ``.skyffel`` before raising,
+    so users still see which pages failed.
+    """
+    from airbyte_connector_generator_poc.openapi_generator import generate_openapi_spec
+
+    urls = [url.strip() for url in urls]
+    console.log("Scraping URLs")
+    console.print(Columns([Panel(url, expand=True) for url in urls]))
+
+    page_report = report if report is not None else PageReport(urls)
+
+    # A syntactically invalid URL is just another unusable page: report it and
+    # keep going with the rest of the batch.
+    valid_urls, invalid_urls = split_urls(urls)
+    _record_invalid_urls(page_report, invalid_urls)
+
+    if not valid_urls:
+        page_report.write()
+        page_report.print_summary(console)
+        raise ScrapeBatchFailedError(page_report)
+
+    logger.debug("Start scraping URLs: %s", valid_urls)
+    html_documents = await scrape_urls(valid_urls, report=page_report)
+    page_report = getattr(html_documents, "report", page_report)
+    # If the scraper returned a different report object, re-apply the invalid
+    # URL outcomes so the final report still lists every requested URL.
+    _record_invalid_urls(page_report, invalid_urls)
+    logger.debug("Scraped HTML documents")
+
+    if not html_documents:
+        page_report.write()
+        page_report.print_summary(console)
+        raise ScrapeBatchFailedError(page_report)
+
+    try:
+        openapi_spec = await generate_openapi_spec(
+            url_html_documents=html_documents,
+            user_goal=goal,
+            page_report=page_report)
+    except Exception:
+        # Persist the partial page report even if generation blew up, and tell
+        # the user which pages actually contributed.
+        page_report.write()
+        page_report.print_summary(console)
+        raise
+
+    page_report.write()
+    page_report.print_summary(console)
+
+    return openapi_spec
+
+
 async def _main(goal: str, urls: list[str]):
     nuke_debug_directory()
+    # A connector left over from a previous run must not be mistaken for the
+    # output of this run (which may fail entirely).
+    remove_stale_output_files()
 
     if not goal:
         goal = typer.prompt("Tell us, what do you want to integrate?")
@@ -31,7 +102,6 @@ async def _main(goal: str, urls: list[str]):
         write_env_variable("OPENAI_API_KEY", openai_api_key)
 
     from airbyte_connector_generator_poc.airbyte.airbyte import generate_airbyte_connector, validate_airbyte_connector
-    from airbyte_connector_generator_poc.openapi_generator import generate_openapi_spec
     from airbyte_connector_generator_poc.openapi_spec import load_openapi_spec_from_path_or_url
 
     console.log("[bold]Starting...")
@@ -44,17 +114,7 @@ async def _main(goal: str, urls: list[str]):
         openapi_spec = load_openapi_spec_from_path_or_url(
             openapi_spec_path)
     else:
-        console.log("Scraping URLs")
-        console.print(
-            Columns([Panel(url, expand=True) for url in urls]))
-
-        urls = validate_urls(urls)
-
-        logger.debug(f"Start scraping URLs: %s", urls)
-        html_documents = await scrape_urls(urls)
-        logger.debug(f"Scraped HTML documents")
-
-        openapi_spec = await generate_openapi_spec(url_html_documents=html_documents, user_goal=goal)
+        openapi_spec = await build_openapi_spec(goal, urls)
 
     with open("openapi.yaml", 'w') as file:
         yaml.safe_dump(openapi_spec, file)
@@ -64,7 +124,7 @@ async def _main(goal: str, urls: list[str]):
 
         console.log("[bold green]  ✅ Airbyte connector generated")
 
-        logger.debug(f"Writing airbyte connector")
+        logger.debug("Writing airbyte connector")
         with open("airbyte_connector.yaml", 'w') as f:
             yaml.safe_dump(airbyte_connector, f)
 
@@ -82,8 +142,17 @@ async def _main(goal: str, urls: list[str]):
     console.bell()
 
 
+def run_pipeline(goal: str, urls: list[str]):
+    """Run the pipeline, turning expected batch failures into a clean exit."""
+    try:
+        run(_main(goal, urls))
+    except SkyffelError as error:
+        console.log(f"[red bold]❌ {error}[/red bold]")
+        raise typer.Exit(code=1)
+
+
 def main(goal: str = typer.Option(), urls: list[str] = typer.Option()):
-    run(_main(goal, urls))
+    run_pipeline(goal, urls)
 
 
 def cli():

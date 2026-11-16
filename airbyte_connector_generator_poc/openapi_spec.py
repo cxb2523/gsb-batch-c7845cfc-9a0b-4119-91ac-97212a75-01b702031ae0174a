@@ -9,7 +9,15 @@ import yaml
 import json
 load_dotenv()
 
-openai = AsyncOpenAI()
+openai_client = None
+
+
+def _get_openai_client():
+    """Create the AsyncOpenAI client lazily so importing this module needs no key."""
+    global openai_client
+    if openai_client is None:
+        openai_client = AsyncOpenAI()
+    return openai_client
 
 
 def clean_openapi_spec(openapi_spec: dict):
@@ -72,7 +80,7 @@ def validate_openapi_spec(openapi_spec: dict):
 
 
 async def extract_details(markdown: str, user_goal: str):
-    response = await openai.chat.completions.create(
+    response = await _get_openai_client().chat.completions.create(
         model="gpt-4-turbo-preview",
         temperature=0,
         messages=[
@@ -141,7 +149,7 @@ Write the OpenAPI 3.0 specification.
 
     logger.debug("Generating OpenAPI spec")
 
-    response = await openai.chat.completions.create(
+    response = await _get_openai_client().chat.completions.create(
         messages=[
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": USER_PROMPT}
