@@ -127,33 +127,60 @@ class TracedDataFrame:
     # ------------------------------------------------------------------
 
     def _make_pipe_wrapper(self) -> Any:
-        """Wrap ``.pipe()`` using the function name as step label."""
+        """Wrap ``.pipe()`` so the piped function is traced from the inside.
+
+        The tracing proxy (not the real DataFrame) is passed as the first
+        argument so every DataFrame transformation inside *function* records
+        its own step.  After the function returns, a summary step named after
+        the function is appended when the overall result is a DataFrame.
+        """
         proxy = self
 
         def wrapper(function: Any, *args: Any, **kwargs: Any) -> Any:
             step_name = getattr(function, "__name__", str(function))
 
-            # Unwrap any proxy args so piped functions receive real DataFrames
+            # Extra positional/keyword args are still unwrapped so proxies
+            # never leak into Polars through the piped function's arguments.
             clean_args = tuple(unwrap(a) for a in args)
             clean_kwargs = {k: unwrap(v) for k, v in kwargs.items()}
 
+            # Snapshot the trace state so a raised exception leaves only the
+            # steps the function actually completed (no summary step).
+            steps_before = len(proxy._trace.steps)
+
             start = time.perf_counter()
-            result = function(proxy._df, *clean_args, **clean_kwargs)
+            # Pass the proxy itself: internal method calls stay traced.
+            result = function(proxy, *clean_args, **clean_kwargs)
             elapsed_ms = (time.perf_counter() - start) * 1000
 
-            if isinstance(result, pl.DataFrame):
-                previous = _get_previous(proxy._trace, proxy._df)
-                snapshot = capture_snapshot(
-                    result,
-                    step_name=step_name,
-                    execution_time_ms=elapsed_ms,
-                    sample_rows=proxy._sample_rows,
-                    previous=previous,
-                )
-                proxy._trace.steps.append(snapshot)
-                return TracedDataFrame(result, proxy._trace, proxy._sample_rows)
+            # Only DataFrame results get a summary step; non-DataFrame
+            # results are returned untouched and nothing is recorded here.
+            if not isinstance(result, pl.DataFrame):
+                return result
 
-            return result
+            real_result = unwrap(result)
+            had_internal_steps = len(proxy._trace.steps) > steps_before
+            if had_internal_steps:
+                # Diff the summary against the state before the pipe call so
+                # the row/schema deltas describe the function as a whole.
+                if steps_before:
+                    previous = proxy._trace.steps[steps_before - 1]
+                else:
+                    previous = proxy._trace.input_snapshot
+            else:
+                # No internal transformations: the summary is the only
+                # record of this pipe call, diffed like any other step.
+                previous = _get_previous(proxy._trace, proxy._df)
+
+            snapshot = capture_snapshot(
+                real_result,
+                step_name=step_name,
+                execution_time_ms=elapsed_ms,
+                sample_rows=proxy._sample_rows,
+                previous=previous,
+            )
+            proxy._trace.steps.append(snapshot)
+            return TracedDataFrame(real_result, proxy._trace, proxy._sample_rows)
 
         return wrapper
 

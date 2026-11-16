@@ -48,7 +48,7 @@ flowview/
 1. `@fv.trace` wraps the first `pl.DataFrame` argument in a `TracedDataFrame` proxy.
 2. Every method call on the proxy (`.filter()`, `.with_columns()`, etc.) is intercepted via `__getattr__`.
 3. The real Polars method runs on the underlying DataFrame. If it returns a new DataFrame, a `StepSnapshot` is captured and the result is re-wrapped in a fresh proxy.
-4. `.pipe(fn)` passes the real DataFrame to `fn` and records the result as a single step.
+4. `.pipe(fn)` passes the tracing proxy to `fn`, so each DataFrame operation inside `fn` is captured as its own step; a summary step named after `fn` is then recorded for the overall DataFrame result (skipped for non-DataFrame returns and when `fn` raises, while steps already completed are kept).
 5. `.group_by().agg()` is recorded as a combined step.
 6. When the decorated function returns, the proxy is unwrapped and a real `pl.DataFrame` is returned.
 7. The collected trace is rendered to the terminal using Rich.

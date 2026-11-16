@@ -506,16 +506,63 @@ class TestPipeHandling:
         result = traced.pipe(clean_data)
         trace = _get_trace(result)
 
-        assert len(trace.steps) == 1
-        assert trace.steps[0].step_name == "clean_data"
+        # One internal filter step plus the function-name summary step.
+        assert len(trace.steps) == 2
+        assert "filter(" in trace.steps[0].step_name
+        assert trace.steps[1].step_name == "clean_data"
+        assert trace.steps[1].row_count == 3
+
+    def test_pipe_internal_steps_share_trace(self, traced: TracedDataFrame):
+        """Internal transformations appear individually before the summary."""
+
+        def clean_data(df: pl.DataFrame) -> pl.DataFrame:
+            return df.filter(pl.col("status") == "active").with_columns(
+                (pl.col("price") * 2).alias("double_price")
+            )
+
+        result = traced.pipe(clean_data)
+        trace = _get_trace(result)
+
+        assert len(trace.steps) == 3
+        assert "filter(" in trace.steps[0].step_name
+        assert trace.steps[1].step_name == "with_columns(double_price)"
+        assert trace.steps[2].step_name == "clean_data"
+        # Summary reflects the final result of the whole function.
+        assert trace.steps[2].row_count == 3
+        assert trace.steps[2].col_count == 6
+
+    def test_pipe_summary_diff_covers_whole_function(self, sample_df: pl.DataFrame):
+        """The summary row/schema diff is computed against the pipe input."""
+        from flowview.collector import capture_snapshot
+
+        trace = PipelineTrace(function_name="test")
+        traced = TracedDataFrame(sample_df, trace, sample_rows=3)
+        trace.input_snapshot = capture_snapshot(
+            sample_df, step_name="input", sample_rows=3
+        )
+
+        def clean_data(df: pl.DataFrame) -> pl.DataFrame:
+            return df.filter(pl.col("status") == "active").with_columns(
+                (pl.col("price") * 2).alias("double_price")
+            )
+
+        result = traced.pipe(clean_data)
+        trace = _get_trace(result)
+
+        summary = trace.steps[-1]
+        assert summary.step_name == "clean_data"
+        assert summary.row_diff == -2  # 5 -> 3 across the whole function
+        assert summary.schema_diff is not None
+        assert "double_price" in summary.schema_diff.added
 
     def test_pipe_with_lambda(self, traced: TracedDataFrame):
         result = traced.pipe(lambda df: df.head(3))
         trace = _get_trace(result)
 
-        assert len(trace.steps) == 1
-        assert trace.steps[0].step_name == "<lambda>"
-        assert trace.steps[0].row_count == 3
+        assert len(trace.steps) == 2
+        assert trace.steps[0].step_name == "head(3)"
+        assert trace.steps[1].step_name == "<lambda>"
+        assert trace.steps[1].row_count == 3
 
     def test_pipe_with_extra_args(self, traced: TracedDataFrame):
         def top_n(df: pl.DataFrame, n: int) -> pl.DataFrame:
@@ -524,9 +571,10 @@ class TestPipeHandling:
         result = traced.pipe(top_n, 2)
         trace = _get_trace(result)
 
-        assert len(trace.steps) == 1
-        assert trace.steps[0].step_name == "top_n"
-        assert trace.steps[0].row_count == 2
+        assert len(trace.steps) == 2
+        assert trace.steps[0].step_name == "head(2)"
+        assert trace.steps[1].step_name == "top_n"
+        assert trace.steps[1].row_count == 2
 
     def test_pipe_with_kwargs(self, traced: TracedDataFrame):
         def top_n(df: pl.DataFrame, n: int = 3) -> pl.DataFrame:
@@ -535,24 +583,70 @@ class TestPipeHandling:
         result = traced.pipe(top_n, n=2)
         trace = _get_trace(result)
 
-        assert len(trace.steps) == 1
-        assert trace.steps[0].row_count == 2
+        assert len(trace.steps) == 2
+        assert trace.steps[0].step_name == "head(2)"
+        assert trace.steps[1].row_count == 2
 
     def test_pipe_returns_proxy(self, traced: TracedDataFrame):
         result = traced.pipe(lambda df: df.head(3))
         assert type(result) is TracedDataFrame
         assert isinstance(result, pl.DataFrame)
 
-    def test_pipe_passes_real_df(self, traced: TracedDataFrame):
-        """Pipe should pass the real DataFrame, not the proxy, to the function."""
-        received_types = []
+    def test_pipe_passes_proxy(self, traced: TracedDataFrame):
+        """Pipe should pass the tracing proxy, not the real DataFrame, so
+        transformations inside the function are recorded as individual steps."""
+        received = []
 
         def check_type(df: pl.DataFrame) -> pl.DataFrame:
-            received_types.append(type(df))
+            received.append(df)
             return df
 
         traced.pipe(check_type)
-        assert received_types[0] is pl.DataFrame
+        assert type(received[0]) is TracedDataFrame
+        assert isinstance(received[0], pl.DataFrame)
+
+    def test_pipe_no_transformation_single_summary(self, traced: TracedDataFrame):
+        """A function that does no DataFrame transformation leaves only the
+        function-name summary step."""
+
+        def identity(df: pl.DataFrame) -> pl.DataFrame:
+            return df
+
+        result = traced.pipe(identity)
+        trace = _get_trace(result)
+
+        assert len(trace.steps) == 1
+        assert trace.steps[0].step_name == "identity"
+        assert trace.steps[0].row_count == 5
+
+    def test_pipe_non_dataframe_return_records_nothing(self, traced: TracedDataFrame):
+        """Non-DataFrame results are returned untouched with no summary step."""
+
+        def count_rows(df: pl.DataFrame) -> int:
+            # A proxy method that does not return a DataFrame adds no step.
+            return df.height
+
+        result = traced.pipe(count_rows)
+        trace = _get_trace(traced)
+
+        assert result == 5
+        assert len(trace.steps) == 0
+
+    def test_pipe_exception_keeps_prior_steps_no_summary(self, traced: TracedDataFrame):
+        """Exceptions propagate; completed internal steps remain, and no
+        summary step is recorded for the failed function."""
+
+        def failing(df: pl.DataFrame) -> pl.DataFrame:
+            df = df.filter(pl.col("status") == "active")
+            return df.filter(pl.col("nonexistent") > 0)
+
+        with pytest.raises(pl.exceptions.ColumnNotFoundError):
+            traced.pipe(failing)
+
+        trace = _get_trace(traced)
+        assert len(trace.steps) == 1  # only the first filter
+        assert "filter(" in trace.steps[0].step_name
+        assert all(step.step_name != "failing" for step in trace.steps)
 
     def test_pipe_chaining(self, traced: TracedDataFrame):
         def step_a(df: pl.DataFrame) -> pl.DataFrame:
@@ -564,9 +658,11 @@ class TestPipeHandling:
         result = traced.pipe(step_a).pipe(step_b)
         trace = _get_trace(result)
 
-        assert len(trace.steps) == 2
-        assert trace.steps[0].step_name == "step_a"
-        assert trace.steps[1].step_name == "step_b"
+        assert len(trace.steps) == 4
+        assert trace.steps[0].step_name == "head(4)"
+        assert trace.steps[1].step_name == "step_a"
+        assert trace.steps[2].step_name == "head(3)"
+        assert trace.steps[3].step_name == "step_b"
 
     def test_pipe_unwraps_extra_args(self, sample_df: pl.DataFrame):
         """Extra args passed to .pipe() should be unwrapped if they are proxies."""
@@ -577,10 +673,46 @@ class TestPipeHandling:
             return df.join(right, on="id", how="left")
 
         traced = TracedDataFrame(sample_df, PipelineTrace(function_name="t"), 5)
-        # Should not raise — the proxy arg must be unwrapped
+        # Should not raise — the proxy extra arg must be unwrapped, while the
+        # first arg remains the tracing proxy.
         result = traced.pipe(join_with, other_traced)
         assert type(unwrap(result)) is pl.DataFrame
         assert "label" in unwrap(result).columns
+
+    def test_pipe_proxy_extra_arg_never_reaches_polars(self, sample_df: pl.DataFrame):
+        """A proxy passed as an extra positional/keyword arg is unwrapped
+        before the piped function sees it."""
+        other = pl.DataFrame({"id": [1, 2], "label": ["a", "b"]})
+        other_traced = TracedDataFrame(other, PipelineTrace(function_name="t"), 5)
+        seen = {}
+
+        def join_with(
+            df: pl.DataFrame, right: pl.DataFrame, *, extra: pl.DataFrame
+        ) -> int:
+            seen["right"] = right
+            seen["extra"] = extra
+            return df.height
+
+        traced = TracedDataFrame(sample_df, PipelineTrace(function_name="t"), 5)
+        traced.pipe(join_with, other_traced, extra=other_traced)
+
+        assert type(seen["right"]) is pl.DataFrame
+        assert type(seen["extra"]) is pl.DataFrame
+
+    def test_pipe_nested_function_chain_after_pipe(self, traced: TracedDataFrame):
+        """Chaining a regular method after a pipe diffs against the summary."""
+
+        def clean(df: pl.DataFrame) -> pl.DataFrame:
+            return df.filter(pl.col("status") == "active")
+
+        result = traced.pipe(clean).head(2)
+        trace = _get_trace(result)
+
+        assert len(trace.steps) == 3
+        assert "filter(" in trace.steps[0].step_name
+        assert trace.steps[1].step_name == "clean"
+        assert trace.steps[2].step_name == "head(2)"
+        assert trace.steps[2].row_diff == -1  # 3 -> 2, diffed against summary
 
 
 # ------------------------------------------------------------------
@@ -658,9 +790,10 @@ class TestMixedPipeAndMethodChain:
         result = traced.pipe(clean).sort("price")
         trace = _get_trace(result)
 
-        assert len(trace.steps) == 2
-        assert trace.steps[0].step_name == "clean"
-        assert trace.steps[1].step_name == "sort(price)"
+        assert len(trace.steps) == 3
+        assert "filter(" in trace.steps[0].step_name
+        assert trace.steps[1].step_name == "clean"
+        assert trace.steps[2].step_name == "sort(price)"
 
     def test_method_chain_then_pipe(self, traced: TracedDataFrame):
         def aggregate(df: pl.DataFrame) -> pl.DataFrame:
@@ -669,9 +802,10 @@ class TestMixedPipeAndMethodChain:
         result = traced.filter(pl.col("status") == "active").pipe(aggregate)
         trace = _get_trace(result)
 
-        assert len(trace.steps) == 2
+        assert len(trace.steps) == 3
         assert "filter(" in trace.steps[0].step_name
-        assert trace.steps[1].step_name == "aggregate"
+        assert "group_by" in trace.steps[1].step_name
+        assert trace.steps[2].step_name == "aggregate"
 
     def test_method_chain_then_groupby(self, traced: TracedDataFrame):
         result = (
@@ -699,8 +833,28 @@ class TestMixedPipeAndMethodChain:
         )
         trace = _get_trace(result)
 
-        assert len(trace.steps) == 4
+        assert len(trace.steps) == 5
         assert "filter(" in trace.steps[0].step_name
-        assert trace.steps[1].step_name == "add_revenue"
-        assert trace.steps[2].step_name == "sort(revenue)"
-        assert trace.steps[3].step_name == "head(2)"
+        assert trace.steps[1].step_name == "with_columns(revenue)"
+        assert trace.steps[2].step_name == "add_revenue"
+        assert trace.steps[3].step_name == "sort(revenue)"
+        assert trace.steps[4].step_name == "head(2)"
+
+    def test_pipe_internal_groupby_still_combined(self, traced: TracedDataFrame):
+        """group_by().agg() inside a piped function keeps its combined step."""
+
+        def aggregate(df: pl.DataFrame) -> pl.DataFrame:
+            return (
+                df.filter(pl.col("status") == "active")
+                .group_by("category")
+                .agg(pl.col("price").sum().alias("total"))
+            )
+
+        result = traced.pipe(aggregate)
+        trace = _get_trace(result)
+
+        assert len(trace.steps) == 3
+        assert "filter(" in trace.steps[0].step_name
+        assert trace.steps[1].step_name == "group_by(category).agg(total)"
+        assert trace.steps[2].step_name == "aggregate"
+        assert trace.steps[2].row_count == 2

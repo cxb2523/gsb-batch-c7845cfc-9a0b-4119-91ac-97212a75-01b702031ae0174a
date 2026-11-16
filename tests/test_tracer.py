@@ -215,3 +215,150 @@ class TestTraceDecorator:
         assert hasattr(fv, "unwrap")
         df = pl.DataFrame({"a": [1]})
         assert fv.unwrap(df) is df
+
+
+# ----------------------------------------------------------------------
+# .pipe() internal tracing — acceptance scenarios
+# ----------------------------------------------------------------------
+
+
+def _capture_trace(pipeline, df):
+    """Run a decorated pipeline and return (result, captured PipelineTrace)."""
+    import flowview.tracer as tracer
+
+    captured: list = []
+    original = tracer.render_trace
+    tracer.render_trace = lambda trace, config: captured.append(trace)
+    try:
+        result = pipeline(df)
+    finally:
+        tracer.render_trace = original
+    return result, captured[0]
+
+
+class TestPipeInternalTracing:
+    def test_two_internal_transforms_plus_summary(self):
+        def clean(df: pl.DataFrame) -> pl.DataFrame:
+            return df.filter(pl.col("value") > 0).with_columns(
+                (pl.col("value") * 2).alias("double")
+            )
+
+        @fv.trace
+        def pipeline(df: pl.DataFrame) -> pl.DataFrame:
+            return df.pipe(clean)
+
+        df = pl.DataFrame({"value": [-1, 0, 1, 2, 3]})
+        result, trace = _capture_trace(pipeline, df)
+
+        names = [step.step_name for step in trace.steps]
+        assert len(names) == 3
+        assert "filter(" in names[0]
+        assert names[1] == "with_columns(double)"
+        assert names[2] == "clean"
+
+        # Summary row count matches the final result.
+        assert trace.steps[2].row_count == result.shape[0] == 3
+        assert trace.steps[2].col_count == 2
+        assert result["double"].to_list() == [2, 4, 6]
+
+    def test_no_internal_transformation_summary_only(self):
+        def passthrough(df: pl.DataFrame) -> pl.DataFrame:
+            return df
+
+        @fv.trace
+        def pipeline(df: pl.DataFrame) -> pl.DataFrame:
+            return df.pipe(passthrough)
+
+        df = pl.DataFrame({"value": [1, 2, 3]})
+        result, trace = _capture_trace(pipeline, df)
+
+        assert [step.step_name for step in trace.steps] == ["passthrough"]
+        assert result.shape == (3, 1)
+
+    def test_exception_keeps_internal_steps_without_summary(self):
+        from flowview.models import PipelineTrace
+        from flowview.proxy import TracedDataFrame
+
+        def failing(df: pl.DataFrame) -> pl.DataFrame:
+            df = df.filter(pl.col("value") > 0)
+            return df.filter(pl.col("missing") > 0)
+
+        df = pl.DataFrame({"value": [-1, 0, 1, 2]})
+        trace_obj = PipelineTrace(function_name="pipeline")
+        proxy = TracedDataFrame(df, trace_obj, sample_rows=5)
+
+        with pytest.raises(pl.exceptions.ColumnNotFoundError):
+            proxy.pipe(failing)
+
+        # The completed internal step survives; no function-name summary.
+        assert len(trace_obj.steps) == 1
+        assert "filter(" in trace_obj.steps[0].step_name
+        assert all(step.step_name != "failing" for step in trace_obj.steps)
+
+    def test_extra_proxy_args_are_unwrapped(self):
+        from flowview.models import PipelineTrace
+        from flowview.proxy import TracedDataFrame
+
+        other = pl.DataFrame({"id": [1, 2], "label": ["a", "b"]})
+
+        def join_with(
+            df: pl.DataFrame, right: pl.DataFrame, *, how: str
+        ) -> pl.DataFrame:
+            # The extra proxy must be unwrapped before reaching the function.
+            assert type(right) is pl.DataFrame
+            return df.join(right, on="id", how=how)
+
+        df = pl.DataFrame({"id": [1, 2, 3], "value": [10, 20, 30]})
+        trace_obj = PipelineTrace(function_name="pipeline")
+        other_proxy = TracedDataFrame(other, trace_obj, sample_rows=5)
+        main_proxy = TracedDataFrame(df, trace_obj, sample_rows=5)
+
+        out = main_proxy.pipe(join_with, other_proxy, how="left")
+
+        assert type(fv.unwrap(out)) is pl.DataFrame
+        assert "label" in out.columns
+        # Internal join step plus the function-name summary.
+        names = [step.step_name for step in trace_obj.steps]
+        assert names == ["join(on=id, how=left)", "join_with"]
+
+    def test_async_pipe_records_internal_steps(self):
+        """Async traced functions must still trace pipe internals."""
+
+        def clean(df: pl.DataFrame) -> pl.DataFrame:
+            return df.filter(pl.col("value") > 1).with_columns(
+                (pl.col("value") * 10).alias("big")
+            )
+
+        @fv.trace
+        async def pipeline(df: pl.DataFrame) -> pl.DataFrame:
+            return df.pipe(clean)
+
+        import flowview.tracer as tracer
+
+        captured: list = []
+        original = tracer.render_trace
+        tracer.render_trace = lambda trace, config: captured.append(trace)
+        try:
+            df = pl.DataFrame({"value": [1, 2, 3]})
+            result = asyncio.run(pipeline(df))
+        finally:
+            tracer.render_trace = original
+
+        assert type(result) is pl.DataFrame
+        trace = captured[0]
+        names = [step.step_name for step in trace.steps]
+        assert "filter(" in names[0]
+        assert names[1] == "with_columns(big)"
+        assert names[2] == "clean"
+        assert trace.steps[2].row_count == 2
+
+    def test_pipe_non_dataframe_return_unchanged(self):
+        def row_count(df: pl.DataFrame) -> int:
+            return df.height
+
+        @fv.trace
+        def pipeline(df: pl.DataFrame) -> int:
+            return df.pipe(row_count)
+
+        df = pl.DataFrame({"value": [1, 2, 3]})
+        assert pipeline(df) == 3

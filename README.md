@@ -59,6 +59,12 @@ def process(df: pl.DataFrame) -> pl.DataFrame:
     return df.pipe(clean).pipe(filter_active).pipe(add_revenue)
 ```
 
+The tracing proxy is passed **into** each piped function, so operations inside
+the function (`filter`, `with_columns`, `group_by().agg()`, ...) appear as
+their own steps, followed by a summary step named after the function. A
+function that performs no DataFrame transformation produces only that summary
+step.
+
 ## What You See
 
 Each step in your pipeline is displayed as a box showing:
@@ -86,7 +92,7 @@ flowview traces any DataFrame method that returns a new DataFrame. These methods
 | `unique(subset)` | `unique(id)` |
 | `join(other, ...)` | `join(on=id, how=left)` |
 | `group_by(cols).agg(exprs)` | `group_by(category).agg(total_revenue)` |
-| `pipe(fn)` | uses the function name, e.g. `clean_data` |
+| `pipe(fn)` | one step per operation inside `fn`, plus a summary named after `fn`, e.g. `clean_data` |
 
 Other methods (e.g., `explode`, `melt`, `unpivot`) are traced with a fallback name like `explode('tags')`.
 
@@ -113,7 +119,7 @@ There is no monkey-patching and no global state. Each decorated call is fully is
 ## Limitations
 
 - **LazyFrame** is not supported — `df.lazy()` exits the proxy. Only eager DataFrames are traced.
-- **Pipe internals** are not individually traced — `df.pipe(fn)` produces a single step named after `fn`, not one step per operation inside `fn`.
+- **Pipe internals** are traced step by step — `df.pipe(fn)` records each operation inside `fn` and then a summary step named after `fn` (the summary is omitted if `fn` returns a non-DataFrame or raises; steps completed before an exception are kept).
 - **IDE autocomplete** may not show DataFrame methods inside the decorated function body.
 - **`type(df)`** returns `TracedDataFrame` inside the decorated function. `isinstance(df, pl.DataFrame)` works correctly.
 - **Only the first DataFrame argument** is wrapped when a function takes multiple DataFrames.
