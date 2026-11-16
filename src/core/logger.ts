@@ -13,13 +13,21 @@ const moduleLogFormat = printf(info => {
     return `${info.timestamp} ${info.level}: ${info.message}`;
   });
 
+// create the directory and any missing parent, so logging works from a fresh directory
+function ensureDirSync(dir:string) : void {
+    if(fs.existsSync(dir)) return;
+    let parent = require('path').dirname(dir);
+    if(parent !== dir) ensureDirSync(parent);
+    if(!fs.existsSync(dir)) fs.mkdirSync(dir);
+}
+
 export class Logger {
 
     constructor(){}
 
     static createModuleLogger () : any {
         let modLogDir = `${process.cwd()}/.rpscript/logs`;
-        if(!fs.existsSync(modLogDir)) fs.mkdirSync(modLogDir);
+        ensureDirSync(modLogDir);
 
         return winston.createLogger({
             level: 'debug',
@@ -33,14 +41,14 @@ export class Logger {
     }
     static createRunnerLogger (fileName:string,debug?:boolean) :any{
         let modLogDir = `${process.cwd()}/.rpscript/logs`;
-        if(!fs.existsSync(modLogDir)) fs.mkdirSync(modLogDir);
+        ensureDirSync(modLogDir);
 
         let runnerLogDir = `${process.cwd()}/.rpscript/logs/runner/`;
-        if(!fs.existsSync(runnerLogDir)) fs.mkdirSync(runnerLogDir);
+        ensureDirSync(runnerLogDir);
 
         let logFile:string = df('yy-mm-dd-HH-MM-ss')+'-run.log';
 
-        if(!fs.existsSync(runnerLogDir)) fs.mkdirSync(runnerLogDir);
+        ensureDirSync(runnerLogDir);
 
         let level = debug ? 'debug' : 'info';
 

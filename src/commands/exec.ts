@@ -1,6 +1,7 @@
 import {Runner} from 'rpscript-parser';
 import { EventEmitter } from 'events';
 import {Logger} from '../core/logger';
+import {ModulePrecheck, PrecheckResult} from '../core/module_precheck';
 import {ErrorMessage} from '../format/error_msg';
 import fs from 'fs';
 import * as R from '../../lib/ramda.min';
@@ -11,10 +12,12 @@ export class ExecCommand {
   logger:any;
 
   debug:boolean;
+  precheck:ModulePrecheck;
 
   constructor(config, event?:(evt:EventEmitter)=>void) {
     this.runner = new Runner(config);
     this.debug = config.debug;
+    this.precheck = config.precheck instanceof ModulePrecheck ? config.precheck : new ModulePrecheck();
 
     if(!event)
       this.registerDefaultEvents(this.runner);
@@ -26,15 +29,41 @@ export class ExecCommand {
     this.logger = Logger.createRunnerLogger(filename,this.debug);
 
     try{
+      // check that every action used by the script has a module behind it before running
+      let check:PrecheckResult;
+      try{
+        check = await this.precheck.checkFile(filename);
+      }catch(err){
+        // the precheck itself failed (e.g. file cannot be read) - report and block
+        check = ModulePrecheck.errorResult(filename,err);
+      }
+      if(!this.handlePrecheck(check)) return;
+
       let result = await this.runner.execute(filename,args);
 
       return result;
-    
+
     }catch(er){
       console.error(er);
     }
   }
 
+  /**
+   * Print the precheck outcome and tell the caller whether execution may continue.
+   * A failed check blocks the run; the process exit code is set so callers (and
+   * shell pipelines) can tell a blocked run from a successful one.
+   */
+  handlePrecheck (check:PrecheckResult) : boolean {
+    if(check.ok) return true;
+
+    console.log(ModulePrecheck.format(check));
+
+    if(!this.runner.config.skipRun)
+      console.log('Execution aborted.');
+
+    process.exitCode = 1;
+    return false;
+  }
   async runStatement(content:string) : Promise<any>{
     this.logger = Logger.createRunnerLogger('none',this.debug);
     try{
