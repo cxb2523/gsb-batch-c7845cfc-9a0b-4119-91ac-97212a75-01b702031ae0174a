@@ -5,7 +5,6 @@ import logging
 from dacite import from_dict
 from dataclasses import dataclass
 from datetime import datetime
-import shutil
 import os
 import glob
 
@@ -21,7 +20,17 @@ from gcp_airflow_foundations.operators.api.sensors.sftp_prefix_sensor import SFT
 from gcp_airflow_foundations.source_class.generic_file_source import GenericFileIngestionDagBuilder
 from gcp_airflow_foundations.common.gcp.load_builder import load_builder
 from gcp_airflow_foundations.base_class.sftp_table_config import SFTPTableConfig
-from gcp_airflow_foundations.common.sftp.helpers import save_id_to_file
+from gcp_airflow_foundations.common.sftp.helpers import (
+    INGESTION_SUMMARY_XCOM_KEY,
+    FileTransfer,
+    IngestionSummary,
+    cleanup_local_path,
+    create_local_staging_dir,
+    finalize_ingestion,
+    remove_private_key_file,
+    save_id_to_file,
+    transfer_files,
+)
 
 
 class SFTPFileIngestionDagBuilder(GenericFileIngestionDagBuilder):
@@ -233,64 +242,95 @@ class SFTPFileIngestionDagBuilder(GenericFileIngestionDagBuilder):
 
     # flake8: noqa: C901
     def load_sftp_to_gcs(self, table_config, dir_prefix, gcs_bucket_prefix, bucket, **kwargs):
+        """Load the files listed for this ``ds`` from SFTP into GCS.
+
+        Files are settled one by one: a failing file neither aborts the run nor
+        hides the files that were already uploaded. The per-file outcome is
+        pushed to XCom and the task fails at the end if anything failed. Files
+        that already exist in GCS for this ``ds`` are skipped, so re-running the
+        same ``ds`` does not upload duplicates.
+        """
         ds = kwargs["ds"]
         ti = kwargs["ti"]
+        table_name = table_config.table_name
         sftp_conn = self.config.source.extra_options["sftp_source_config"]["sftp_connection_name"]
-
-        if not os.path.isdir("sftp_data"):
-            os.mkdir("sftp_data")
-        my_path = "sftp_data"
 
         if gcs_bucket_prefix is None:
             gcs_bucket_prefix = ""
         if not gcs_bucket_prefix == "":
             gcs_bucket_prefix += "/"
 
-        table_name = table_config.table_name
+        summary = IngestionSummary(table_name=table_name, ds=ds)
+        uses_private_key = "sftp_private_key_secret_name" in self.config.source.extra_options["sftp_source_config"]
+        staging_dir = None
 
-        if "sftp_private_key_secret_name" in self.config.source.extra_options["sftp_source_config"]:
-            private_key_name = self.config.source.extra_options["sftp_source_config"]["sftp_private_key_secret_name"]
-            save_id_to_file(private_key_name)
-        sftp_hook = SFTPHook(sftp_conn)
+        try:
+            if uses_private_key:
+                private_key_name = self.config.source.extra_options["sftp_source_config"]["sftp_private_key_secret_name"]
+                save_id_to_file(private_key_name)
+            sftp_hook = SFTPHook(sftp_conn)
 
-        files_to_load = ti.xcom_pull(key='file_list', task_ids=f'{table_name}.ftp_taskgroup.get_file_list')
+            files_to_load = ti.xcom_pull(key='file_list', task_ids=f'{table_name}.ftp_taskgroup.get_file_list') or []
 
-        if self.config.source.extra_options["file_source_config"]["file_prefix_filtering"]:
-            file_name_prefixes = [f.split("/")[-1] for f in files_to_load]
-            full_file_names = []
-            dir = sftp_hook.list_directory(dir_prefix)
-            for prefix in file_name_prefixes:
-                for f in dir:
-                    if f.startswith(prefix):
-                        full_file_names.append(f)
-                    break
-            files_to_load = full_file_names
+            if self.config.source.extra_options["file_source_config"]["file_prefix_filtering"]:
+                file_name_prefixes = [f.split("/")[-1] for f in files_to_load]
+                full_file_names = []
+                dir = sftp_hook.list_directory(dir_prefix)
+                for prefix in file_name_prefixes:
+                    for f in dir:
+                        if f.startswith(prefix):
+                            full_file_names.append(f)
+                        break
+                files_to_load = full_file_names
 
-        for file in files_to_load:
-            sftp_hook.retrieve_file(dir_prefix + "/" + file, my_path + "/" + file)
+            destination_path_prefix = gcs_bucket_prefix + table_name + "/" + ds
+            if "gcs_bucket_path_format_mode" in self.config.source.extra_options["file_source_config"]:
+                date = datetime.strptime(str(ds), '%Y-%m-%d').strftime('%Y/%m/%d')
+                destination_path_prefix = gcs_bucket_prefix + table_name + "/" + date
 
-        destination_path_prefix = gcs_bucket_prefix + table_name + "/" + ds
-        if "gcs_bucket_path_format_mode" in self.config.source.extra_options["file_source_config"]:
-            date = datetime.strptime(str(ds), '%Y-%m-%d').strftime('%Y/%m/%d')
-            destination_path_prefix = gcs_bucket_prefix + table_name + "/" + date
+            staging_dir = create_local_staging_dir(table_name=table_name, ds=ds)
+            transfers = [
+                FileTransfer(
+                    remote_path=dir_prefix + "/" + file,
+                    local_path=staging_dir + "/" + file,
+                    object_name=destination_path_prefix + "/" + file,
+                )
+                for file in files_to_load
+            ]
 
-        gcs_hook = GCSHook()
-        for file in files_to_load:
-            obj = destination_path_prefix + "/" + file
-            gcs_hook.upload(
+            transfer_files(
+                files=transfers,
+                sftp_hook=sftp_hook,
+                gcs_hook=GCSHook(),
                 bucket_name=bucket,
-                object_name=obj,
-                filename=my_path + "/" + file)
-        # delete data
-        shutil.rmtree(my_path)
+                summary=summary,
+            )
+        except Exception as exc:
+            # A run-level failure (connection, listing, ...) is recorded in the
+            # summary so the run still ends with a readable account of what
+            # happened before the exception is surfaced by finalize_ingestion.
+            summary.record_run_error(exc)
+            logging.exception("SFTP ingestion failed before completing: %s", exc)
+        finally:
+            # Never skip cleanup because a single file failed, and only ever
+            # remove this run's own staging directory.
+            cleanup_local_path(staging_dir)
+            if uses_private_key:
+                remove_private_key_file()
 
-        if "sftp_private_key_secret_name" in self.config.source.extra_options["sftp_source_config"]:
-            if os.path.isfile("id_rsa"):
-                os.remove("id_rsa")
+        finalize_ingestion(ti, summary, xcom_key=INGESTION_SUMMARY_XCOM_KEY)
 
+    # flake8: noqa: C901
     def load_sftp_to_gcs_flag(self, table_config, dir_prefix, gcs_bucket_prefix, bucket, flag_file_path, **kwargs):
+        """Load a whole SFTP directory tree into GCS, using a flag file as the marker.
+
+        The flag file itself is never uploaded. Every other file is settled
+        individually, the run summary is pushed to XCom and the task fails at
+        the end if at least one file failed. Files already present in GCS for
+        this ``ds`` are skipped.
+        """
         ds = kwargs["ds"]
-        # ti = kwargs["ti"]
+        ti = kwargs["ti"]
 
         airflow_date_template = self.config.source.extra_options["file_source_config"]["airflow_date_template"]
 
@@ -310,81 +350,100 @@ class SFTPFileIngestionDagBuilder(GenericFileIngestionDagBuilder):
         table_name = table_config.table_name
         destination_path_prefix = gcs_bucket_prefix + table_name + "/" + ds
 
-        if "sftp_private_key_secret_name" in self.config.source.extra_options["sftp_source_config"]:
-            private_key_name = self.config.source.extra_options["sftp_source_config"]["sftp_private_key_secret_name"]
-            save_id_to_file(private_key_name)
-        sftp_hook = SFTPHook()
+        uses_private_key = "sftp_private_key_secret_name" in self.config.source.extra_options["sftp_source_config"]
+        summary = IngestionSummary(table_name=table_name, ds=ds)
+        staging_dir = None
+        upload_candidates = []
+        partition_prefix = None
 
-        # Create directory and download data
-        if not os.path.isdir("sftp_data"):
-            os.mkdir("sftp_data")
-        my_path = "sftp_data"
-        os.chmod(my_path, 0o777)
+        try:
+            if uses_private_key:
+                private_key_name = self.config.source.extra_options["sftp_source_config"]["sftp_private_key_secret_name"]
+                save_id_to_file(private_key_name)
+            sftp_hook = SFTPHook()
 
-        # get recursive sftp structure w/ full paths
-        tree_map_prefix = dir_prefix
-        upload_option = table_config.extra_options.get("file_table_config")["parquet_upload_option"]
-        if not full_dir_download and upload_option == "BASH":
-            tree_map_prefix += f"/{date_column}={source_file_date}"
-        logging.info(tree_map_prefix)
-        map = sftp_hook.get_tree_map(tree_map_prefix)
-        if isinstance(map[0], list):
-            map = map[0]
+            # get recursive sftp structure w/ full paths
+            tree_map_prefix = dir_prefix
+            upload_option = table_config.extra_options.get("file_table_config")["parquet_upload_option"]
+            if not full_dir_download and upload_option == "BASH":
+                tree_map_prefix += f"/{date_column}={source_file_date}"
+            logging.info(tree_map_prefix)
+            map = sftp_hook.get_tree_map(tree_map_prefix)
+            if map and isinstance(map[0], list):
+                map = map[0]
 
-        # get list of files, create local directory structure, download
-        files_to_upload = [x for x in map]
-        # delete prefix up until the external partitions
-        local_file_prefix_to_drop = ""
-        if not files_to_upload == []:
-            local_file_prefix_to_drop = my_path + "/" + dir_prefix + "/"
+            # get list of files, create local directory structure, download
+            files_to_upload = [x for x in (map or [])]
+            logging.info(files_to_upload)
 
-        gcs_hook = GCSHook()
-        logging.info(files_to_upload)
+            staging_dir = create_local_staging_dir(table_name=table_name, ds=ds)
+            # delete prefix up until the external partitions
+            local_file_prefix_to_drop = staging_dir + "/" + dir_prefix + "/"
+            upload_candidates = [staging_dir + "/" + file for file in files_to_upload]
 
-        local_files_list = [my_path + "/" + file for file in files_to_upload]
+            transfers = []
+            for remote_file in files_to_upload:
+                if remote_file == flag_file_path:
+                    # Behaviour of the flag-file mode is unchanged: the marker
+                    # file is never downloaded nor uploaded. It is still listed
+                    # in the summary so the run account is complete.
+                    transfers.append(
+                        FileTransfer(
+                            remote_path=remote_file,
+                            local_path=staging_dir + "/" + remote_file,
+                            object_name=None,
+                            skip_reason="flag file excluded from ingestion",
+                        )
+                    )
+                    continue
 
-        for remote_file in files_to_upload:
-            file = my_path + "/" + remote_file
-            path_to_create = file.rsplit('/', 1)[0]
-            if not os.path.exists(path_to_create):
-                folders = path_to_create.split("/")
-                for i in range(len(folders)):
-                    folder_to_create = "/".join(folders[0:i + 1])
-                    if not os.path.exists(folder_to_create):
-                        os.mkdir(folder_to_create)
-                        os.chmod(folder_to_create, 0o777)
+                file = staging_dir + "/" + remote_file
+                transfers.append(
+                    FileTransfer(
+                        remote_path=remote_file,
+                        local_path=file,
+                        object_name=destination_path_prefix + "/" + file.replace(local_file_prefix_to_drop, ""),
+                    )
+                )
 
-            if not remote_file == flag_file_path:
-                sftp_hook.retrieve_file(remote_file, file)
-                # Get correct GCS file names to upload
-                obj = destination_path_prefix + "/" + file.replace(local_file_prefix_to_drop, "")
-                logging.info(obj)
-                gcs_hook.upload(
-                    bucket_name=bucket,
-                    object_name=obj,
-                    filename=file)
-                os.remove(file)
+            transfer_files(
+                files=transfers,
+                sftp_hook=sftp_hook,
+                gcs_hook=GCSHook(),
+                bucket_name=bucket,
+                summary=summary,
+            )
 
-        if "sftp_private_key_secret_name" in self.config.source.extra_options["sftp_source_config"]:
-            if os.path.isfile("id_rsa"):
-                os.remove("id_rsa")
+            # xcom push the prefix of external partitions, e.g. "par1=val1/par2=val/par3=val3"
+            # hacky way to do it - find a cleaner way to fix it later
+            if "partition_prefix" not in self.config.source.extra_options["sftp_source_config"]:
+                if upload_candidates:
+                    # Mirrors the historical derivation: take the parent of the
+                    # first file, relative to the configured directory prefix.
+                    candidate = upload_candidates[0].rsplit('/', 1)[0]
+                    relative_candidate = candidate.replace(staging_dir + "/", "", 1)
+                    partition_prefix = relative_candidate.replace(dir_prefix, "", 1).lstrip("/")
+                    if "/" in partition_prefix:
+                        partition_prefix = partition_prefix.rsplit('/', 1)[0]
+            else:
+                # TEMPORARY hack to fix ingestion. # TO REMOVE
+                if table_config.extra_options.get("file_table_config")["parquet_upload_option"] == "BASH":
+                    partition_prefix = self.config.source.extra_options["sftp_source_config"]["partition_prefix"]
+                    partition_prefix.replace("date", table_config.extra_options.get("sftp_table_config")["date_column"])
+                    partition_prefix.replace("ds", ds)
 
-        # xcom push the prefix of external partitions, e.g. "par1=val1/par2=val/par3=val3"
-        # hacky way to do it - find a cleaner way to fix it later
+            if partition_prefix is not None:
+                logging.info(partition_prefix)
+                ti.xcom_push(key='partition_prefix', value=partition_prefix)
+        except Exception as exc:
+            summary.record_run_error(exc)
+            logging.exception("SFTP ingestion failed before completing: %s", exc)
+        finally:
+            cleanup_local_path(staging_dir)
+            if uses_private_key:
+                remove_private_key_file()
 
-        if "partition_prefix" not in self.config.source.extra_options["sftp_source_config"]:
-            partition_prefix = local_files_list[0].rsplit('/', 1)[0].replace(my_path + "/" + dir_prefix, "").lstrip("/")
-            if "/" in partition_prefix:
-                partition_prefix = partition_prefix.rsplit('/', 1)[0]
-        else:
-            # TEMPORARY hack to fix ingestion. # TO REMOVE
-            if table_config.extra_options.get("file_table_config")["parquet_upload_option"] == "BASH":
-                partition_prefix = self.config.source.extra_options["sftp_source_config"]["partition_prefix"]
-                partition_prefix.replace("date", table_config.extra_options.get("sftp_table_config")["date_column"])
-                partition_prefix.replace("ds", ds)
-
-        logging.info(partition_prefix)
-        kwargs['ti'].xcom_push(key='partition_prefix', value=partition_prefix)
+        finalize_ingestion(ti, summary, xcom_key=INGESTION_SUMMARY_XCOM_KEY)
 
     def delete_gcs_files(self, table_config, taskgroup):
         pass
