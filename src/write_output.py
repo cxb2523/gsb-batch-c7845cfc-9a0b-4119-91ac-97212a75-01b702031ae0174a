@@ -1,5 +1,10 @@
 from botasaurus import bt
-from botasaurus.decorators import print_filenames
+
+try:  # botasaurus < 4.0.90 exposed this helper from `botasaurus.decorators`
+    from botasaurus.decorators import print_filenames
+except ImportError:  # newer releases only ship it in `decorators_common`
+    from botasaurus.decorators_common import print_filenames
+
 from .write_output_utils import kebab_case, make_folders
 
 

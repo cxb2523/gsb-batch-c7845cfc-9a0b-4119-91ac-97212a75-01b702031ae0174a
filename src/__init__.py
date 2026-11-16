@@ -1,1 +1,1 @@
-from .duckduckgo_scraper import DuckDuckGo 
+from .duckduckgo_scraper import DuckDuckGo, SearchResults

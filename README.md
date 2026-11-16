@@ -79,6 +79,41 @@ response = requests.get(
 print(response.json())
 ```
 
+## Batch Search (Library)
+
+`DuckDuckGo.search(queries, max=10, key=...)` accepts a single query or a list of
+queries and returns the same flat `list` of results as before. The list also
+carries a `.summary` with the per-query settlement, so a failure on one query
+never hides what the others returned:
+
+```python
+from src import DuckDuckGo
+
+results = DuckDuckGo.search(["mango", "watermelon"], max=10, key="YOUR_API_KEY")
+
+results.summary
+# {
+#   "total_queries": 2,
+#   "successful_count": 1,
+#   "partial_count": 0,
+#   "failed_count": 1,
+#   "successful": [{"query": "mango", "count": 10}],
+#   "partial": [],                       # [{"query": ..., "count": ..., "error": ...}]
+#   "failed": [{"query": "watermelon", "error": "FAILED_DUE_TO_CREDITS_EXHAUSTED"}],
+#   "total_results": 10,
+# }
+```
+
+- **Successful** queries are written to `output/<query>/json` and
+  `output/<query>/csv` and aggregated into `output/_all`.
+- **Partial** queries (a later page failed) keep every result already scraped,
+  are written and aggregated the same way, and are reported under `partial`
+  with the error type and the number of results kept.
+- **Failed** queries produce no output files; their error type is listed under
+  `failed`.
+- Failures and partial runs are never cached, so retrying the batch hits the
+  API again. Rate-limit responses are still retried automatically.
+
 
 ## API Reference
 
