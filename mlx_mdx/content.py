@@ -12,6 +12,7 @@ from .config import CrawlConfig
 from .models import ImageCandidate, PageMetadata
 
 _MIN_PLAINTEXT_CHARS = 200
+_DATA_URI_PREVIEW_CHARS = 96
 
 
 def _clean_content(soup: BeautifulSoup, strip_chrome: bool = False) -> BeautifulSoup:
@@ -37,6 +38,17 @@ def _iter_primary_candidates(soup_full: BeautifulSoup) -> Iterable[BeautifulSoup
             yield BeautifulSoup(str(candidate), "html.parser")
     if soup_full.body:
         yield BeautifulSoup(str(soup_full.body), "html.parser")
+
+
+def _attribute_text(value: object) -> str:
+    """Coerce a BeautifulSoup attribute value (str or list) to text."""
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (list, tuple)):
+        return " ".join(str(item) for item in value)
+    return str(value)
 
 
 def extract_content(html: str, final_url: str, config: CrawlConfig):
@@ -92,11 +104,20 @@ def extract_content(html: str, final_url: str, config: CrawlConfig):
 
     image_candidates: List[ImageCandidate] = []
     for img in summary.find_all("img"):
-        src = img.get("src")
-        if not src or src.startswith("data:"):
+        src = _attribute_text(img.get("src"))
+        if not src:
+            continue
+        alt_text = _attribute_text(img.get("alt")).strip()
+        if src.startswith("data:"):
+            # Inline images are not downloadable; keep them as candidates so
+            # every <img> in the article has an auditable outcome. Truncate the
+            # payload so a large inline image cannot bloat metadata/manifests.
+            preview = src[:_DATA_URI_PREVIEW_CHARS]
+            if len(src) > _DATA_URI_PREVIEW_CHARS:
+                preview += "…"
+            image_candidates.append(ImageCandidate(preview, preview, alt_text))
             continue
         abs_url = urljoin(final_url, src)
-        alt_text = img.get("alt", "").strip()
         image_candidates.append(ImageCandidate(src, abs_url, alt_text))
 
     metadata = PageMetadata(

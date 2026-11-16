@@ -216,6 +216,28 @@ def _run_crawl(args: argparse.Namespace) -> None:
                 metric.inference_seconds,
                 metric.model_load_seconds,
             )
+            logger.debug(
+                "Images for %s -> candidates: %d | saved: %d | skipped: %d | files: %d",
+                metric.url,
+                len(metric.image_outcomes),
+                len(metric.image_result.saved_outcomes),
+                len(metric.image_result.skipped_outcomes),
+                len(metric.image_result.assets),
+            )
+            for outcome in metric.image_outcomes:
+                if outcome.saved:
+                    logger.debug(
+                        "  saved %s -> %s",
+                        outcome.absolute_url,
+                        outcome.relative_path,
+                    )
+                else:
+                    logger.debug(
+                        "  %s %s (%s)",
+                        outcome.status.value,
+                        outcome.absolute_url,
+                        outcome.detail,
+                    )
 
     if args.mcp:
         for idx, metric in enumerate(metrics):

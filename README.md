@@ -180,7 +180,7 @@ Key options:
 - `--timeout` — navigation timeout in seconds (default: `30`).
 - `--model` — MLX model identifier (default: `mlx-community/jinaai-ReaderLM-v2`).
 - `--max-html-chars` / `--max-text-chars` — trim limits before passing content to the model.
-- `--verbose` — emit detailed logging, including readability decisions.
+- `--verbose` — emit detailed logging, including readability decisions and per-image outcomes.
 
 ### OCR documents or images
 
@@ -209,7 +209,59 @@ Website crawls produce:
 ```text
 <output>/<domain>/<slug>/
   ├─ index.md          # Markdown with YAML front matter
-  └─ images/           # Downloaded images (if any)
+  ├─ images.json       # Per-image outcome manifest (saved / skipped + reason)
+  └─ images/           # Downloaded images (only files that were saved)
+```
+
+### Image handling
+
+Images are processed one at a time after the article is extracted. A single
+failure — request timeout, HTTP error, non-image payload, size limit, or a disk
+write error — is recorded for that image only; the remaining images and the
+Markdown output are unaffected.
+
+Every candidate `<img>` gets exactly one outcome, available on
+`ProcessMetrics.image_outcomes` and mirrored to `images.json`:
+
+| Status | Meaning |
+| --- | --- |
+| `saved` | Written under `images/` and safe to link |
+| `skipped_data_uri` | Inline `data:` URI, not downloaded |
+| `skipped_invalid_url` | URL cannot be requested |
+| `skipped_request_failed` | Timeout, connection error, or non-2xx response |
+| `skipped_too_small` | Payload below the minimum size (likely a placeholder) |
+| `skipped_too_large` | Payload above the configured maximum |
+| `skipped_unsupported_type` | Body is not a recognisable/allowed image format |
+| `skipped_write_failed` | File could not be created or written |
+| `skipped_unexpected_error` | Anything else; the message is in `detail` |
+
+`index.md` only links images that were actually saved. A reference to a skipped
+image is reduced to its alt text, so no local link ever points at a missing
+file. Images in fenced code blocks and inline code are left untouched.
+
+```json
+{
+  "source_url": "https://example.com/article",
+  "totals": { "candidates": 3, "saved": 1, "skipped": 2, "files": 1 },
+  "images": [
+    {
+      "original_src": "/hero.png",
+      "absolute_url": "https://example.com/hero.png",
+      "alt_text": "Hero chart",
+      "status": "saved",
+      "detail": "wrote 48213 bytes to images/image-01-hero-chart.png",
+      "relative_path": "images/image-01-hero-chart.png"
+    },
+    {
+      "original_src": "/slow.png",
+      "absolute_url": "https://example.com/slow.png",
+      "alt_text": "Slow chart",
+      "status": "skipped_request_failed",
+      "detail": "request timed out (ReadTimeout)",
+      "relative_path": null
+    }
+  ]
+}
 ```
 
 Document transcription produces:

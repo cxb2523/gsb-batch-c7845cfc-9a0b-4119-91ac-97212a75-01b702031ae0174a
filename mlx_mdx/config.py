@@ -19,3 +19,4 @@ class CrawlConfig:
     max_tokens: int = 2048
     max_html_chars: int = 50_000
     max_text_chars: int = 20_000
+    image_timeout: float = 15.0

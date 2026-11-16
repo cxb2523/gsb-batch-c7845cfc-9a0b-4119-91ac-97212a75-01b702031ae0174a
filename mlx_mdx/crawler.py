@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional, Tuple
 from urllib.parse import urlparse
@@ -25,7 +26,7 @@ from .markdown import (
     replace_image_links,
     strip_code_fence,
 )
-from .models import ImageAsset, PageMetadata
+from .models import ImageAsset, ImageDownloadResult, ImageOutcome, PageMetadata
 from .utils import slugify
 
 logger = logging.getLogger("mlx_mdx")
@@ -41,6 +42,23 @@ class ProcessMetrics:
     inference_seconds: float
     model_load_seconds: float
     markdown: str
+    image_result: ImageDownloadResult = field(default_factory=ImageDownloadResult)
+    image_manifest_path: Optional[Path] = None
+
+    @property
+    def image_outcomes(self) -> List[ImageOutcome]:
+        """Per-candidate image outcomes for this page, in input order."""
+        return list(self.image_result.outcomes)
+
+    @property
+    def saved_images(self) -> List[ImageAsset]:
+        """Assets that were written to disk for this page."""
+        return list(self.image_result.assets)
+
+    @property
+    def skipped_images(self) -> List[ImageOutcome]:
+        """Candidates that were not written to disk, with their reasons."""
+        return list(self.image_result.skipped_outcomes)
 
 
 @dataclass
@@ -51,9 +69,14 @@ class PreparedPage:
     metadata: PageMetadata
     content_html: str
     plain_text: str
-    assets: List[ImageAsset]
+    image_result: ImageDownloadResult
     output_dir: Path
     start_time: float
+
+    @property
+    def assets(self) -> List[ImageAsset]:
+        """Assets that were successfully stored locally."""
+        return list(self.image_result.assets)
 
 
 def build_output_dir(config: CrawlConfig, metadata: PageMetadata) -> Path:
@@ -110,16 +133,36 @@ async def prepare_url(
     )
 
     output_dir = build_output_dir(config, metadata)
-    assets = download_images(image_candidates, output_dir)
+    image_result = download_images(
+        image_candidates, output_dir, request_timeout=config.image_timeout
+    )
     return PreparedPage(
         url=url,
         metadata=metadata,
         content_html=content_html,
         plain_text=plain_text,
-        assets=assets,
+        image_result=image_result,
         output_dir=output_dir,
         start_time=overall_start,
     )
+
+
+def write_image_manifest(page: PreparedPage) -> Path:
+    """Persist the per-candidate image outcomes next to the Markdown.
+
+    The manifest makes it possible to audit why a given image link is absent
+    from ``index.md`` without re-running the crawl.
+    """
+    manifest_path = page.output_dir / "images.json"
+    payload = {
+        "source_url": page.metadata.source_url,
+        **(page.image_result.to_dict()),
+    }
+    manifest_path.write_text(
+        json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    return manifest_path
 
 
 async def run_crawler(
@@ -143,11 +186,12 @@ async def run_crawler(
     inference_times: List[float] = []
     for idx, page in enumerate(prepared_pages, start=1):
         logger.debug("Generating Markdown %d/%d for %s", idx, len(prepared_pages), page.url)
+        saved_assets = page.assets
         request = MarkdownRequest(
             metadata=page.metadata,
             content_html=page.content_html,
             plain_text=page.plain_text,
-            images=page.assets,
+            images=saved_assets,
         )
         gen_start = time.perf_counter()
         body = generator.generate_body(
@@ -166,12 +210,42 @@ async def run_crawler(
 
     for idx, (page, body_markdown) in enumerate(zip(prepared_pages, bodies)):
         body_markdown = strip_code_fence(body_markdown)
-        body_markdown = replace_image_links(body_markdown, page.assets)
+        body_markdown = replace_image_links(
+            body_markdown,
+            page.assets,
+            outcomes=page.image_result.outcomes,
+            output_dir=page.output_dir,
+        )
         markdown = compose_markdown(page.metadata, body_markdown, page.assets)
+
+        try:
+            manifest_path: Optional[Path] = write_image_manifest(page)
+        except OSError as exc:
+            logger.warning(
+                "Failed to write image manifest for %s: %s", page.url, exc
+            )
+            manifest_path = None
 
         output_path = page.output_dir / "index.md"
         output_path.write_text(markdown, encoding="utf-8")
         logger.info("Saved Markdown to %s", output_path)
+
+        for outcome in page.image_result.outcomes:
+            if outcome.saved:
+                logger.debug(
+                    "Image saved for %s: %s -> %s",
+                    page.url,
+                    outcome.absolute_url,
+                    outcome.relative_path,
+                )
+            else:
+                logger.info(
+                    "Image not saved for %s: %s (%s: %s)",
+                    page.url,
+                    outcome.absolute_url,
+                    outcome.status.value,
+                    outcome.detail,
+                )
 
         total_elapsed = time.perf_counter() - page.start_time
         metrics.append(
@@ -182,6 +256,8 @@ async def run_crawler(
                 inference_seconds=inference_times[idx] if idx < len(inference_times) else 0.0,
                 model_load_seconds=load_times[idx],
                 markdown=markdown,
+                image_result=page.image_result,
+                image_manifest_path=manifest_path,
             )
         )
     return metrics
