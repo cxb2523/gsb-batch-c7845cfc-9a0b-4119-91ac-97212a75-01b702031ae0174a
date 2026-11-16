@@ -108,6 +108,14 @@ class BotFacade:
         await self.apply_component.start_applying()
         logger.info("Процесс поиска вакансий успешно завершен")
 
+    def get_unapplied_filters(self):
+        """Неприменённые фильтры последнего поиска (сбой/неполнота справочников hh.ru)."""
+        return self.search_component.get_unapplied_filters()
+
+    def get_search_run_report(self):
+        """Сводка последнего поиска: неприменённые фильтры и постраничная статистика."""
+        return self.apply_component.get_search_run_report()
+
     def _validate_non_empty(self, value, name) -> None:
         """Проверяем, что поле с именем `name` не пустое"""
         logger.debug(f"Проверяем, что поле с именем {name} не пустое")

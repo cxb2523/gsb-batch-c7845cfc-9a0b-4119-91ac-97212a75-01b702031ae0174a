@@ -1,7 +1,7 @@
-from typing import Any, Dict
+from typing import Any, Dict, List
 
+from src.job_manager.playwright_manager import PlaywrightJobManager, UnappliedFilter
 from src.logger_config import logger
-from src.job_manager.playwright_manager import PlaywrightJobManager
 
 
 class SearchCustomizer:
@@ -25,3 +25,7 @@ class SearchCustomizer:
     async def start_search(self) -> None:
         """Запуск поиска вакансий"""
         await self.manager.set_advanced_search_params(self.search_params)
+
+    def get_unapplied_filters(self) -> List[UnappliedFilter]:
+        """Фильтры, которые не удалось применить при последнем запуске поиска."""
+        return self.manager.get_unapplied_filters()

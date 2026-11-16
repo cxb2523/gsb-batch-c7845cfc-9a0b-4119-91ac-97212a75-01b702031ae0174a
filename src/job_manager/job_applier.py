@@ -13,14 +13,8 @@ from src.constants import LAST_RUN_FILE, SEARCH_CONFIG_FILE
 from src.job_manager.playwright_manager import PlaywrightJobManager
 from src.logger_config import logger
 from src.telegram.telegram_manager import TelegramReportSender
-from src.utils.utils import (
-    load_yaml_file,
-    pause,
-    save_yaml_file,
-    sleep,
-)
 from src.utils.db import save_job_to_db
-from src.utils.utils import load_app_config
+from src.utils.utils import load_app_config, load_yaml_file, pause, save_yaml_file, sleep
 from src.views.job import Job, JobDescription
 
 # Load config
@@ -116,8 +110,12 @@ class JobApplier:
         self.gpt_resume_generator = gpt_resume_generator
 
     async def get_vacancies_from_page(self, page_num: int = 0) -> List[Any]:
-        """Получить вакансии с очередной страницы"""
+        """Получить вакансии с очередной страницы (только список, как раньше)."""
         return await self.manager.get_vacancies_from_page(page_num)
+
+    def get_search_run_report(self):
+        """Сводка последнего поиска: неприменённые фильтры и постраничная статистика."""
+        return self.manager.get_search_run_report()
 
     async def scrape_vacancy(self, vacancy: Dict[str, Any]) -> Job:
         """
@@ -175,10 +173,47 @@ class JobApplier:
         self.resume_improvement_recommendations()
         # запускаем поиск вакансий
         await self.search_component.start_search()
+        # Предупреждаем, если часть условий поиска не применилась (сбой справочников hh.ru)
+        unapplied_filters = self.manager.get_unapplied_filters()
+        if unapplied_filters:
+            logger.warning(
+                "Условия поиска неполные, не применены фильтры: "
+                + "; ".join(
+                    f"{item.filter_type}='{item.requested_value}' ({item.reason})"
+                    for item in unapplied_filters
+                )
+            )
+        # Сколько страниц подряд не удалось открыть/полностью разобрать — защита от зацикливания
+        consecutive_page_failures = 0
+        max_consecutive_page_failures = 3
         # продолжаем пока не достигнем максимально допустимого числа откликов
         while self.success_applies_num < self.max_applies_num and self.applies_num < 400:
             # идем по всем страницам пока они не закончатся
-            vacancies = await self.get_vacancies_from_page(self.page_num)
+            page_result = await self.manager.fetch_vacancies_page(self.page_num)
+            if not page_result.ok:
+                # Страница не открылась — это не то же самое, что пустая выдача:
+                # фиксируем и пробуем следующую, пока не накопится серия неудач.
+                logger.warning(
+                    f"Страница {self.page_num} пропущена из-за ошибки: {page_result.error}"
+                )
+                consecutive_page_failures += 1
+                if consecutive_page_failures >= max_consecutive_page_failures:
+                    logger.error(
+                        f"Подряд не удалось открыть {consecutive_page_failures} страниц, "
+                        "останавливаем сбор"
+                    )
+                    break
+                self.page_num += 1
+                logger.info(f"Переходим на страницу {self.page_num}")
+                continue
+            consecutive_page_failures = 0
+            vacancies = page_result.vacancies
+            if page_result.failed_cards:
+                logger.warning(
+                    f"На странице {self.page_num} не разобрано карточек: "
+                    f"{len(page_result.failed_cards)} из {page_result.cards_count}; "
+                    f"успешно обработано {page_result.success_count}"
+                )
             if len(vacancies) == 0:
                 if self.page_num == 0:
                     logger.warning("По данному поисковому запросу не найдено ни одной вакансии")
@@ -212,6 +247,7 @@ class JobApplier:
             self.page_num += 1
             logger.info(f"Переходим на страницу {self.page_num}")
         logger.info(f"Откликов отправлено: {self.success_applies_num}")
+        self._log_search_run_summary()
         logger.info("Завершаем работу.")
         # если поиск прошел успешно - отсылаем отчет о проделанной работе
         if not (COVER_LETTER_MODE is True or SCRAPE_MODE is True) and result != "Error":
@@ -221,6 +257,19 @@ class JobApplier:
                 logger.info("Отсылаем отчёт о проделанной работе в Telegram")
                 self.send_report()
                 self._write_the_last_search_time()
+
+    def _log_search_run_summary(self) -> None:
+        """Логирует итоги сбора: успех по страницам, номера и причины неудачных страниц."""
+        report = self.manager.get_search_run_report()
+        if not report.pages:
+            return
+        page_stats = ", ".join(
+            f"стр.{page.page_num}: успешно {page.success_count}/{page.cards_count}"
+            for page in report.pages
+        )
+        logger.info(f"Итоги сбора по страницам — {page_stats}")
+        for page in report.failed_pages:
+            logger.error(f"Неудачная страница {page.page_num}: {page.error}")
 
     async def send_repsonse(self, vacancy: Dict[str, Any]) -> str:
         """Разослать отклики всем работодателям на странице"""
@@ -244,7 +293,7 @@ class JobApplier:
             )
             self._save_company(job, ("Error", reason), vacancy)
             raise
-            
+
         minimum_job_time = time.time() + MINIMUM_WAIT_TIME_SEC
         company_name = job.company_name
         company_job_title = job.job_title
@@ -359,12 +408,10 @@ class JobApplier:
                 )
                 self._save_job_description(job_description)
             if COVER_LETTER_MODE is True:
-                logger.info(
-                    "Находимся в режиме отладки сопроводительных писем - не откликаемся"
-                )
+                logger.info("Находимся в режиме отладки сопроводительных писем - не откликаемся")
                 return "Skip", "COVER_LETTER_MODE"
             elif SCRAPE_MODE is True:
-                # если находимся в режиме сбора данных о вакансиях - 
+                # если находимся в режиме сбора данных о вакансиях -
                 # не откликаемся на вакансии, только сохраняем данные о вакансиях в локальную БД,
                 # и статистику по навыкам - в файл skill_stat.yaml
                 additional_skills = self.gpt_answerer.extract_skills_from_vacancy(job.description)
@@ -374,9 +421,7 @@ class JobApplier:
                 self._update_skill_stat(skills)
                 save_job_to_db(job)
 
-                logger.info(
-                    "Находимся в режиме сбора информации о вакансиях- не откликаемся"
-                )
+                logger.info("Находимся в режиме сбора информации о вакансиях- не откликаемся")
                 return "Skip", "SCRAPE_MODE"
             else:
                 return await self.manager.apply_to_vacancy(

@@ -1,10 +1,14 @@
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 from playwright.async_api import Error as PlaywrightError
 
-from src.job_manager.playwright_manager import PlaywrightJobManager
-
+from src.job_manager.playwright_manager import (
+    PageFetchResult,
+    PlaywrightJobManager,
+    UnappliedFilter,
+)
 
 SECRETS = {
     "hh_login": "test@example.com",
@@ -591,6 +595,352 @@ async def test_build_search_query_maps_config_to_url_params(manager):
         ("search_period", "7"),
         ("items_on_page", "50"),
     ]
+
+
+# ---------------------------------------------------------------------------
+# Неприменённые фильтры (сбой/неполнота справочников hh.ru)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_dictionary_failure_recorded_as_unapplied_filter(manager):
+    """Сбой справочника не выбрасывает фильтр молча: он попадает в сводку с причиной."""
+    manager.search_params = {
+        "area": "Москва, Питер",
+        "professional_role": "Программист",
+        "industry": "IT",
+        "districts": "Центральный",
+    }
+
+    async def _failing_dictionary(client, path, params=None):
+        raise httpx.ConnectError("connection refused")
+
+    with patch.object(
+        PlaywrightJobManager, "_fetch_hh_dictionary", side_effect=_failing_dictionary
+    ):
+        query = await manager._build_search_query()
+
+    # Ни одного ID-фильтра в URL не попало
+    assert not any(key in ("area", "professional_role", "industry", "district") for key, _ in query)
+
+    unapplied = manager.get_unapplied_filters()
+    assert len(unapplied) == 5  # 2 города + роль + отрасль + район
+    by_type = {}
+    for item in unapplied:
+        assert item.reason == "dictionary_error"
+        assert "connection refused" in item.detail
+        by_type.setdefault(item.filter_type, []).append(item.requested_value)
+    assert by_type["area"] == ["Москва", "Питер"]
+    assert by_type["professional_role"] == ["Программист"]
+    assert by_type["industry"] == ["IT"]
+    assert by_type["district"] == ["Центральный"]
+
+    # Сводка доступна отдельным методом и сериализуема для логов/уведомлений
+    report = manager.get_search_run_report()
+    dumped = report.to_dict()
+    assert len(dumped["unapplied_filters"]) == 5
+    assert dumped["unapplied_filters"][0]["filter_type"] == "area"
+
+
+@pytest.mark.asyncio
+async def test_unmatched_name_recorded_as_unapplied_filter(manager):
+    """Название, которого нет в справочнике, фиксируется как no_match, остальные фильтры живут."""
+
+    async def _dictionary(client, path, params=None):
+        if path == "/suggests/areas":
+            # Москва есть в справочнике, а по Несущеграду подсказок нет вовсе
+            if params and params.get("text") == "Москва":
+                return [{"id": "1", "text": "Москва"}]
+            return []
+        if path == "/suggests/professional_roles":
+            return []  # справочник ответил, но вариантов нет
+        if path == "/industries":
+            return []  # отраслей в ответе справочника нет
+        return []
+
+    manager.search_params = {
+        "area": "Москва, Несущеград",
+        "professional_role": "Космонавт",
+        "industry": "Рыболовство",
+    }
+
+    with patch.object(PlaywrightJobManager, "_fetch_hh_dictionary", side_effect=_dictionary):
+        query = await manager._build_search_query()
+
+    # Москва по-прежнему превратилась в ID
+    assert ("area", "1") in query
+    assert not any(key == "industry" for key, _ in query)
+    # Несущеград, роль и отрасль отброшены не молча
+    unapplied = manager.get_unapplied_filters()
+    no_match = {(f.filter_type, f.requested_value): f for f in unapplied}
+    assert no_match[("area", "Несущеград")].reason == "no_match"
+    assert no_match[("professional_role", "Космонавт")].reason == "no_match"
+    assert no_match[("industry", "Рыболовство")].reason == "no_match"
+
+
+@pytest.mark.asyncio
+async def test_set_advanced_search_params_resets_report(manager_with_page):
+    """Каждый новый запуск поиска начинает сводку с чистого листа."""
+    manager_with_page.search_report.unapplied_filters.append(
+        UnappliedFilter(filter_type="area", requested_value="old", reason="no_match")
+    )
+    manager_with_page.page.goto = AsyncMock()
+    manager_with_page.page.url = "https://hh.ru/search/vacancy"
+
+    async def _dictionary(client, path, params=None):
+        return [{"id": "1", "text": "Москва"}]
+
+    with (
+        patch.object(PlaywrightJobManager, "_fetch_hh_dictionary", side_effect=_dictionary),
+        patch.object(manager_with_page, "pause_async", new_callable=AsyncMock),
+        patch.object(manager_with_page, "_handle_interfering_messages", new_callable=AsyncMock),
+    ):
+        await manager_with_page.set_advanced_search_params({"area": "Москва"})
+
+    assert manager_with_page.get_unapplied_filters() == []
+    assert "area=1" in manager_with_page.search_page_url
+
+
+@pytest.mark.asyncio
+async def test_district_matching_filters_other_city_options(manager):
+    """Районы сопоставляются только среди справочника найденных городов."""
+
+    async def _dictionary(client, path, params=None):
+        if path == "/suggests/areas":
+            return [{"id": "1", "text": "Москва"}]
+        if path == "/districts":
+            return [
+                {"id": "11", "name": "Центральный", "area_id": "1"},
+                {"id": "22", "name": "Северный", "area_id": "2"},
+            ]
+        return []
+
+    manager.search_params = {"area": "Москва", "districts": "Центральный"}
+
+    with patch.object(PlaywrightJobManager, "_fetch_hh_dictionary", side_effect=_dictionary):
+        query = await manager._build_search_query()
+
+    # Район чужого города (area_id=2) в опции не попал, Центральный сопоставился
+    assert ("district", "11") in query
+    assert manager.get_unapplied_filters() == []
+
+
+@pytest.mark.asyncio
+async def test_district_no_match_when_city_not_resolved(manager):
+    """Без найденного города у районов нет вариантов — район фиксируется как no_match."""
+
+    async def _dictionary(client, path, params=None):
+        if path == "/suggests/areas":
+            return []  # город не найден -> area_ids пуст
+        if path == "/districts":
+            return [{"id": "22", "name": "Северный", "area_id": "2"}]
+        return []
+
+    manager.search_params = {"area": "Несущеград", "districts": "Центральный"}
+
+    with patch.object(PlaywrightJobManager, "_fetch_hh_dictionary", side_effect=_dictionary):
+        query = await manager._build_search_query()
+
+    assert not any(key == "district" for key, _ in query)
+    unapplied = {(f.filter_type, f.requested_value): f for f in manager.get_unapplied_filters()}
+    assert unapplied[("area", "Несущеград")].reason == "no_match"
+    assert unapplied[("district", "Центральный")].reason == "no_match"
+
+
+@pytest.mark.asyncio
+async def test_invalid_json_body_recorded_as_dictionary_error(manager):
+    """Нечитаемое тело ответа справочника не роняет сбор, а помечается как сбой фильтра."""
+    manager.search_params = {"area": "Москва"}
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="это не JSON", headers={"content-type": "text/plain"})
+
+    transport = httpx.MockTransport(_handler)
+    real_async_client = httpx.AsyncClient
+
+    def _client_factory(*args, **kwargs):
+        kwargs["transport"] = transport
+        return real_async_client(*args, **kwargs)
+
+    with patch("src.job_manager.playwright_manager.httpx.AsyncClient", side_effect=_client_factory):
+        query = await manager._build_search_query()
+
+    assert not any(key == "area" for key, _ in query)
+    [item] = manager.get_unapplied_filters()
+    assert item.filter_type == "area"
+    assert item.reason == "dictionary_error"
+    assert "JSON" in item.detail
+
+
+@pytest.mark.asyncio
+async def test_legacy_get_hh_dictionary_swallows_errors(manager_with_page):
+    """Устаревший помощник по-прежнему возвращает [] вместо исключения."""
+
+    async def _failing_dictionary(client, path, params=None):
+        raise httpx.ConnectError("offline")
+
+    with patch.object(
+        PlaywrightJobManager, "_fetch_hh_dictionary", side_effect=_failing_dictionary
+    ):
+        result = await PlaywrightJobManager._get_hh_dictionary(
+            MagicMock(), "/suggests/areas", {"text": "М"}
+        )
+
+    assert result == []
+
+
+# ---------------------------------------------------------------------------
+# fetch_vacancies_page: постраничная статистика и изоляция ошибок
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_fetch_page_keeps_parsed_cards_when_one_card_fails(
+    manager_with_page, _make_vacancy_card
+):
+    """Исключение на одной карточке не теряет уже разобранные кандидаты."""
+    good_card, title, employer = _make_vacancy_card(
+        "Python Developer",
+        "https://hh.ru/vacancy/123456",
+        "Test Corp",
+        "https://hh.ru/employer/654321",
+    )
+    broken_card = MagicMock()
+    broken_card.locator.side_effect = PlaywrightError("card detached")
+
+    manager_with_page.search_page_url = "https://hh.ru/search/vacancy?page=0"
+    cards_locator = MagicMock()
+    cards_locator.all = AsyncMock(return_value=[good_card, broken_card])
+    manager_with_page.page.locator = MagicMock(return_value=cards_locator)
+
+    with patch(
+        "src.job_manager.playwright_manager.get_clean_text",
+        new_callable=AsyncMock,
+        side_effect=[title, employer],
+    ):
+        result = await manager_with_page.fetch_vacancies_page(page_num=0)
+
+    assert result.ok is True
+    assert result.success_count == 1
+    assert result.cards_count == 2
+    assert len(result.failed_cards) == 1
+    assert result.failed_cards[0]["card_index"] == 1
+    assert "card detached" in result.failed_cards[0]["error"]
+    # Структура кандидата не изменилась
+    assert set(result.vacancies[0].keys()) == {"name", "id", "alternate_url", "employer"}
+    assert result.vacancies[0]["name"] == "Python Developer"
+
+
+@pytest.mark.asyncio
+async def test_fetch_page_navigation_failure_returns_error_result(manager_with_page):
+    """Не открывшаяся страница отличается от пустой выдачи: error заполнен, сбор продолжается."""
+    manager_with_page.search_page_url = "https://hh.ru/search/vacancy?page=0"
+    manager_with_page.page.goto = AsyncMock(side_effect=PlaywrightError("net::ERR_FAILED"))
+
+    with patch.object(manager_with_page, "pause_async", new_callable=AsyncMock):
+        result = await manager_with_page.fetch_vacancies_page(page_num=3)
+
+    assert result.ok is False
+    assert result.vacancies == []
+    assert result.success_count == 0
+    assert "3" in result.error and "ERR_FAILED" in result.error
+
+    report = manager_with_page.get_search_run_report()
+    assert report.failed_pages == [result]
+    assert isinstance(result, PageFetchResult)
+
+
+@pytest.mark.asyncio
+async def test_fetch_page_results_accumulate_in_report(manager_with_page, _make_vacancy_card):
+    """Сводка хранит успех каждой страницы: номер, число карт, число успехов."""
+    card, title, employer = _make_vacancy_card(
+        "Dev",
+        "https://hh.ru/vacancy/1",
+        "Corp",
+        "https://hh.ru/employer/2",
+    )
+    manager_with_page.search_page_url = "https://hh.ru/search/vacancy?page=0"
+    cards_locator = MagicMock()
+    cards_locator.all = AsyncMock(return_value=[card])
+    manager_with_page.page.locator = MagicMock(return_value=cards_locator)
+
+    with patch(
+        "src.job_manager.playwright_manager.get_clean_text",
+        new_callable=AsyncMock,
+        side_effect=[title, employer],
+    ):
+        first = await manager_with_page.fetch_vacancies_page(page_num=0)
+    assert first.success_count == 1
+
+    # Повторный сбор той же страницы перезаписывает результат, а не дублирует
+    cards_locator.all = AsyncMock(return_value=[])
+    second = await manager_with_page.fetch_vacancies_page(page_num=0)
+
+    report = manager_with_page.get_search_run_report()
+    assert len(report.pages) == 1
+    assert report.pages[0] is second
+    assert report.pages[0].cards_count == 0
+
+
+@pytest.mark.asyncio
+async def test_get_vacancies_from_page_still_returns_plain_list(
+    manager_with_page, _make_vacancy_card
+):
+    """Существующий контракт get_vacancies_from_page не нарушен: возвращается список карточек."""
+    card, title, employer = _make_vacancy_card(
+        "Python Developer",
+        "https://hh.ru/vacancy/123456",
+        "Test Corp",
+        "https://hh.ru/employer/654321",
+    )
+    manager_with_page.search_page_url = "https://hh.ru/search/vacancy?page=0"
+    cards_locator = MagicMock()
+    cards_locator.all = AsyncMock(return_value=[card])
+    manager_with_page.page.locator = MagicMock(return_value=cards_locator)
+
+    with patch(
+        "src.job_manager.playwright_manager.get_clean_text",
+        new_callable=AsyncMock,
+        side_effect=[title, employer],
+    ):
+        vacancies = await manager_with_page.get_vacancies_from_page(page_num=0)
+
+    assert isinstance(vacancies, list)
+    assert len(vacancies) == 1
+    assert set(vacancies[0].keys()) == {"name", "id", "alternate_url", "employer"}
+
+
+@pytest.mark.asyncio
+async def test_fetch_page_locator_failure_returns_error_result(manager_with_page):
+    """Падение чтения списка карточек — провал страницы, а не пустая выдача."""
+    manager_with_page.search_page_url = "https://hh.ru/search/vacancy?page=0"
+    broken_locator = MagicMock()
+    broken_locator.all = AsyncMock(side_effect=PlaywrightError("frame detached"))
+    manager_with_page.page.locator = MagicMock(return_value=broken_locator)
+
+    result = await manager_with_page.fetch_vacancies_page(page_num=0)
+
+    assert result.ok is False
+    assert "frame detached" in result.error
+    assert result.vacancies == []
+    assert manager_with_page.get_search_run_report().failed_pages == [result]
+
+
+@pytest.mark.asyncio
+async def test_fetch_page_without_hh_url_skips_navigation(manager_with_page):
+    """Если search_page_url пуст, навигация не выполняется: используется текущий page.url."""
+    manager_with_page.search_page_url = ""
+    manager_with_page.page.url = "https://example.local/listing"
+    manager_with_page.page.goto = AsyncMock()
+    cards_locator = MagicMock()
+    cards_locator.all = AsyncMock(return_value=[])
+    manager_with_page.page.locator = MagicMock(return_value=cards_locator)
+
+    result = await manager_with_page.fetch_vacancies_page(page_num=2)
+
+    manager_with_page.page.goto.assert_not_awaited()
+    assert result.ok is True
+    assert result.cards_count == 0
 
 
 # ---------------------------------------------------------------------------

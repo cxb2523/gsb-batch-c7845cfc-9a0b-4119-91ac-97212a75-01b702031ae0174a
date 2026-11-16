@@ -5,6 +5,7 @@ import pytest
 from pydantic import ValidationError
 
 from src.job_manager.job_applier import JobApplier
+from src.job_manager.playwright_manager import PageFetchResult
 from src.views.job import Job
 
 
@@ -750,10 +751,19 @@ class TestStartApplying:
         """Ошибка валидации вакансии без ID логируется, прогон переходит к следующей."""
         broken = _make_vacancy(vacancy_id=None, url="https://hh.ru/broken")
         good = _make_vacancy(url="https://hh.ru/good")
-        applier_with_params.manager.get_vacancies_from_page = AsyncMock(
-            side_effect=[[broken, good], []]
+        applier_with_params.manager.fetch_vacancies_page = AsyncMock(
+            side_effect=[
+                PageFetchResult(
+                    page_num=0,
+                    vacancies=[broken, good],
+                    success_count=2,
+                    cards_count=2,
+                ),
+                PageFetchResult(page_num=1, vacancies=[], success_count=0, cards_count=0),
+            ]
         )
         applier_with_params.manager.get_vacancy_full_info = AsyncMock(return_value={})
+        applier_with_params.manager.get_unapplied_filters.return_value = []
         processed = []
 
         async def _send_response(vacancy):
@@ -770,6 +780,66 @@ class TestStartApplying:
 
         assert processed == ["https://hh.ru/good"]
         assert applier_with_params.error_num == 0
+
+    @pytest.mark.asyncio
+    @patch("src.job_manager.job_applier.COVER_LETTER_MODE", True)
+    async def test_failed_page_does_not_stop_run(self, applier_with_params):
+        """Не открывшаяся страница пропускается, успешные кандидаты с других страниц собираются."""
+        good = _make_vacancy(url="https://hh.ru/good")
+        applier_with_params.manager.fetch_vacancies_page = AsyncMock(
+            side_effect=[
+                PageFetchResult(
+                    page_num=0,
+                    vacancies=[good],
+                    success_count=1,
+                    cards_count=1,
+                ),
+                PageFetchResult(
+                    page_num=1,
+                    vacancies=[],
+                    success_count=0,
+                    cards_count=0,
+                    error="Не удалось открыть страницу 1: net::ERR_FAILED",
+                ),
+                PageFetchResult(page_num=2, vacancies=[], success_count=0, cards_count=0),
+            ]
+        )
+        applier_with_params.manager.get_unapplied_filters.return_value = []
+        processed = []
+
+        async def _send_response(vacancy):
+            processed.append(vacancy["alternate_url"])
+            return "OK"
+
+        with (
+            patch.object(applier_with_params, "send_repsonse", side_effect=_send_response),
+            patch.object(applier_with_params, "resume_improvement_recommendations"),
+        ):
+            await applier_with_params.start_applying()
+
+        assert processed == ["https://hh.ru/good"]
+        # обработка дошла до второй страницы, несмотря на провал первой
+        assert applier_with_params.manager.fetch_vacancies_page.await_count == 3
+
+    @pytest.mark.asyncio
+    @patch("src.job_manager.job_applier.COVER_LETTER_MODE", True)
+    async def test_consecutive_page_failures_stop_run(self, applier_with_params):
+        """Серия из трёх не открывшихся страниц останавливает сбор без зацикливания."""
+        applier_with_params.manager.fetch_vacancies_page = AsyncMock(
+            return_value=PageFetchResult(
+                page_num=0,
+                vacancies=[],
+                success_count=0,
+                cards_count=0,
+                error="Не удалось открыть страницу: timeout",
+            )
+        )
+        applier_with_params.manager.get_unapplied_filters.return_value = []
+
+        with patch.object(applier_with_params, "resume_improvement_recommendations"):
+            await applier_with_params.start_applying()
+
+        assert applier_with_params.manager.fetch_vacancies_page.await_count == 3
 
 
 class TestSendResponse:

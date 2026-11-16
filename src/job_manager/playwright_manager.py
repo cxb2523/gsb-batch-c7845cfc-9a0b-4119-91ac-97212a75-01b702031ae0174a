@@ -3,31 +3,94 @@ import os
 import random
 import re
 import urllib.parse
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 from Levenshtein import distance
-from playwright.async_api import Browser, BrowserContext, Page, Locator
+from playwright.async_api import Browser, BrowserContext
 from playwright.async_api import Error as PlaywrightError
+from playwright.async_api import Locator, Page
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from src.logger_config import logger
 from src.telegram.telegram_manager import process_captcha
 from src.utils.browser_utils import (
     create_playwright_browser,
-    save_browser_session,
+    get_clean_text,
     safe_click,
     safe_fill,
-    get_clean_text,
+    save_browser_session,
 )
 from src.utils.utils import sanitize_text
 from src.views.resume import Resume
 
-
 HH_SEARCH_URL = "https://hh.ru/search/vacancy"
 HH_API_URL = "https://api.hh.ru"
 HH_API_USER_AGENT = "XX-Auto-Jobs-Applier/1.0"
+
+
+@dataclass
+class UnappliedFilter:
+    """Фильтр поиска, который не удалось применить к URL выдачи.
+
+    `filter_type` — тип фильтра (area / professional_role / industry / district),
+    `requested_value` — название, заданное пользователем в search_config,
+    `reason` — код причины: "dictionary_error" (справочник hh.ru не ответил)
+    или "no_match" (в справочнике не найдено подходящее название),
+    `detail` — человекочитаемое пояснение (текст ошибки запроса и т.п.).
+    """
+
+    filter_type: str
+    requested_value: str
+    reason: str
+    detail: str = ""
+
+    def to_dict(self) -> Dict[str, str]:
+        return asdict(self)
+
+
+@dataclass
+class PageFetchResult:
+    """Итог сбора одной страницы выдачи.
+
+    `vacancies` — успешно разобранные карточки; структура каждого элемента
+    не меняется (name, id, alternate_url, employer).
+    `error` заполнен, когда страницу не удалось открыть/прочитать целиком.
+    """
+
+    page_num: int
+    vacancies: List[Dict[str, Any]] = field(default_factory=list)
+    success_count: int = 0
+    cards_count: int = 0
+    failed_cards: List[Dict[str, Any]] = field(default_factory=list)
+    error: Optional[str] = None
+
+    @property
+    def ok(self) -> bool:
+        return self.error is None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class SearchRunReport:
+    """Сводка по сбору поиска: неприменённые фильтры и постраничная статистика."""
+
+    unapplied_filters: List[UnappliedFilter] = field(default_factory=list)
+    pages: List[PageFetchResult] = field(default_factory=list)
+
+    @property
+    def failed_pages(self) -> List[PageFetchResult]:
+        return [page for page in self.pages if not page.ok]
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "unapplied_filters": [f.to_dict() for f in self.unapplied_filters],
+            "pages": [page.to_dict() for page in self.pages],
+        }
 
 
 class PlaywrightJobManager:
@@ -43,6 +106,8 @@ class PlaywrightJobManager:
         self.login = secrets.get("hh_login")
         self.password = secrets.get("hh_password")
         self.search_page_url = ""
+        # Сводка последнего поиска: неприменённые фильтры и статистика страниц
+        self.search_report: SearchRunReport = SearchRunReport()
 
     async def initialize(self):
         """Инициализирует браузер, контекст и страницу."""
@@ -311,13 +376,32 @@ class PlaywrightJobManager:
         hh.ru убрал страницу расширенного поиска, поэтому фильтры передаются параметрами URL.
         """
         self.search_params = search_params or {}
+        # Новый поиск — новая сводка; неприменённые фильтры заполняет _build_search_query
+        self.search_report = SearchRunReport()
         query = await self._build_search_query()
         url = f"{HH_SEARCH_URL}?{urllib.parse.urlencode(query)}"
         await self.page.goto(url, wait_until="domcontentloaded")
         logger.info(f"Переход на страницу поиска: {url}")
         self.search_page_url = url
+        unapplied = self.search_report.unapplied_filters
+        if unapplied:
+            logger.warning(
+                "Поиск запущен с неполными условиями, фильтры не применены: "
+                + "; ".join(
+                    f"{item.filter_type}='{item.requested_value}' ({item.reason}: {item.detail})"
+                    for item in unapplied
+                )
+            )
         await self.pause_async(2, 3)
         await self._handle_interfering_messages()
+
+    def get_unapplied_filters(self) -> List[UnappliedFilter]:
+        """Фильтры, которые не удалось превратить в ID при последнем построении запроса."""
+        return self.search_report.unapplied_filters
+
+    def get_search_run_report(self) -> SearchRunReport:
+        """Сводка последнего поиска: неприменённые фильтры и постраничная статистика."""
+        return self.search_report
 
     # -----------------------------
     # Вспомогательные методы расширенного поиска (UI)
@@ -370,41 +454,89 @@ class PlaywrightJobManager:
         ) as client:
             area_ids = []
             for area in self._split_multi(params.get("area")):
-                items = await self._get_hh_dictionary(client, "/suggests/areas", {"text": area})
+                try:
+                    items = await self._fetch_hh_dictionary(
+                        client, "/suggests/areas", {"text": area}
+                    )
+                except httpx.HTTPError as e:
+                    self._record_unapplied_filter("area", area, "dictionary_error", str(e))
+                    continue
                 area_id = self._best_match_id(area, [(i["id"], i["text"]) for i in items])
                 if area_id:
                     area_ids.append(area_id)
                     query.append(("area", area_id))
+                else:
+                    self._record_unapplied_filter(
+                        "area", area, "no_match", "Подходящий регион в справочнике не найден"
+                    )
 
             # Названия специализаций и отраслей сами содержат запятые, поэтому значение одно
             role = str(params.get("professional_role") or "").strip()
             if role:
-                items = await self._get_hh_dictionary(
-                    client, "/suggests/professional_roles", {"text": role}
-                )
-                role_id = self._best_match_id(role, [(i["id"], i["text"]) for i in items])
-                if role_id:
-                    query.append(("professional_role", role_id))
+                try:
+                    items = await self._fetch_hh_dictionary(
+                        client, "/suggests/professional_roles", {"text": role}
+                    )
+                except httpx.HTTPError as e:
+                    self._record_unapplied_filter(
+                        "professional_role", role, "dictionary_error", str(e)
+                    )
+                else:
+                    role_id = self._best_match_id(role, [(i["id"], i["text"]) for i in items])
+                    if role_id:
+                        query.append(("professional_role", role_id))
+                    else:
+                        self._record_unapplied_filter(
+                            "professional_role",
+                            role,
+                            "no_match",
+                            "Подходящая профессиональная роль в справочнике не найдена",
+                        )
 
             industry = str(params.get("industry") or "").strip()
             if industry:
-                items = await self._get_hh_dictionary(client, "/industries")
-                options = []
-                for item in items:
-                    options.append((item["id"], item["name"]))
-                    options += [(sub["id"], sub["name"]) for sub in item.get("industries", [])]
-                industry_id = self._best_match_id(industry, options)
-                if industry_id:
-                    query.append(("industry", industry_id))
+                try:
+                    items = await self._fetch_hh_dictionary(client, "/industries")
+                except httpx.HTTPError as e:
+                    self._record_unapplied_filter("industry", industry, "dictionary_error", str(e))
+                else:
+                    options = []
+                    for item in items:
+                        options.append((item["id"], item["name"]))
+                        options += [(sub["id"], sub["name"]) for sub in item.get("industries", [])]
+                    industry_id = self._best_match_id(industry, options)
+                    if industry_id:
+                        query.append(("industry", industry_id))
+                    else:
+                        self._record_unapplied_filter(
+                            "industry",
+                            industry,
+                            "no_match",
+                            "Подходящая отрасль в справочнике не найдена",
+                        )
 
             districts = self._split_multi(params.get("districts"))
             if districts:
-                items = await self._get_hh_dictionary(client, "/districts")
-                options = [(i["id"], i["name"]) for i in items if i["area_id"] in area_ids]
-                for district in districts:
-                    district_id = self._best_match_id(district, options)
-                    if district_id:
-                        query.append(("district", district_id))
+                try:
+                    items = await self._fetch_hh_dictionary(client, "/districts")
+                except httpx.HTTPError as e:
+                    for district in districts:
+                        self._record_unapplied_filter(
+                            "district", district, "dictionary_error", str(e)
+                        )
+                else:
+                    options = [(i["id"], i["name"]) for i in items if i["area_id"] in area_ids]
+                    for district in districts:
+                        district_id = self._best_match_id(district, options)
+                        if district_id:
+                            query.append(("district", district_id))
+                        else:
+                            self._record_unapplied_filter(
+                                "district",
+                                district,
+                                "no_match",
+                                "Подходящий район в справочнике не найден",
+                            )
 
         salary = params.get("salary")
         if salary:
@@ -462,18 +594,55 @@ class PlaywrightJobManager:
         return query
 
     @staticmethod
-    async def _get_hh_dictionary(
+    async def _fetch_hh_dictionary(
         client: httpx.AsyncClient, path: str, params: Optional[Dict[str, str]] = None
-    ) -> Any:
-        """Запрашивает справочник публичного API hh.ru. При ошибке возвращает пустой список."""
+    ) -> List[Any]:
+        """Запрашивает справочник публичного API hh.ru.
+
+        В отличие от устаревшего `_get_hh_dictionary`, при сетевой ошибке,
+        некорректном HTTP-ответе или нечитаемом теле пробрасывает httpx.HTTPError,
+        чтобы вызывающий код мог зафиксировать неприменённый фильтр, а не упасть.
+        """
         try:
             response = await client.get(path, params=params)
             response.raise_for_status()
+            data = response.json()
+        except httpx.HTTPError:
+            raise
+        except ValueError as e:
+            # Тело ответа не является JSON — оборачиваем в тип, понятный вызывающему коду
+            raise httpx.HTTPError(f"Некорректный JSON в ответе справочника {path}: {e}") from e
+        return data.get("items", []) if isinstance(data, dict) else data
+
+    @staticmethod
+    async def _get_hh_dictionary(
+        client: httpx.AsyncClient, path: str, params: Optional[Dict[str, str]] = None
+    ) -> Any:
+        """Устаревший помощник: запрос справочника, при ошибке возвращает пустой список.
+
+        Сохранён для обратной совместимости; основной сбор использует
+        `_fetch_hh_dictionary` и явно учитывает упавшие фильтры.
+        """
+        try:
+            return await PlaywrightJobManager._fetch_hh_dictionary(client, path, params)
         except httpx.HTTPError as e:
             logger.warning(f"Не удалось получить справочник hh.ru {path} {params or ''}: {e}")
             return []
-        data = response.json()
-        return data.get("items", []) if isinstance(data, dict) else data
+
+    def _record_unapplied_filter(
+        self, filter_type: str, requested_value: str, reason: str, detail: str = ""
+    ) -> None:
+        """Сохраняет фильтр, который не удалось применить к URL поиска."""
+        item = UnappliedFilter(
+            filter_type=filter_type,
+            requested_value=str(requested_value),
+            reason=reason,
+            detail=detail,
+        )
+        self.search_report.unapplied_filters.append(item)
+        logger.warning(
+            f"Фильтр поиска не применён: {filter_type}='{requested_value}' " f"({reason}: {detail})"
+        )
 
     @staticmethod
     def _best_match_id(value: str, options: List[Tuple[str, str]]) -> Optional[str]:
@@ -487,91 +656,146 @@ class PlaywrightJobManager:
         return best_id
 
     async def get_vacancies_from_page(self, page_num: int = 0) -> List[Dict[str, Any]]:
-        """Получить вакансии с очередной страницы."""
-        # Логика пагинации: проверяем, находимся ли на запрошенной странице
+        """Получить вакансии с очередной страницы.
+
+        Возвращает только список успешно разобранных карточек в прежнем формате
+        (name, id, alternate_url, employer). Детали сбора (ошибки навигации,
+        неразобранные карточки) доступны через `fetch_vacancies_page` и
+        `get_search_run_report`.
+        """
+        result = await self.fetch_vacancies_page(page_num)
+        return result.vacancies
+
+    async def fetch_vacancies_page(self, page_num: int = 0) -> PageFetchResult:
+        """Собрать одну страницу выдачи с детальным итогом.
+
+        Ошибка навигации на страницу не роняет сбор: возвращается результат с
+        заполненным `error` и пустым списком вакансий. Ошибка разбора отдельной
+        карточки не влияет на остальные карточки той же страницы.
+        """
+        result = PageFetchResult(page_num=page_num)
         try:
-            if not self.search_page_url:
-                self.search_page_url = self.page.url
-
-            if "hh.ru" in self.search_page_url:
-                parsed = urllib.parse.urlparse(self.search_page_url)
-                query = urllib.parse.parse_qs(parsed.query)
-                current_page_param = query.get("page", ["0"])[0]
-
-                if int(current_page_param) != page_num:
-                    query["page"] = [str(page_num)]
-                    new_query = urllib.parse.urlencode(query, doseq=True)
-                    new_url = urllib.parse.urlunparse(parsed._replace(query=new_query))
-                    self.search_page_url = new_url
-                    logger.info(f"Переходим на страницу {page_num}: {new_url}")
-                    await self.page.goto(new_url, wait_until="domcontentloaded")
-                    await self.pause_async(2, 3)
+            await self._navigate_to_page(page_num)
         except Exception as e:
-            logger.warning(f"Ошибка при обработке пагинации: {e}")
+            result.error = f"Не удалось открыть страницу {page_num}: {e}"
+            logger.warning(result.error)
+            self._store_page_result(result)
+            return result
 
-        vacancies = []
-        # Новый селектор после редизайна Magritte
-        cards = await self.page.locator('[data-qa="vacancy-serp__vacancy"]').all()
+        try:
+            # Новый селектор после редизайна Magritte
+            cards = await self.page.locator('[data-qa="vacancy-serp__vacancy"]').all()
+        except Exception as e:
+            result.error = f"Не удалось прочитать карточки на странице {page_num}: {e}"
+            logger.warning(result.error)
+            self._store_page_result(result)
+            return result
 
+        result.cards_count = len(cards)
         logger.info(f"Найдено {len(cards)} вакансий на странице {page_num}")
 
-        for card in cards:
-            vac = await self._parse_vacancy_card(card)
+        for index, card in enumerate(cards):
+            try:
+                vac = await self._parse_vacancy_card(card)
+            except Exception as e:
+                reason = f"Ошибка разбора карточки #{index} на странице {page_num}: {e}"
+                logger.warning(reason)
+                result.failed_cards.append({"card_index": index, "error": reason})
+                continue
             if vac:
-                vacancies.append(vac)
+                result.vacancies.append(vac)
+                result.success_count += 1
 
-        return vacancies
+        self._store_page_result(result)
+        return result
+
+    def _store_page_result(self, result: PageFetchResult) -> None:
+        """Сохраняет итог страницы в сводке поиска (повторный вызов перезаписывает)."""
+        pages = self.search_report.pages
+        for idx, page in enumerate(pages):
+            if page.page_num == result.page_num:
+                pages[idx] = result
+                return
+        pages.append(result)
+
+    async def _navigate_to_page(self, page_num: int) -> None:
+        """Открывает нужную страницу выдачи, если текущий URL ей не соответствует.
+
+        При невозможности построить URL или ошибке перехода пробрасывает исключение
+        — вызывающий код фиксирует страницу как неудачную.
+        """
+        if not self.search_page_url:
+            self.search_page_url = self.page.url
+
+        if "hh.ru" not in self.search_page_url:
+            return
+
+        parsed = urllib.parse.urlparse(self.search_page_url)
+        query = urllib.parse.parse_qs(parsed.query)
+        current_page_param = query.get("page", ["0"])[0]
+
+        if int(current_page_param) == page_num:
+            return
+
+        query["page"] = [str(page_num)]
+        new_query = urllib.parse.urlencode(query, doseq=True)
+        new_url = urllib.parse.urlunparse(parsed._replace(query=new_query))
+        self.search_page_url = new_url
+        logger.info(f"Переходим на страницу {page_num}: {new_url}")
+        await self.page.goto(new_url, wait_until="domcontentloaded")
+        await self.pause_async(2, 3)
 
     async def _parse_vacancy_card(self, card: Locator) -> Optional[Dict[str, Any]]:
-        """Парсит карточку вакансии из поисковой выдачи."""
-        try:
-            # Элемент заголовка
-            title_el = card.locator('[data-qa="serp-item__title"]').first
-            if await title_el.count() == 0:
-                return None
+        """Парсит карточку вакансии из поисковой выдачи.
 
-            title = await get_clean_text(title_el)
-            href = await title_el.get_attribute("href")
-            if not href:
-                return None
-
-            # Полный URL
-            if not href.startswith("http"):
-                full_url = "https://hh.ru" + href
-            else:
-                full_url = href
-
-            # ID вакансии
-            vacancy_id = None
-            # ID обычно находится в пути URL /vacancy/123456
-            match = re.search(r"vacancy/(\d+)", full_url)
-            if match:
-                vacancy_id = match.group(1)
-
-            # Работодатель
-            employer_name = "Неизвестно"
-            employer_id = None
-            emp_el = card.locator('[data-qa="vacancy-serp__vacancy-employer"]').first
-            if await emp_el.count() > 0:
-                employer_name = await get_clean_text(emp_el)
-                emp_href = await emp_el.get_attribute("href")
-                if emp_href:
-                    match_emp = re.search(r"employer/(\d+)", emp_href)
-                    if match_emp:
-                        employer_id = match_emp.group(1)
-
-            return {
-                "name": title,
-                "id": vacancy_id,
-                "alternate_url": full_url,
-                "employer": {
-                    "id": employer_id,
-                    "name": employer_name,
-                },
-            }
-        except Exception as e:
-            logger.warning(f"Не удалось распарсить карточку вакансии: {e}")
+        Ошибки, несовместимые с разбором (нет заголовка/ссылки), возвращают None —
+        такой элемент не считается вакансией. Иные исключения пробрасываются в
+        `fetch_vacancies_page`, где фиксируются как ошибка конкретной карточки.
+        """
+        # Элемент заголовка
+        title_el = card.locator('[data-qa="serp-item__title"]').first
+        if await title_el.count() == 0:
             return None
+
+        title = await get_clean_text(title_el)
+        href = await title_el.get_attribute("href")
+        if not href:
+            return None
+
+        # Полный URL
+        if not href.startswith("http"):
+            full_url = "https://hh.ru" + href
+        else:
+            full_url = href
+
+        # ID вакансии
+        vacancy_id = None
+        # ID обычно находится в пути URL /vacancy/123456
+        match = re.search(r"vacancy/(\d+)", full_url)
+        if match:
+            vacancy_id = match.group(1)
+
+        # Работодатель
+        employer_name = "Неизвестно"
+        employer_id = None
+        emp_el = card.locator('[data-qa="vacancy-serp__vacancy-employer"]').first
+        if await emp_el.count() > 0:
+            employer_name = await get_clean_text(emp_el)
+            emp_href = await emp_el.get_attribute("href")
+            if emp_href:
+                match_emp = re.search(r"employer/(\d+)", emp_href)
+                if match_emp:
+                    employer_id = match_emp.group(1)
+
+        return {
+            "name": title,
+            "id": vacancy_id,
+            "alternate_url": full_url,
+            "employer": {
+                "id": employer_id,
+                "name": employer_name,
+            },
+        }
 
     async def get_vacancy_full_info(self, vacancy_url: str) -> Dict[str, Any]:
         """Получает полную информацию о вакансии для LLM."""
@@ -830,7 +1054,9 @@ class PlaywrightJobManager:
                 filled = True
                 break
         if not filled:
-            logger.warning("Не удалось найти поле ввода сопроводительного письма на странице успеха")
+            logger.warning(
+                "Не удалось найти поле ввода сопроводительного письма на странице успеха"
+            )
             return
         await self.pause_async(1, 2)
 
@@ -844,7 +1070,9 @@ class PlaywrightJobManager:
                 logger.info("Сопроводительное письмо приложено на странице успеха")
                 await self.pause_async(2, 3)
                 return
-        logger.warning("Не удалось найти кнопку отправки сопроводительного письма на странице успеха")
+        logger.warning(
+            "Не удалось найти кнопку отправки сопроводительного письма на странице успеха"
+        )
 
     async def _select_resume(self, resume_component: Any) -> bool:
         """Выбирает резюме из списка. Возвращает True, если резюме было выбрано.
