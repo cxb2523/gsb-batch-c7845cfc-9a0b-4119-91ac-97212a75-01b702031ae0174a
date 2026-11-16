@@ -34,6 +34,25 @@ try {
     await page.setContent('<a href="/login/">Log In</a>');
     assert.equal(await page.evaluate(() => BrowserCollector.extract(document, location.href).login), "logged_out");
   });
+  await test("depth falls back to the ancestor chain when the attribute is missing", async () => {
+    await page.setContent(await fs.readFile(path.join(root, "tests/fixtures", "nested.html"), "utf8"));
+    await page.evaluate(script);
+    const depths = await page.evaluate(() => Object.fromEntries(
+      BrowserCollector.extract(document, location.href).comments.map(comment => [comment.comment_id, comment.depth])));
+    // Nested in the DOM: 0, 1, 2. Flat siblings linked only by parent-id: 0, 1, 2.
+    assert.equal(depths.root01, 0); assert.equal(depths.child01, 1); assert.equal(depths.grand01, 2);
+    assert.equal(depths.flat01, 0); assert.equal(depths.flat02, 1); assert.equal(depths.flat03, 2);
+  });
+  await test("a depth attribute stays authoritative over the ancestor chain", async () => {
+    await page.setContent(await fs.readFile(path.join(root, "tests/fixtures", "nested.html"), "utf8"));
+    await page.evaluate(script);
+    const declared = await page.evaluate(() => Object.fromEntries(
+      BrowserCollector.extract(document, location.href).comments
+        .filter(comment => comment.comment_id.startsWith("declared"))
+        .map(comment => [comment.comment_id, comment.depth])));
+    assert.equal(declared.declared01, 4, "Explicit depth must win even when the DOM says level 0");
+    assert.equal(declared.declared02, 1, "Without its own depth attribute a reply counts its ancestor comments");
+  });
   await test("access challenge detection", async () => {
     await page.setContent('<h1>You’ve been blocked by network security</h1>');
     assert.equal(await page.evaluate(() => BrowserCollector.extract(document, location.href).login), "blocked");
@@ -61,6 +80,21 @@ try {
     const report = await page.evaluate(() => BrowserCollector.extract(document, location.href));
     assert.equal(report.posts[0].id, "shadow"); assert.equal(report.login, "logged_in");
     assert.deepEqual(report.posts[0].media_urls, ["https://i.redd.it/shadow.png"]);
+  });
+  await test("comment depth follows the chain across a shadow-root boundary", async () => {
+    await page.setContent(await fs.readFile(path.join(root, "tests/fixtures", "nested.html"), "utf8"));
+    await page.evaluate(() => {
+      // Move a nested subtree into a shadow root: the inner reply's nearest light-DOM parent is gone.
+      const host = document.createElement("div");
+      const reply = document.querySelector('[thingid="t1_child01"]');
+      host.attachShadow({mode: "open"}).append(reply);
+      document.querySelector('[thingid="t1_root01"]').append(host);
+    });
+    await page.evaluate(script);
+    const depths = await page.evaluate(() => Object.fromEntries(
+      BrowserCollector.extract(document, location.href).comments.map(comment => [comment.comment_id, comment.depth])));
+    assert.equal(depths.child01, 1);
+    assert.equal(depths.grand01, 2, "A reply inside a shadow root still counts its enclosing comment");
   });
   await test("minimal manifest permissions and complete package", async () => {
     const manifest = JSON.parse(await fs.readFile(path.join(root, "manifest.json"), "utf8"));

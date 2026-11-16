@@ -20,7 +20,7 @@ No build step is required. Store publication is pending. After source updates, c
 
 The collector detects visible account/login controls. If Reddit's layout does not expose a login indicator, check **I'm signed in to Reddit in this browser** after verifying your own session. An explicit logged-out page or access challenge stops capture. Closing the Reddit tab or restarting the browser stops the session; collected records remain stored locally.
 
-Limits apply to new records in each capture session. Existing records are deduplicated and their loaded metadata can be updated. The extension keeps up to 10,000 posts / 20,000 comments, with an 8 MB payload ceiling; export or send the collection, then clear it to make room.
+Limits apply to the records each capture session actually writes: repeated reports of the same post or comment only refresh its content and never consume capacity. When the post limit or the comment limit is reached, capture stops and the panel names the dimension that filled, so the remaining capacity of the other dimension cannot be used by later pages. A comment limit of 0 with comments enabled stores no comments and keeps the session running. The extension keeps up to 10,000 posts / 20,000 comments, with an 8 MB payload ceiling; export or send the collection, then clear it to make room.
 
 ## Connect to the application
 
@@ -75,4 +75,4 @@ node extension/tests/installed.mjs
 python -m unittest discover -s tests -v
 ```
 
-The browser tests use locally fulfilled modern/old Reddit fixtures, not a live account. `run.mjs` uses installed Edge by default. `installed.mjs` supports Chromium, or set `BROWSER_CHANNEL=msedge` to use Edge. A local Chrome or Edge login still needs to be verified in your own browser. Page selectors may need updates when Reddit changes its UI.
+The browser tests use locally fulfilled modern/old/nested Reddit fixtures, not a live account; no test contacts Reddit. `background.mjs` drives the background worker through an in-memory `chrome` mock and covers duplicate reports, per-dimension limits and the stop notice. `run.mjs` uses installed Edge by default. `installed.mjs` supports Chromium, or set `BROWSER_CHANNEL=msedge` to use Edge. A local Chrome or Edge login still needs to be verified in your own browser. Page selectors may need updates when Reddit changes its UI.

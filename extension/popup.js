@@ -2,11 +2,23 @@
 const fields = ["subreddits", "keywords", "minScore", "maxPosts", "maxComments", "includeComments", "loginConfirmed", "appUrl", "bridgeToken"];
 const element = id => document.getElementById(id);
 let busy = false;
+let lastCaptureMessage = "";
 function settings() {
   return Object.fromEntries(fields.map(id => [id, element(id).type === "checkbox" ? element(id).checked :
     element(id).type === "number" ? Number(element(id).value) : element(id).value]));
 }
-function notice(message, kind = "") { element("status").textContent = message; element("status").className = kind; }
+function notice(message, kind = "") {
+  element("status").textContent = message;
+  element("status").className = kind;
+  lastCaptureMessage = message;
+}
+// Paint the session's own message when it changed. This covers live progress and the reason a
+// session stopped on its own (a reached limit, a logout, a closed tab), so the panel never keeps
+// an unrelated hint on screen while capture is no longer running.
+function showCapture(capture) {
+  if (!capture?.message || capture.message === lastCaptureMessage) return;
+  notice(capture.message, capture.running ? "success" : "");
+}
 async function send(type, extra = {}) {
   const result = await chrome.runtime.sendMessage({type, ...extra});
   if (!result?.ok) throw new Error(result?.error || "The extension did not respond. Reload it and try again.");
@@ -21,8 +33,8 @@ async function refresh(initial = false) {
       if (element(id).type === "checkbox") element(id).checked = Boolean(result.settings[id]);
       else element(id).value = result.settings[id] ?? "";
     }
-    if (result.capture?.message) notice(result.capture.message);
-  } else if (!busy && result.capture?.running) notice(result.capture.message, "success");
+  }
+  if (!busy && !element("status").classList.contains("error")) showCapture(result.capture);
   element("mode").textContent = result.lastSync ? "App connected" : "Standalone";
   element("preview").replaceChildren(...result.preview.map(post => {
     const item = document.createElement("li");
@@ -43,10 +55,12 @@ async function act(operation) {
   finally { busy = false; document.querySelectorAll("button").forEach(button => { button.disabled = false; }); }
 }
 element("start").addEventListener("click", () => act(async () => {
-  const result = await send("START", {settings: settings()}); notice(result.capture.message, "success");
+  const result = await send("START", {settings: settings()});
+  notice(result.capture.message, result.capture.running ? "success" : "");
 }));
 element("once").addEventListener("click", () => act(async () => {
-  const result = await send("ONCE", {settings: settings()}); notice(result.capture.message, "success");
+  const result = await send("ONCE", {settings: settings()});
+  notice(result.capture.message, result.capture.running ? "success" : "");
 }));
 element("stop").addEventListener("click", () => act(async () => { await send("STOP"); notice("Capture stopped. Your collection is saved locally."); }));
 for (const format of ["json", "posts", "comments"]) element(`export-${format}`).addEventListener("click", () => act(async () => {

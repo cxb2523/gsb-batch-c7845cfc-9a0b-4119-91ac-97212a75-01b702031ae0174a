@@ -67,4 +67,21 @@ try {
   assert.equal(stopped.capture.running, false);
   assert.match(stopped.capture.message, /Log in/);
   console.log("PASS ordinary navigation resumes the session and logout stops capture");
+  // A session limit must stop the run and explain which dimension filled, in the same session record
+  // the popup reads. Clearing first makes the fixture's two comments newly written again.
+  await reddit.goto("https://www.reddit.com/r/python/comments/abc123/automation/");
+  const limitedPopup = await context.newPage();
+  await limitedPopup.goto(`chrome-extension://${extensionId}/popup.html`);
+  await limitedPopup.evaluate(() => chrome.runtime.sendMessage({type: "CLEAR"}));
+  await reddit.bringToFront();
+  const limited = await limitedPopup.evaluate(() => chrome.runtime.sendMessage({type: "ONCE", settings: {
+    appUrl: "http://127.0.0.1:8000", maxPosts: 10, maxComments: 1, includeComments: true
+  }}));
+  assert.equal(limited.ok, true, limited.error);
+  assert.equal(limited.capture.running, false);
+  assert.match(limited.capture.message, /Comment limit reached \(1 of 1 new comments\)/);
+  await limitedPopup.bringToFront();
+  await limitedPopup.reload();
+  await limitedPopup.locator("#status", {hasText: "Comment limit reached"}).waitFor();
+  console.log("PASS comment limit ends the session and the popup shows the reached dimension");
 } finally { await context.close(); }

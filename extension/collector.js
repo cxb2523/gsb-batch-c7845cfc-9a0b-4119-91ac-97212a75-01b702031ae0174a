@@ -107,6 +107,66 @@
       media_urls: media, observed_at: new Date().toISOString(), source: "Browser-Collector"
     };
   }
+  function parentComment(node) {
+    // Replies are usually nested in the light DOM, but some Reddit layouts move comment trees
+    // into a shadow root, so walk outward through both and keep following the chain.
+    const direct = node.parentElement?.closest?.("shreddit-comment, .thing.comment");
+    if (direct) return direct;
+    const host = node.getRootNode?.()?.host;
+    return host?.closest?.("shreddit-comment, .thing.comment") || null;
+  }
+  function buildCommentIndex(document) {
+    // Flat comment lists identify parents by id only, so index every comment once per extraction.
+    const index = new Map();
+    for (const scope of rootsOf(document)) {
+      for (const node of scope.querySelectorAll("shreddit-comment, .thing.comment")) {
+        for (const name of ["thingid", "comment-id", "data-fullname", "id"]) {
+          const value = node.getAttribute(name);
+          if (!value) continue;
+          index.set(value, node);
+          index.set(value.replace(/^t1_/, ""), node);
+        }
+      }
+    }
+    return index;
+  }
+  // Index shared by one extract() pass (reset at both ends) and built lazily the first time a
+  // comment without a depth attribute needs its flat-list parent resolved.
+  let activeCommentIndex = null;
+  function findAncestorComment(node, fullname) {
+    // Flat comment lists keep nesting in the parent-id attribute rather than enclosing elements.
+    // A t3_ parent is the post itself, so a root comment has no ancestor level to add.
+    if (/^t3_/i.test(fullname)) return null;
+    const bare = fullname.replace(/^t1_/, "");
+    if (!/^[a-z0-9]+$/i.test(bare)) return null;
+    const document = node.ownerDocument;
+    if (!document?.querySelectorAll) return null;
+    // Reuse the per-extraction index only for that same document; direct parseComment calls
+    // build a fresh one so a mutated page cannot answer with stale nodes.
+    const index = activeCommentIndex?.document === document
+      ? (activeCommentIndex.index ||= buildCommentIndex(document))
+      : buildCommentIndex(document);
+    const found = index.get(fullname) || index.get(bare);
+    return found && found !== node ? found : null;
+  }
+  function commentDepth(node) {
+    // A depth attribute, when present, is authoritative even if it reads 0.
+    if (node.hasAttribute("depth")) {
+      const declared = Number(node.getAttribute("depth"));
+      return Number.isFinite(declared) ? declared : 0;
+    }
+    // Without one, count the ancestor comment chain. Enclosing comment elements come first;
+    // flat lists that only express nesting through parent-id are followed the same way.
+    const seen = new Set([node]);
+    let depth = 0;
+    for (let current = node; depth < 100; depth++) {
+      const parent = parentComment(current) || findAncestorComment(current, attr(current, ["parent-id", "parentid"]));
+      if (!parent || seen.has(parent)) return depth;
+      seen.add(parent);
+      current = parent;
+    }
+    return depth;
+  }
   function parseComment(node, pageUrl) {
     const post = permalink(pageUrl, pageUrl);
     if (!post) return null;
@@ -115,13 +175,8 @@
     if (!/^[a-z0-9]+$/i.test(commentId)) return null;
     const body = firstText(node, [':scope > [slot="comment"]', ':scope > .entry > .usertext .md', '[data-testid="comment"]', ':scope > .comment-body']);
     if (!body) return null;
-    const parent = node.parentElement?.closest("shreddit-comment, .thing.comment");
-    let depth = Number(attr(node, ["depth"]));
-    if (!Number.isFinite(depth)) depth = 0;
-    if (!node.hasAttribute("depth")) {
-      depth = 0;
-      for (let ancestor = parent; ancestor; ancestor = ancestor.parentElement?.closest("shreddit-comment, .thing.comment")) depth++;
-    }
+    const parent = parentComment(node);
+    const depth = commentDepth(node);
     const time = node.querySelector(":scope > .entry time, :scope > time");
     return {
       comment_id: commentId, post_id: post.id, subreddit: post.subreddit,
@@ -142,7 +197,11 @@
     const roots = rootsOf(document);
     const nodes = queryAll(roots, "shreddit-post, .thing.link, [data-testid=post-container]").filter(rendered);
     const posts = nodes.map(node => parsePost(node, pageUrl)).filter(Boolean);
-    const comments = queryAll(roots, "shreddit-comment, .thing.comment").filter(rendered).map(node => parseComment(node, pageUrl)).filter(Boolean);
+    activeCommentIndex = {document, index: null};
+    let comments;
+    try {
+      comments = queryAll(roots, "shreddit-comment, .thing.comment").filter(rendered).map(node => parseComment(node, pageUrl)).filter(Boolean);
+    } finally { activeCommentIndex = null; }
     const headings = queryAll(roots, "h1, h2").map(node => text(node.textContent, 300)).join(" ");
     const blocked = !posts.length && /blocked by network security|you.?ve been blocked|verify you are human|whoa there|robot check/i.test(headings);
     return {login: blocked ? "blocked" : loginState(roots), posts, comments, page_url: pageUrl};

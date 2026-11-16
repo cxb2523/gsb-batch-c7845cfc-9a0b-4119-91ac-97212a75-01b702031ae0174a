@@ -1,0 +1,21 @@
+<!doctype html><html><head><style>shreddit-post,shreddit-comment,reddit-header{display:block;padding:12px}</style></head><body>
+<reddit-header logged-in="true"><button data-testid="user-menu">Account menu</button></reddit-header>
+<shreddit-post post-title="Nesting without depth attributes" permalink="/r/python/comments/abc123/automation/" author="alice" score="12">
+  <div slot="text-body">Comments below carry no depth attribute.</div>
+</shreddit-post>
+<div data-testid="comment-tree">
+  <shreddit-comment thingid="t1_root01" parent-id="t3_abc123" author="bob"><div slot="comment">Root comment</div>
+    <shreddit-comment thingid="t1_child01" parent-id="t1_root01" author="carol"><div slot="comment">Nested reply</div>
+      <shreddit-comment thingid="t1_grand01" parent-id="t1_child01" author="dave"><div slot="comment">Nested reply to a reply</div></shreddit-comment>
+    </shreddit-comment>
+  </shreddit-comment>
+  <!-- Flat siblings: nesting is only expressed by parent-id, not by enclosing elements. -->
+  <shreddit-comment thingid="t1_flat01" parent-id="t3_abc123" author="erin"><div slot="comment">Flat root</div></shreddit-comment>
+  <shreddit-comment thingid="t1_flat02" parent-id="t1_flat01" author="frank"><div slot="comment">Flat reply</div></shreddit-comment>
+  <shreddit-comment thingid="t1_flat03" parent-id="t1_flat02" author="grace"><div slot="comment">Flat reply to a reply</div></shreddit-comment>
+  <!-- An explicit depth attribute stays authoritative even when it disagrees with the DOM. -->
+  <shreddit-comment thingid="t1_declared01" depth="4" parent-id="t3_abc123" author="heidi"><div slot="comment">Declared level four</div>
+    <shreddit-comment thingid="t1_declared02" parent-id="t1_declared01" author="ivan"><div slot="comment">Child of a declared depth</div></shreddit-comment>
+  </shreddit-comment>
+</div>
+</body></html>

@@ -28,10 +28,18 @@ async function stored() {
   return {settings: {...defaults, ...result.settings}, data: result.data || empty(), lastSync: result.lastSync || null};
 }
 async function session() { return (await chrome.storage.session.get("capture")).capture || null; }
-async function stop(reason = "Capture stopped.") {
-  const capture = await session();
-  await chrome.storage.session.set({capture: capture ? {...capture, running: false, message: reason} : null});
-  if (capture?.tabId) await chrome.tabs.sendMessage(capture.tabId, {type: "STOP"}).catch(() => {});
+// Ends a running capture, keeping the counters and the reason in the same session record so the
+// popup, content script and later reports all observe the same state.
+async function halt(capture, reason) {
+  if (!capture) { await chrome.storage.session.set({capture: null}); return null; }
+  capture.running = false;
+  capture.message = reason;
+  await chrome.storage.session.set({capture});
+  if (capture.tabId) await chrome.tabs.sendMessage(capture.tabId, {type: "STOP"}).catch(() => {});
+  return capture;
+}
+async function stop(reason = "Capture stopped. Your collection is saved locally.") {
+  return halt(await session(), reason);
 }
 function loginAllowed(report, settings) {
   if (report.error) throw new Error(report.error);
@@ -40,6 +48,25 @@ function loginAllowed(report, settings) {
   if (report.login !== "logged_in" && !settings.loginConfirmed) {
     throw new Error("This page does not expose a login indicator. Confirm you are signed in, or open old.reddit.com while signed in.");
   }
+}
+// A dimension is full once this session wrote as many distinct records as the user allowed.
+// Comment capacity 0 (with comments included) means "store no comments", not "stop immediately",
+// so it only disables the comment dimension instead of ending the session on the first page.
+function filledDimensions(capture) {
+  const rules = capture.rules;
+  return {
+    posts: capture.addedPosts >= rules.maxPosts,
+    comments: Boolean(rules.includeComments) && rules.maxComments > 0 && capture.addedComments >= rules.maxComments
+  };
+}
+function limitNotice(capture, filled) {
+  if (filled.posts && filled.comments) {
+    return `Post and comment limits reached (${capture.addedPosts} new posts, ${capture.addedComments} new comments). Capture stopped; your collection is saved.`;
+  }
+  if (filled.posts) {
+    return `Post limit reached (${capture.addedPosts} of ${capture.rules.maxPosts} new posts). Capture stopped; your collection is saved.`;
+  }
+  return `Comment limit reached (${capture.addedComments} of ${capture.rules.maxComments} new comments). Capture stopped; your collection is saved.`;
 }
 async function begin(input, once = false) {
   const settings = normalizedSettings(input);
@@ -55,7 +82,8 @@ async function begin(input, once = false) {
   await chrome.storage.session.set({capture: {tabId: tab.id, running: true, rules: captureRules,
     addedPosts: 0, addedComments: 0, pageUrl: tab.url, message: "Collecting loaded content as you browse."}});
   await chrome.tabs.sendMessage(tab.id, {type: once ? "ONCE" : "START"});
-  if (once) await stop("Current page captured.");
+  // A one-shot page might have hit a limit while reporting; keep that reason instead of overwriting it.
+  if (once && (await session())?.running) await stop("Current page captured.");
   return state();
 }
 async function acceptReport(report, sender) {
@@ -70,6 +98,8 @@ async function acceptReport(report, sender) {
   const {data} = await stored();
   const posts = new Map(data.posts.map(post => [post.id, post]));
   const comments = new Map(data.comments.map(comment => [comment.comment_id, comment]));
+  // A record already in the collection is refreshed in place: it never consumes this session's
+  // quota, so the quota always equals the set of records the session actually wrote.
   for (const record of report.posts.slice(0, 500)) {
     if (!BrowserCollector.matches(record, capture.rules)) continue;
     if (!posts.has(record.id)) {
@@ -96,10 +126,14 @@ async function acceptReport(report, sender) {
   await chrome.storage.local.set({data: updated});
   capture.pageUrl = report.page_url;
   capture.message = `Captured ${capture.addedPosts} new posts and ${capture.addedComments} new comments this session.`;
-  if (capture.addedPosts >= capture.rules.maxPosts &&
-      (!capture.rules.includeComments || capture.addedComments >= capture.rules.maxComments)) capture.running = false;
+  const filled = filledDimensions(capture);
+  if (filled.posts || filled.comments) {
+    // Persist the settled counters together with the stop reason, then stop accepting reports.
+    await halt(capture, limitNotice(capture, filled));
+    return {ok: true, running: false, message: capture.message};
+  }
   await chrome.storage.session.set({capture});
-  return {ok: true, running: capture.running};
+  return {ok: true, running: true, message: capture.message};
 }
 async function state() {
   const {settings, data, lastSync} = await stored();
