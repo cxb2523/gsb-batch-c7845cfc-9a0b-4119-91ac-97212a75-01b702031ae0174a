@@ -14,9 +14,25 @@ BOT_NAME = 'disqus-crawler'
 SPIDER_MODULES = ['disqus-crawler.spiders']
 NEWSPIDER_MODULE = 'disqus-crawler.spiders'
 
-SPLASH_URL = 'http://localhost:8050/'
-DUPEFILTER_CLASS = 'scrapy_splash.SplashAwareDupeFilter'
-HTTPCACHE_STORAGE = 'scrapy_splash.SplashAwareFSCacheStorage'
+# Whether url_grabber should render article pages through Splash.
+# Set SPLASH_ENABLED=False (or crawl file:// fixtures) to fetch pages directly.
+SPLASH_ENABLED = True
+
+# scrapy-splash is optional at runtime: it does not import on every Scrapy
+# version (e.g. Scrapy >= 2.12 removed scrapy.utils.url.canonicalize_url).
+# When it is unavailable the project still runs for local `file://` fixtures;
+# only real-blog crawling through Splash is disabled.
+try:
+    import scrapy_splash  # noqa: F401
+except Exception:  # pragma: no cover - depends on installed versions
+    SPLASH_ENABLED = False
+else:
+    SPLASH_URL = 'http://localhost:8050/'
+    DUPEFILTER_CLASS = 'scrapy_splash.SplashAwareDupeFilter'
+    HTTPCACHE_STORAGE = 'scrapy_splash.SplashAwareFSCacheStorage'
+    DOWNLOADER_MIDDLEWARES = {
+        'scrapy_splash.SplashMiddleware': 725,
+    }
 
 # Crawl responsibly by identifying yourself (and your website) on the user-agent
 # USER_AGENT = 'disqus-crawler (+http://www.yourdomain.com)'
@@ -50,11 +66,8 @@ HTTPCACHE_STORAGE = 'scrapy_splash.SplashAwareFSCacheStorage'
 #    'disqus-crawler.middlewares.MyCustomSpiderMiddleware': 543,
 # }
 
-# Enable or disable downloader middlewares
-# See http://scrapy.readthedocs.org/en/latest/topics/downloader-middleware.html
-DOWNLOADER_MIDDLEWARES = {
-    'scrapy_splash.SplashMiddleware': 725,
-}
+# Downloader middlewares are configured next to SPLASH_ENABLED above, so that
+# the Splash middleware is only registered when scrapy-splash can be imported.
 
 # Enable or disable extensions
 # See http://scrapy.readthedocs.org/en/latest/topics/extensions.html

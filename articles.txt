@@ -1,0 +1,8 @@
+# One article URL per line. Blank lines and lines starting with # are ignored.
+#
+# Replace the example below with the blog posts you want to crawl:
+http://www.purseblog.com/louis-vuitton/louis-vuitton-spring-2016-bag-ad-campaign/
+#
+# For a local demo without network access, use the bundled samples instead,
+# e.g. file:///<path-to-repo>/samples/articles/article-ok.html
+# (see samples/README.md for the list of sample articles).

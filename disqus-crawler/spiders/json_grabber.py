@@ -1,28 +1,55 @@
 # coding=utf-8
 import scrapy
 
-# Define the Splash API endpoint
-RENDER_HTML_URL = "http://localhost:8050/render.html"
+from .common import ErrorReportingSpider, prepare_output, write_status
 
 
-class JsonGrabberSpider(scrapy.Spider):
+class JsonGrabberSpider(ErrorReportingSpider):
     name = "json_grabber"
+
+    # The Disqus embed page carries the thread payload in this script tag.
+    THREAD_DATA_XPATH = "//script[@id='disqus-threadData']/text()"
 
     # the crawler takes an URL in input
     # this URL is the output of the UrlGrabberSpider in getDisqusUrl.py
-    def __init__(self, url):
+    # ``out`` (default thread.json) and ``status`` are optional; they let the
+    # collection runner keep one thread.json per article and read the outcome.
+    def __init__(self, url=None, out=None, status=None, **kwargs):
+        super().__init__(**kwargs)
+        if not url:
+            raise ValueError("json_grabber requires -a url=<disqus iframe url>")
+        self.source_url = url
         self.start_urls = [url]
-        # An example URL could be:
-        # http://disqus.com/embed/comments/?base=default&amp;version=afe1dd72cff7b0c7fecc0f7b3d92eb5e&amp;f=purseblog&amp;t_i=134117%20http%3A%2F%2Fwww.purseblog.com%2F%3Fp%3D134117&amp;t_u=http%3A%2F%2Fwww.purseblog.com%2Flouis-vuitton%2Flouis-vuitton-chanel-resort-2016-ad-campaigns%2F&amp;t_e=Feast%20Your%20Eyes%20on%20Bag-Heavy%20Cruise%202016%20Ads%20from%20Louis%20Vuitton%20and%20Chanel&amp;t_d=Feast%20Your%20Eyes%20on%20Bag-Heavy%20Cruise%202016%20Ads%20from%20Louis%20Vuitton%20and%20Chanel&amp;t_t=Feast%20Your%20Eyes%20on%20Bag-Heavy%20Cruise%202016%20Ads%20from%20Louis%20Vuitton%20and%20Chanel&amp;s_o=default&amp"
+        self.output_path = prepare_output(out, "thread.json")
+        self.status_path = status
 
-    # We use scrapy to and the Xpath syntax to extract information
-    # We then store this inforamatino in a file called thread.json
-    def parse(self, response):
-        json = response.xpath("//script[@id='disqus-threadData']/text()").extract()[0]
-        # Other ways of getting the same information would be:
-        # response.xpath("//iframe[@title='Disqus']")
-        # response.xpath("//iframe[contains(@id,'dsq')]")
+    # We use scrapy and the Xpath syntax to extract the thread payload and
+    # store it in a file called thread.json (or the ``out`` given by caller).
+    def start_requests(self):
+        for url in self.start_urls:
+            yield scrapy.Request(
+                url, self.parse, errback=self.on_error, dont_filter=True
+            )
 
-        filename = 'thread.json'
-        with open(filename, 'w') as f:
-            f.write(json)
+    def parse(self, response, **kwargs):
+        payloads = response.xpath(self.THREAD_DATA_XPATH).extract()
+        payload = payloads[0] if payloads else ""
+
+        if not payload.strip():
+            self.logger.warning("no disqus-threadData payload at %s", self.source_url)
+            write_status(
+                self.status_path,
+                status="missing",
+                url=self.source_url,
+                detail="embed page has no disqus-threadData payload",
+            )
+            return
+
+        self.output_path.write_text(payload, encoding="utf-8")
+        write_status(
+            self.status_path,
+            status="saved",
+            url=self.source_url,
+            out=str(self.output_path),
+            bytes=len(payload.encode("utf-8")),
+        )

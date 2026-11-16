@@ -1,6 +1,10 @@
 thread.json
 url.txt
 
+# Per-article crawl artifacts and local caches
+collect-work/
+samples-work/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]

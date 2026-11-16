@@ -2,3 +2,7 @@ pip
 scrapy
 scrapy-splash
 pymongo
+
+# Optional, only for the offline sample run and the regression tests
+mongomock
+pytest
