@@ -714,10 +714,25 @@ reject) ends `completed` with no results and no `error`: check the
 patterns against the URLs the start page links to. A crawl that ran
 out of credits, or whose API key hit a credit cap, ends `stopped` with `crawl.error.code`
 `insufficient_credits` or `api_key_cap_reached` and no `stop_reason`; the
-pages it fetched before that stay readable. `results` does not poll: it returns at the first empty page, so on a
-running crawl it yields only the URLs kept so far. Call `wait` first to
-read every result. `results(crawl_id, limit=...)` sets the page size of
-each request. `get(crawl_id, cursor=..., limit=...)` returns one raw page.
+pages it fetched before that stay readable. By default `results` does not
+poll: it returns at the first empty page, so on a running crawl it yields
+only the URLs kept so far. Call `wait` first to read every result.
+`results(crawl_id, limit=...)` sets the page size of each request.
+`get(crawl_id, cursor=..., limit=...)` returns one raw page.
+
+To read a crawl while it still runs, pass `follow=True`: an empty page on a
+running crawl is then a pause, not the end. `results` waits and polls
+`next_cursor` again — `poll_interval` seconds, doubling up to
+`max_poll_interval` (2s and 15s by default) — yielding URLs as they arrive,
+until the crawl is `completed`, `stopped` or `failed` and its cursor is
+empty. Pass `timeout=...` to bound the whole scan in seconds; when it runs
+out the iteration simply ends, with no exception. Without `follow` or
+`timeout` nothing changes:
+
+```python
+for result in client.results(crawl.crawl_id, follow=True, timeout=120):
+    print(result.url)                        # printed while the crawl runs
+```
 
 The client takes these options: `base_url` (default
 `https://api.zenrows.com/v1`), `retries` (default 3; set 0 to disable)
@@ -749,7 +764,10 @@ with client.download(crawl.crawl_id) as download:  # streamed, parsed
 `content` takes a result, its `content_url`, or its content id.
 `download` returns a `CrawlDownload`: its `status` is the crawl's status
 when the file was read, and its `lines` yields parsed lines. On a `running` crawl the
-file holds only the results kept so far.
+file holds only the results kept so far. If the stream breaks before its
+end, the lines read up to the break are still yielded, then
+`CrawlDownloadError` (a `CrawlAPIError`) is raised and the connection is
+closed: the file is incomplete, so read it again once the crawl ends.
 
 ### List and stop crawls
 

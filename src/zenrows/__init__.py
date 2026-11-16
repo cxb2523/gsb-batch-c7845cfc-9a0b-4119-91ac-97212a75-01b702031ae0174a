@@ -16,10 +16,11 @@ Three clients live here:
 from zenrows.__version__ import __version__
 from zenrows.batch import ZenRowsBatchClient
 from zenrows.client import PreparedDomainError, ZenRowsClient, is_no_data_extracted
-from zenrows.crawl import CrawlAPIError, ZenRowsCrawlClient
+from zenrows.crawl import CrawlAPIError, CrawlDownloadError, ZenRowsCrawlClient
 
 __all__ = [
     "CrawlAPIError",
+    "CrawlDownloadError",
     "PreparedDomainError",
     "ZenRowsBatchClient",
     "ZenRowsClient",

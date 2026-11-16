@@ -3,7 +3,8 @@
 Covers the wire contract with respx: request shapes (path, method, key
 header, bodies carrying only what the caller set), response parsing
 with open enums, problem+json error mapping, the results scanner's
-stop rule, downloads with their status, retries, and wait.
+stop rule and its follow mode, downloads with their status (including
+a stream that breaks mid-body), retries, and wait.
 """
 
 import base64
@@ -11,6 +12,7 @@ import hashlib
 import hmac
 import json
 
+import httpx
 import pytest
 import respx
 from httpx import Response
@@ -22,6 +24,8 @@ from zenrows.crawl import (
     CRAWL_NOT_ENABLED_CODE,
     ContentStatus,
     CrawlAPIError,
+    CrawlDownload,
+    CrawlDownloadError,
     CrawlErrorCode,
     CrawlEventType,
     CrawlResult,
@@ -583,6 +587,184 @@ def test_results_returns_at_first_empty_page_of_running_crawl(client: ZenRowsCra
     assert no_sleep == []
 
 
+@respx.mock
+def test_results_follow_waits_through_empty_pages_until_terminal(
+    client: ZenRowsCrawlClient, no_sleep
+):
+    route = respx.get(f"{BASE_URL}/crawls/c_1").mock(
+        side_effect=[
+            Response(200, json=crawl_body(results=[{"url": "https://a"}], next_cursor="k1")),
+            # Caught up but still running: wait, then ask again.
+            Response(200, json=crawl_body(results=[], next_cursor="k1")),
+            Response(200, json=crawl_body(results=[{"url": "https://b"}], next_cursor="k2")),
+            Response(200, json=crawl_body(results=[], next_cursor="k2")),
+            # Ended: the last page, cursor null.
+            Response(
+                200,
+                json=crawl_body(
+                    status="completed", results=[{"url": "https://c"}], next_cursor=None
+                ),
+            ),
+        ]
+    )
+
+    urls = [r.url for r in client.results("c_1", follow=True)]
+
+    assert urls == ["https://a", "https://b", "https://c"]
+    assert route.call_count == 5
+    cursors = [c.request.url.params.get("cursor") for c in route.calls]
+    assert cursors == [None, "k1", "k1", "k2", "k2"]
+    # Two waits, both bounded by the backoff cap, none on a page that moved on.
+    assert len(no_sleep) == 2
+    assert all(0 < s <= 15.0 * 1.2 for s in no_sleep)
+
+
+@respx.mock
+def test_results_follow_returns_once_terminal_with_null_cursor(
+    client: ZenRowsCrawlClient, no_sleep
+):
+    route = respx.get(f"{BASE_URL}/crawls/c_1").mock(
+        return_value=Response(
+            200,
+            json=crawl_body(status="stopped", results=(), next_cursor=None),
+        )
+    )
+
+    assert list(client.results("c_1", follow=True)) == []
+    # Null cursor ends the scan at once, even in follow mode.
+    assert route.call_count == 1
+    assert no_sleep == []
+
+
+@respx.mock
+def test_results_follow_does_not_wait_when_crawl_ended_with_cursor(
+    client: ZenRowsCrawlClient, no_sleep
+):
+    route = respx.get(f"{BASE_URL}/crawls/c_1").mock(
+        return_value=Response(
+            200,
+            json=crawl_body(status="completed", results=(), next_cursor="k1"),
+        )
+    )
+
+    assert list(client.results("c_1", follow=True)) == []
+    # Ended and empty: the default rule returns at once, no waiting.
+    assert route.call_count == 1
+    assert no_sleep == []
+
+
+@respx.mock
+def test_results_follow_treats_an_unknown_status_as_ended(client: ZenRowsCrawlClient, no_sleep):
+    route = respx.get(f"{BASE_URL}/crawls/c_1").mock(
+        return_value=Response(
+            200,
+            json=crawl_body(status="paused", results=(), next_cursor="k1"),
+        )
+    )
+
+    # A status this version does not know is not `running`, so follow
+    # stops waiting rather than block on a crawl that may never move again.
+    assert list(client.results("c_1", follow=True)) == []
+    assert route.call_count == 1
+    assert no_sleep == []
+
+
+@respx.mock
+def test_results_follow_honors_the_poll_interval_cap(client: ZenRowsCrawlClient, no_sleep):
+    respx.get(f"{BASE_URL}/crawls/c_1").mock(
+        side_effect=[
+            Response(200, json=crawl_body(results=[], next_cursor="k1")),
+            Response(200, json=crawl_body(results=[], next_cursor="k1")),
+            Response(200, json=crawl_body(results=[], next_cursor="k1")),
+            Response(200, json=crawl_body(status="completed", results=(), next_cursor=None)),
+        ]
+    )
+
+    urls = [
+        r.url for r in client.results("c_1", follow=True, poll_interval=0.1, max_poll_interval=0.2)
+    ]
+
+    assert urls == []
+    # 0.1, then capped at 0.2; never more than the cap (plus jitter).
+    assert len(no_sleep) == 3
+    assert no_sleep[0] <= 0.1 * 1.2
+    assert all(s <= 0.2 * 1.2 for s in no_sleep[1:])
+
+
+@respx.mock
+def test_results_follow_times_out_and_ends_iteration(client: ZenRowsCrawlClient, monkeypatch):
+    route = respx.get(f"{BASE_URL}/crawls/c_1").mock(
+        return_value=Response(200, json=crawl_body(results=(), next_cursor="k1"))
+    )
+    now = [0.0]
+    slept: list[float] = []
+
+    def sleep(seconds: float) -> None:
+        slept.append(seconds)
+        now[0] += seconds
+
+    monkeypatch.setattr("time.monotonic", lambda: now[0])
+    monkeypatch.setattr("time.sleep", sleep)
+
+    urls = [r.url for r in client.results("c_1", follow=True, timeout=5)]
+
+    assert urls == []  # nothing raised: a timeout ends the scan quietly
+    assert sum(slept) == pytest.approx(5)
+    # Each ask that caught up is followed by a wait, and the budget then
+    # ends the scan: no request goes out once it is spent.
+    assert route.call_count == len(slept)
+    assert route.call_count >= 1
+
+
+@respx.mock
+def test_results_timeout_zero_reads_the_first_page_then_ends(
+    client: ZenRowsCrawlClient, monkeypatch
+):
+    route = respx.get(f"{BASE_URL}/crawls/c_1").mock(
+        return_value=Response(
+            200, json=crawl_body(results=[{"url": "https://a"}], next_cursor="k1")
+        )
+    )
+    now = [100.0]
+    slept: list[float] = []
+    monkeypatch.setattr("time.monotonic", lambda: now[0])
+    monkeypatch.setattr("time.sleep", slept.append)
+
+    # A spent budget still returns what the crawl has kept; no waiting,
+    # no exception, and no second request.
+    assert [r.url for r in client.results("c_1", follow=True, timeout=0)] == ["https://a"]
+    assert route.call_count == 1
+    assert slept == []
+
+
+@respx.mock
+def test_results_follow_keeps_paging_terminal_results_without_waiting(
+    client: ZenRowsCrawlClient, no_sleep
+):
+    route = respx.get(f"{BASE_URL}/crawls/c_1").mock(
+        side_effect=[
+            Response(
+                200,
+                json=crawl_body(
+                    status="completed", results=[{"url": "https://a"}], next_cursor="k1"
+                ),
+            ),
+            Response(
+                200,
+                json=crawl_body(
+                    status="completed", results=[{"url": "https://b"}], next_cursor=None
+                ),
+            ),
+        ]
+    )
+
+    urls = [r.url for r in client.results("c_1", follow=True)]
+
+    assert urls == ["https://a", "https://b"]
+    assert route.call_count == 2
+    assert no_sleep == []
+
+
 # ----- contents / download -----
 
 
@@ -656,6 +838,114 @@ def test_download_maps_errors(client: ZenRowsCrawlClient):
     with pytest.raises(CrawlAPIError) as exc_info:
         client.download("nope")
     assert exc_info.value.code == "crawl_not_found"
+
+
+class _BrokenStream(httpx.SyncByteStream):
+    """A body that yields some chunks, then drops the connection."""
+
+    def __init__(self, chunks: list[bytes], error: Exception):
+        self._chunks = chunks
+        self._error = error
+
+    def __iter__(self):
+        yield from self._chunks
+        raise self._error
+
+
+@respx.mock
+def test_download_keeps_parsed_lines_when_the_stream_breaks(client: ZenRowsCrawlClient):
+    stream = _BrokenStream(
+        [b'{"url":"https://a"}\n', b'{"url":"https://b"}\n'],
+        httpx.ReadError("peer closed connection without sending complete message body"),
+    )
+    respx.get(f"{BASE_URL}/crawls/c_1/download").mock(
+        return_value=Response(
+            200,
+            headers={"Content-Type": "application/x-ndjson", "X-Crawl-Status": "running"},
+            stream=stream,
+        )
+    )
+
+    download = client.download("c_1")
+    seen: list[str] = []
+    with pytest.raises(CrawlDownloadError) as exc_info:
+        for line in download.lines:
+            seen.append(line.url)
+
+    # The lines parsed before the break were yielded, then the error.
+    assert seen == ["https://a", "https://b"]
+    err = exc_info.value
+    assert isinstance(err, CrawlAPIError)  # one except clause catches both
+    assert err.status_code == 0
+    assert isinstance(err.cause, httpx.ReadError)
+    assert "ended before it was complete" in str(err)
+
+
+def _download(chunks: list[bytes], error: Exception | None = None):
+    """A `CrawlDownload` over a fake body, with a close flag to read."""
+    closed: list[bool] = []
+    response = httpx.Response(
+        200,
+        headers={"Content-Type": "application/x-ndjson", "X-Crawl-Status": "running"},
+        stream=(
+            _BrokenStream(chunks, error)
+            if error is not None
+            else httpx.ByteStream(b"".join(chunks))
+        ),
+    )
+    return CrawlDownload(response, lambda: closed.append(True)), closed
+
+
+def test_download_keeps_parsed_lines_and_closes_on_a_truncated_body():
+    download, closed = _download(
+        [b'{"url":"https://a"}\n', b'{"url":"https://b"}\n'],
+        httpx.RemoteProtocolError("peer closed connection without sending complete message"),
+    )
+    seen: list[str] = []
+    with pytest.raises(CrawlDownloadError) as exc_info:
+        for line in download.lines:
+            seen.append(line.url)
+
+    assert seen == ["https://a", "https://b"]  # kept: yielded before the break
+    assert isinstance(exc_info.value.cause, httpx.RemoteProtocolError)
+    assert closed == [True]  # the connection is closed before the error lands
+
+
+def test_download_keeps_the_lines_before_a_truncated_final_line():
+    download, closed = _download(
+        [b'{"url":"https://a"}\n', b'{"url":"https://b"}'],
+        httpx.ReadError("connection reset by peer"),
+    )
+    seen: list[str] = []
+    with pytest.raises(CrawlDownloadError):
+        for line in download.lines:
+            seen.append(line.url)
+
+    # The partial last line never parsed, so it is not yielded.
+    assert seen == ["https://a"]
+    assert closed == [True]
+
+
+def test_download_closes_on_a_clean_end():
+    download, closed = _download([NDJSON])
+    assert download.status is CrawlStatus.RUNNING  # from X-Crawl-Status
+    assert [line.url for line in download.lines] == ["https://a", "https://b", "https://c"]
+    assert closed == [True]
+
+
+@respx.mock
+def test_download_closes_the_response_on_a_clean_end(client: ZenRowsCrawlClient):
+    respx.get(f"{BASE_URL}/crawls/c_1/download").mock(
+        return_value=Response(
+            200,
+            headers={"Content-Type": "application/x-ndjson", "X-Crawl-Status": "completed"},
+            content=NDJSON,
+        )
+    )
+
+    download = client.download("c_1")
+    assert [line.url for line in download.lines] == ["https://a", "https://b", "https://c"]
+    assert download._response.is_closed
 
 
 # ----- errors -----

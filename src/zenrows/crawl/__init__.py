@@ -7,7 +7,9 @@ What's where:
   - `client.ZenRowsCrawlClient` — the typed facade: create, get, list,
     results, content, download, stop, and wait.
   - `models` — hand-written pydantic v2 response models with open enums.
-  - `errors.CrawlAPIError` — RFC 9457 problem+json mapping.
+  - `errors.CrawlAPIError` — RFC 9457 problem+json mapping; and
+    `errors.CrawlDownloadError`, a `CrawlAPIError` raised when a
+    download's stream breaks before its end.
 
 `create(output_format="html")` or `create(output_format="markdown")` also
 returns each kept URL's page; without it a crawl returns URLs only.
@@ -27,7 +29,7 @@ from zenrows.crawl.client import (
     CrawlDownload,
     ZenRowsCrawlClient,
 )
-from zenrows.crawl.errors import CRAWL_NOT_ENABLED_CODE, CrawlAPIError
+from zenrows.crawl.errors import CRAWL_NOT_ENABLED_CODE, CrawlAPIError, CrawlDownloadError
 from zenrows.crawl.models import (
     ContentStatus,
     Coverage,
@@ -61,6 +63,7 @@ __all__ = [
     "Crawl",
     "CrawlAPIError",
     "CrawlDownload",
+    "CrawlDownloadError",
     "CrawlErrorCode",
     "CrawlEventName",
     "CrawlEventResource",

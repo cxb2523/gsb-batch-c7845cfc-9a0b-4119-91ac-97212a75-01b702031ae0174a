@@ -81,4 +81,28 @@ class CrawlAPIError(Exception):
         )
 
 
-__all__ = ["CRAWL_NOT_ENABLED_CODE", "CrawlAPIError"]
+class CrawlDownloadError(CrawlAPIError):
+    """A crawl's NDJSON download ended before it was complete.
+
+    Raised while iterating `CrawlDownload.lines` when the connection
+    breaks before the stream ends — a dropped socket, a truncated body.
+    The lines parsed before the break have already been yielded; this
+    error tells the caller the file is incomplete, so read it again (a
+    finished crawl's file holds every result). The connection is closed
+    before it is raised.
+
+    It subclasses `CrawlAPIError` so one `except CrawlAPIError` handles
+    a bad response and a broken body alike. `status_code` is 0 — there
+    was no HTTP answer, the body just stopped — and `cause` is the
+    underlying transport error when there was one.
+    """
+
+    def __init__(self, cause: BaseException | None = None):
+        super().__init__(0, None, b"")
+        self.cause = cause
+        detail = f": {cause}" if cause else ""
+        # Keep the message in `args`, so `str()` reads it like any error.
+        self.args = (f"crawl download ended before it was complete{detail}",)
+
+
+__all__ = ["CRAWL_NOT_ENABLED_CODE", "CrawlAPIError", "CrawlDownloadError"]

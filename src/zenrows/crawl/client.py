@@ -30,7 +30,7 @@ import httpx
 
 from zenrows.__version__ import __version__
 from zenrows.batch._transport import _RETRYABLE_STATUSES, _Transport
-from zenrows.crawl.errors import CrawlAPIError
+from zenrows.crawl.errors import CrawlAPIError, CrawlDownloadError
 from zenrows.crawl.models import (
     Crawl,
     CrawlList,
@@ -74,6 +74,11 @@ class CrawlDownload:
     crawl has kept so far. Iterate `lines` once for the parsed lines;
     the connection closes when the iteration ends. Use it as a context
     manager to close it without reading to the end.
+
+    If the stream breaks before it ends, the lines parsed up to the
+    break are still yielded, then `CrawlDownloadError` (a
+    `CrawlAPIError`) is raised: the file is incomplete. The connection
+    is closed first, so the error is the last thing the iteration does.
     """
 
     def __init__(self, response: httpx.Response, close: Callable[[], None]):
@@ -87,10 +92,28 @@ class CrawlDownload:
 
     def _lines(self) -> Iterator[DownloadLine]:
         try:
-            for line in self._response.iter_lines():
+            stream = self._response.iter_lines()
+            while True:
+                try:
+                    line = next(stream)
+                except StopIteration:
+                    return
+                except httpx.StreamError:
+                    # The response was already read or closed: a second
+                    # pass over `lines`, not a body that broke. Let it
+                    # surface as the misuse it is.
+                    raise
+                except Exception as err:
+                    # Reading the next line failed, so the stream ended
+                    # before its end: the lines yielded so far are good,
+                    # but the file is incomplete. Only the read is
+                    # guarded — parsing happens below — so a malformed
+                    # line still surfaces as the parse error it is.
+                    raise CrawlDownloadError(err) from err
                 if line.strip():
                     yield DownloadLine.model_validate_json(line)
         finally:
+            # Close on a clean end and on a break alike.
             self.close()
 
     def close(self) -> None:
@@ -279,21 +302,72 @@ class ZenRowsCrawlClient:
         crawl_id: str,
         *,
         limit: int | None = None,
+        follow: bool = False,
+        timeout: float | None = None,
+        poll_interval: float = _POLL_INTERVAL,
+        max_poll_interval: float = _MAX_POLL_INTERVAL,
     ) -> Iterator[CrawlResult]:
         """Yield the URLs the crawl has kept, in order, each once.
 
-        Follows `next_cursor`, `limit` URLs per request, and returns at
-        the first empty page or null cursor. It does not poll: on a
-        running crawl it yields only what the crawl has kept so far.
-        Call `wait` first to read every result.
+        Follows `next_cursor`, `limit` URLs per request. By default it
+        returns at the first empty page or null cursor, and does not
+        poll: on a running crawl it yields only what the crawl has kept
+        so far. Call `wait` first to read every result.
+
+        `follow=True` follows a running crawl instead of stopping at
+        the first empty page. When the scan catches up with the crawl
+        (an empty page, same cursor back) it waits `poll_interval`
+        seconds — doubling up to `max_poll_interval` (2s and 15s by
+        default) — and asks again, until the crawl ends (`completed`,
+        `stopped` or `failed`) and the cursor is empty. Results
+        arriving meanwhile are yielded as they come, so a caller can
+        act on URLs while the crawl still runs. Once the crawl has
+        ended it returns by the default rule. A null cursor ends the
+        scan at once either way: asking again without one would repeat
+        results already yielded.
+
+        `timeout` bounds the whole scan in seconds, `follow` or not.
+        When it runs out the scan simply stops — no exception — and
+        the iteration ends. Leave it out (`None`) to keep following
+        until the crawl ends.
+
+        A crawl that failed or stopped is followed to its end too, not
+        raised: read its `error` with `get`.
         """
+        deadline = None if timeout is None else time.monotonic() + max(0.0, timeout)
+        interval = max(0.0, poll_interval)
+        cap = max(interval, max_poll_interval)
         cursor: str | None = None
+        first = True
         while True:
+            # `timeout` is the whole scan's budget. The first page is
+            # always asked for — what the crawl has kept so far is worth
+            # having — and once the budget is spent the scan ends
+            # quietly instead of asking again.
+            if not first and deadline is not None and time.monotonic() >= deadline:
+                return
+            first = False
             page = self.get(crawl_id, cursor=cursor, limit=limit)
             yield from page.results
-            if not page.results or page.next_cursor is None:
+            if page.next_cursor is None:
                 return
             cursor = page.next_cursor
+            if page.results:
+                # Progress: ask again at once, and start the backoff over.
+                interval = max(0.0, poll_interval)
+                continue
+            if not follow or page.status is not CrawlStatus.RUNNING:
+                return
+            # Caught up with a running crawl: wait, then ask the same
+            # cursor again for the URLs kept since.
+            wait = min(interval * random.uniform(0.8, 1.2), cap)
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return
+                wait = min(wait, remaining)
+            time.sleep(wait)
+            interval = min(interval * _POLL_BACKOFF, cap)
 
     def stop(self, crawl_id: str) -> CrawlStop:
         """`POST /crawls/{crawl_id}/stop` — stop a running crawl.
