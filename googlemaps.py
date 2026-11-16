@@ -25,6 +25,246 @@ MAX_WAIT = 10
 MAX_RETRY = 5
 MAX_SCROLLS = 40
 
+# ---------------------------------------------------------------------------
+# Offline place metadata parsing
+#
+# Google Maps renders each piece of contact information (address, website,
+# phone, ...) in its own row whose icon carries a stable, language-neutral
+# ``data-item-id`` attribute. Matching on that attribute instead of a fixed
+# position keeps every field correctly placed when one of the rows is absent
+# from the page. The helpers below only need a saved page's HTML and work
+# without a running browser / network connection.
+# ---------------------------------------------------------------------------
+
+# data-item-id prefix -> place dictionary field
+_INFO_ID_PREFIXES = (
+    ('address', 'address'),
+    ('authority', 'website'),
+    ('phone', 'phone_number'),
+    ('oloc', 'plus_code'),
+)
+
+# fallback for older/localised pages that expose the label through aria-label
+# instead of data-item-id
+_INFO_ARIA_LABELS = (
+    ('Address', 'address'),
+    ('Website', 'website'),
+    ('Phone', 'phone_number'),
+    ('Plus code', 'plus_code'),
+)
+
+
+def _clean_info_text(text):
+    """Collapse whitespace inside an information row."""
+    return re.sub(r'\s+', ' ', text).strip()
+
+
+def _row_value(row):
+    """Extract the displayed value of an information row.
+
+    The text value lives in an ``Io6YTe`` element; fall back to the row's own
+    text for pages whose markup differs slightly.
+    """
+    value_el = row.find(class_='Io6YTe')
+    text = value_el.get_text() if value_el is not None else row.get_text()
+    text = _clean_info_text(text)
+    return text or None
+
+
+def _website_value(row):
+    """Return the website value, preferring the link's target URL."""
+    link = row.find('a', href=True)
+    if link is not None:
+        href = link['href'].strip()
+        if href.startswith('http://') or href.startswith('https://'):
+            return href
+    return _row_value(row)
+
+
+def _phone_value(row):
+    """Return the phone value, accepting both the text and ``phone:`` id."""
+    value = _row_value(row)
+    if value is not None:
+        return value
+    item_id = row.get('data-item-id') or ''
+    if item_id.startswith('phone:'):
+        number = item_id[len('phone:'):].strip()
+        return number or None
+    return None
+
+
+def _extract_info_rows(response):
+    """Locate address/website/phone/plus-code rows by their actual labels.
+
+    Each row is matched independently, so a missing row leaves the
+    corresponding field empty instead of shifting the following fields.
+    """
+    fields = {
+        'address': None,
+        'website': None,
+        'phone_number': None,
+        'plus_code': None,
+    }
+
+    # primary strategy: stable data-item-id attribute
+    for row in response.find_all(attrs={'data-item-id': True}):
+        item_id = row.get('data-item-id') or ''
+        for prefix, field in _INFO_ID_PREFIXES:
+            if item_id == prefix or item_id.startswith(prefix + ':'):
+                if fields[field] is None:
+                    if field == 'website':
+                        fields[field] = _website_value(row)
+                    elif field == 'phone_number':
+                        fields[field] = _phone_value(row)
+                    else:
+                        fields[field] = _row_value(row)
+                break
+
+    # fallback: aria-label based matching for pages (or individual rows)
+    # without data-item-id; each field is filled independently
+    for row in response.find_all(attrs={'aria-label': True}):
+        if row.find(class_='Io6YTe') is None:
+            continue
+        aria_label = row.get('aria-label') or ''
+        for label, field in _INFO_ARIA_LABELS:
+            if fields[field] is None and (aria_label == label or aria_label.startswith(label + ':')):
+                if field == 'website':
+                    fields[field] = _website_value(row)
+                elif field == 'phone_number':
+                    fields[field] = _phone_value(row)
+                else:
+                    fields[field] = _row_value(row)
+                break
+
+    return fields
+
+
+def _normalize_hours_text(text):
+    """Normalise the special spacing characters Google uses in hours labels."""
+    # narrow no-break space (U+202F) and thin space (U+2009) -> regular space
+    return text.replace(' ', ' ').replace(' ', ' ')
+
+
+def _extract_opening_hours(response):
+    """Extract opening hours independently from the other metadata fields."""
+    # markup used by the page version this scraper was built against
+    hours_el = response.find('div', class_='t39EBf GUrTXd')
+    if hours_el is not None and hours_el.get('aria-label'):
+        return _normalize_hours_text(hours_el['aria-label'])
+
+    # newer markup: the hours row carries an ``oh`` data-item-id
+    for row in response.find_all(attrs={'data-item-id': True}):
+        if (row.get('data-item-id') or '').split(':', 1)[0] == 'oh':
+            aria_label = row.get('aria-label')
+            if aria_label:
+                return _normalize_hours_text(aria_label)
+            value = _row_value(row)
+            if value is not None:
+                return value
+
+    # last resort: any element explicitly labelled with opening hours
+    hours_el = response.find(attrs={'aria-label': 'Opening hours'})
+    if hours_el is not None:
+        value = _row_value(hours_el)
+        if value is not None:
+            return value
+
+    return None
+
+
+def _find_by_class(response, name):
+    """Find an element by class, tolerating trailing/leading whitespace.
+
+    Google's obfuscated class names sometimes appear with a trailing space in
+    the original markup (e.g. ``class="F7nice "``). BeautifulSoup tokenises
+    class attributes, so an exact string lookup including the space would
+    never match; search by the stripped token instead.
+    """
+    return response.find(class_=name.strip())
+
+
+def parse_place_html(html, url=''):
+    """Parse place metadata from a saved page's HTML.
+
+    Args:
+        html (str | bytes | BeautifulSoup): HTML of a Google Maps place page,
+            as returned by ``driver.page_source`` or read from disk.
+        url (str): place URL the HTML was captured from. Stored in the
+            returned dictionary and used to derive the coordinates.
+
+    Returns:
+        dict: the place metadata with the same field names as
+        ``GoogleMapsScraper.get_account``. Fields that cannot be located on
+        the page are set to ``None``; the dictionary structure is always
+        complete, even for a page without a recognisable place name.
+    """
+    if isinstance(html, BeautifulSoup):
+        response = html
+    else:
+        response = BeautifulSoup(html, 'html.parser')
+
+    place = {}
+
+    try:
+        place['name'] = response.find('h1', class_='DUwDvf fontHeadlineLarge').text.strip()
+    except Exception:
+        # fallback: any populated h1 (class names are obfuscated and may change)
+        h1 = response.find('h1')
+        name = _clean_info_text(h1.get_text()) if h1 is not None else ''
+        place['name'] = name or None
+
+    try:
+        rating_container = _find_by_class(response, 'F7nice ')
+        place['overall_rating'] = float(rating_container.find('span', class_='ceNzKf')['aria-label'].split(' ')[1])
+    except Exception:
+        place['overall_rating'] = None
+
+    try:
+        rating_container = _find_by_class(response, 'F7nice ')
+        place['n_reviews'] = int(rating_container.text.split('(')[1].replace(',', '').replace(')', ''))
+    except Exception:
+        place['n_reviews'] = 0
+
+    try:
+        place['n_photos'] = int(response.find('div', class_='YkuOqf').text.replace('.', '').replace(',', '').split(' ')[0])
+    except Exception:
+        place['n_photos'] = 0
+
+    try:
+        place['category'] = response.find('button', jsaction='pane.rating.category').text.strip()
+    except Exception:
+        place['category'] = None
+
+    try:
+        place['description'] = response.find('div', class_='PYvSYb').text.strip()
+    except Exception:
+        place['description'] = None
+
+    # label-based extraction: every field is located independently, so missing
+    # rows never shift the remaining fields
+    info_fields = _extract_info_rows(response)
+    place['address'] = info_fields['address']
+    place['website'] = info_fields['website']
+    place['phone_number'] = info_fields['phone_number']
+    place['plus_code'] = info_fields['plus_code']
+
+    # opening hours are parsed in their own step and cannot affect the fields
+    # above
+    place['opening_hours'] = _extract_opening_hours(response)
+
+    place['url'] = url
+
+    try:
+        lat, lng, _z = url.split('/')[6].split(',')
+        place['lat'] = lat[1:]
+        place['long'] = lng
+    except Exception:
+        place['lat'] = None
+        place['long'] = None
+
+    return place
+
+
 class GoogleMapsScraper:
 
     def __init__(self, debug=False):
@@ -165,7 +405,7 @@ class GoogleMapsScraper:
 
         resp = BeautifulSoup(self.driver.page_source, 'html.parser')
 
-        place_data = self.__parse_place(resp, url)
+        place_data = parse_place_html(resp, url)
 
         return place_data
 
@@ -234,72 +474,10 @@ class GoogleMapsScraper:
 
 
     def __parse_place(self, response, url):
-
-        place = {}
-
-        try:
-            place['name'] = response.find('h1', class_='DUwDvf fontHeadlineLarge').text.strip()
-        except Exception as e:
-            place['name'] = None
-
-        try:
-            place['overall_rating'] = float(response.find('div', class_='F7nice ').find('span', class_='ceNzKf')['aria-label'].split(' ')[1])
-        except Exception as e:
-            place['overall_rating'] = None
-
-        try:
-            place['n_reviews'] = int(response.find('div', class_='F7nice ').text.split('(')[1].replace(',', '').replace(')', ''))
-        except Exception as e:
-            place['n_reviews'] = 0
-
-        try:
-            place['n_photos'] = int(response.find('div', class_='YkuOqf').text.replace('.', '').replace(',','').split(' ')[0])
-        except Exception as e:
-            place['n_photos'] = 0
-
-        try:
-            place['category'] = response.find('button', jsaction='pane.rating.category').text.strip()
-        except Exception as e:
-            place['category'] = None
-
-        try:
-            place['description'] = response.find('div', class_='PYvSYb').text.strip()
-        except Exception as e:
-            place['description'] = None
-
-        b_list = response.find_all('div', class_='Io6YTe fontBodyMedium')
-        try:
-            place['address'] = b_list[0].text
-        except Exception as e:
-            place['address'] = None
-
-        try:
-            place['website'] = b_list[1].text
-        except Exception as e:
-            place['website'] = None
-
-        try:
-            place['phone_number'] = b_list[2].text
-        except Exception as e:
-            place['phone_number'] = None
-    
-        try:
-            place['plus_code'] = b_list[3].text
-        except Exception as e:
-            place['plus_code'] = None
-
-        try:
-            place['opening_hours'] = response.find('div', class_='t39EBf GUrTXd')['aria-label'].replace('\u202f', ' ')
-        except:
-            place['opening_hours'] = None
-
-        place['url'] = url
-
-        lat, long, z = url.split('/')[6].split(',')
-        place['lat'] = lat[1:]
-        place['long'] = long
-
-        return place
+        # Kept for backwards compatibility with any external caller. The actual
+        # label-based parsing lives in the module-level parse_place_html so it
+        # can be exercised offline against saved page HTML.
+        return parse_place_html(response, url)
 
 
     def _gen_search_points_from_square(self, keyword_list=None):
