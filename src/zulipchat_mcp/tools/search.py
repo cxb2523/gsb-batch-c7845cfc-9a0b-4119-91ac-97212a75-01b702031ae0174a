@@ -533,7 +533,12 @@ async def get_daily_summary(
     streams: list[str] | None = None,
     hours_back: int = 24,
 ) -> dict[str, Any]:
-    """Count messages per channel and topic over the last hours_back hours."""
+    """Count messages per channel and topic over the last hours_back hours.
+
+    Counts stay in `summary`; per-channel settlement is in
+    `summary.settlement`, so a failed channel or a rate-limit interruption is
+    reported without discarding the channels already counted.
+    """
     client = get_client()
     try:
         summary = await asyncio.to_thread(

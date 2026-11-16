@@ -16,6 +16,33 @@ from .snapshots import ReadSnapshots, invalidate_realm_snapshots
 
 OUTBOUND_CLIENT_NAME = "zulipchat-mcp"
 
+# One date-anchored daily-summary request returns at most this many messages.
+DAILY_SUMMARY_MESSAGE_LIMIT = 1000
+
+
+def _rate_limit_info(response: dict[str, Any]) -> dict[str, Any] | None:
+    """Describe a rate-limited API response, or None for any other response.
+
+    The client reports throttling either as a ``RATE_LIMIT_HIT`` code or with a
+    ``retry-after``/``retry_after`` delay (seconds), including on responses
+    whose result field is not ``"error"``.
+    """
+    code = response.get("code")
+    retry = response.get("retry-after")
+    if retry is None:
+        retry = response.get("retry_after")
+    if code != "RATE_LIMIT_HIT" and retry is None:
+        return None
+    info: dict[str, Any] = {
+        "kind": "rate_limited",
+        "reason": str(response.get("msg") or "Zulip API rate limit reached"),
+    }
+    if code is not None:
+        info["code"] = code
+    if retry is not None:
+        info["retry_after_seconds"] = retry
+    return info
+
 
 @dataclass
 class ZulipMessage:
@@ -818,8 +845,16 @@ class ZulipClientWrapper:
 
         Without explicit streams on FL 445+, one GET /messages over
         channels:public anchored at the cutoff date covers every public
-        channel (up to 1000 messages; `truncated` reports more). Explicit
-        streams or older servers fetch each channel separately.
+        channel (up to 1000 messages; `truncated` reports more and
+        `truncated_streams` names the channels whose counts may be short).
+        Explicit streams or older servers fetch each channel separately.
+
+        Each channel settles on its own. A failed channel is listed in
+        `unavailable_streams` (with its reason in `unavailable_stream_reasons`)
+        and the remaining channels are still fetched. A rate limit stops new
+        requests instead of raising: counts already collected are returned and
+        `settlement` reports the interruption plus the settled and unsettled
+        channels.
         """
         cutoff = datetime.now(timezone.utc) - timedelta(hours=hours_back)
         summary: dict[str, Any] = {
@@ -827,6 +862,12 @@ class ZulipClientWrapper:
             "streams": {},
             "top_senders": {},
             "time_range": f"Last {hours_back} hours",
+        }
+        settlement: dict[str, Any] = {
+            "status": "complete",
+            "settled_streams": [],
+            "unsettled_streams": [],
+            "failed_streams": [],
         }
 
         def tally(stream_name: str, messages: list[dict[str, Any]]) -> None:
@@ -844,52 +885,153 @@ class ZulipClientWrapper:
                 if topic:
                     stream["topics"][topic] = stream["topics"].get(topic, 0) + 1
 
+        def record_failure(
+            stream_name: str,
+            reason: str,
+            *,
+            code: Any = None,
+            retry_after: Any = None,
+        ) -> None:
+            """Keep the legacy name list and add the reason beside it."""
+            summary.setdefault("unavailable_streams", []).append(stream_name)
+            summary.setdefault("unavailable_stream_reasons", {})[stream_name] = reason
+            failure: dict[str, Any] = {"stream": stream_name, "reason": reason}
+            if code is not None:
+                failure["code"] = code
+            if retry_after is not None:
+                failure["retry_after_seconds"] = retry_after
+            settlement["failed_streams"].append(failure)
+            settlement["status"] = "partial"
+
+        def interrupt(info: dict[str, Any], stream_name: str | None) -> None:
+            """Stop issuing requests, keeping whatever was already counted."""
+            interruption = dict(info)
+            if stream_name is not None:
+                interruption["stream"] = stream_name
+            settlement["interrupted"] = interruption
+            settlement["status"] = "partial"
+
         if not streams and self.supports(445):
+            settlement["mode"] = "date_anchored"
             response = self.get_messages_raw(
                 anchor="date",
                 anchor_date=cutoff.replace(microsecond=0).isoformat(),
                 num_before=0,
-                num_after=1000,
+                num_after=DAILY_SUMMARY_MESSAGE_LIMIT,
                 narrow=[{"operator": "channels", "operand": "public"}],
                 apply_markdown=False,
             )
-            if response.get("result") != "success":
+            limited = None
+            if response.get("result") == "success":
+                raw_messages = response.get("messages") or []
+                by_stream: dict[str, list[dict[str, Any]]] = {}
+                for msg in raw_messages:
+                    if msg.get("timestamp", 0) >= cutoff.timestamp():
+                        name = str(msg.get("display_recipient", "Unknown"))
+                        by_stream.setdefault(name, []).append(msg)
+                for name, messages in by_stream.items():
+                    tally(name, messages)
+                # Channels in the returned sample include those whose only
+                # fetched messages fell before the cutoff: their counts are
+                # equally exposed to a truncated (newest-first) window.
+                sample_streams = sorted(
+                    {
+                        str(msg.get("display_recipient", "Unknown"))
+                        for msg in raw_messages
+                    }
+                )
+                settlement["settled_streams"].extend(sample_streams)
+                truncated = (
+                    not response.get("found_newest", True)
+                    or len(raw_messages) >= DAILY_SUMMARY_MESSAGE_LIMIT
+                )
+                if truncated:
+                    summary["truncated"] = True
+                    summary["truncated_streams"] = sample_streams
+                    settlement["status"] = "partial"
+                    settlement["truncation"] = {
+                        "kind": "sample_limit",
+                        "message_limit": DAILY_SUMMARY_MESSAGE_LIMIT,
+                        "returned_messages": len(raw_messages),
+                        "affected_streams": sample_streams,
+                    }
+            else:
+                limited = _rate_limit_info(response)
+            if limited is not None:
+                # No channel was settled; report the interruption, do not raise.
+                # One request covers the whole public set, so no channel list
+                # exists to enumerate as unsettled.
+                interrupt(limited, None)
+                settlement["unsettled_scope"] = "all_public_channels"
+            elif response.get("result") != "success":
                 raise RuntimeError(response.get("msg", "Failed to fetch messages"))
-            by_stream: dict[str, list[dict[str, Any]]] = {}
-            for msg in response.get("messages", []):
-                if msg.get("timestamp", 0) >= cutoff.timestamp():
-                    name = str(msg.get("display_recipient", "Unknown"))
-                    by_stream.setdefault(name, []).append(msg)
-            for name, messages in by_stream.items():
-                tally(name, messages)
-            if not response.get("found_newest", True):
-                summary["truncated"] = True
         else:
+            settlement["mode"] = "per_channel"
             if not streams:
                 streams_response = self.get_streams()
-                if streams_response["result"] != "success":
+                limited = _rate_limit_info(streams_response)
+                if limited is not None:
+                    # The channel list itself was throttled, so no per-channel
+                    # request was issued; report that rather than raising.
+                    interrupt(limited, None)
+                    settlement["unsettled_scope"] = "channel_listing"
+                    streams = []
+                elif streams_response.get("result") != "success":
                     raise RuntimeError(
                         streams_response.get("msg", "Failed to fetch streams")
                     )
-                streams = [
-                    s["name"]
-                    for s in streams_response["streams"]
-                    if not s.get("invite_only", False)
-                ]
-            for stream_name in streams:
-                messages_response = self.get_messages_from_stream(
-                    stream_name, hours_back=hours_back
-                )
-                if messages_response.get("result") != "success":
-                    summary.setdefault("unavailable_streams", []).append(stream_name)
+                else:
+                    streams = [
+                        s["name"]
+                        for s in streams_response["streams"]
+                        if not s.get("invite_only", False)
+                    ]
+            pending = list(streams or [])
+            for position, stream_name in enumerate(pending):
+                try:
+                    messages_response = self.get_messages_from_stream(
+                        stream_name, hours_back=hours_back
+                    )
+                except Exception as exc:  # one channel never aborts the rest
+                    record_failure(stream_name, str(exc))
+                    settlement["unsettled_streams"].append(stream_name)
                     continue
-                tally(stream_name, messages_response.get("messages", []))
+                if messages_response.get("result") == "success":
+                    # Count what arrived; a retry-after on a successful answer
+                    # means the next request must wait, not that this one lost.
+                    tally(stream_name, messages_response.get("messages", []))
+                    settlement["settled_streams"].append(stream_name)
+                    limited = _rate_limit_info(messages_response)
+                    if limited is not None:
+                        settlement["unsettled_streams"].extend(pending[position + 1 :])
+                        interrupt(limited, stream_name)
+                        break
+                    continue
+                limited = _rate_limit_info(messages_response)
+                if limited is not None:
+                    # Stop before issuing any further request and keep counts.
+                    record_failure(
+                        stream_name,
+                        limited["reason"],
+                        code=limited.get("code"),
+                        retry_after=limited.get("retry_after_seconds"),
+                    )
+                    settlement["unsettled_streams"].extend(pending[position:])
+                    interrupt(limited, stream_name)
+                    break
+                record_failure(
+                    stream_name,
+                    str(messages_response.get("msg") or "Failed to fetch stream"),
+                    code=messages_response.get("code"),
+                )
+                settlement["unsettled_streams"].append(stream_name)
 
         summary["top_senders"] = dict(
             sorted(summary["top_senders"].items(), key=lambda x: x[1], reverse=True)[
                 :10
             ]
         )
+        summary["settlement"] = settlement
         return summary
 
 

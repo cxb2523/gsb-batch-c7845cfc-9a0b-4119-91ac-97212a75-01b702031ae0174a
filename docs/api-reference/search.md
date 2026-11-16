@@ -90,7 +90,20 @@ emoji name to count, `unread`, `starred`, and `truncated` when the text exceeds
   holds `total_messages`, `streams` with each channel's `message_count` and
   per-topic counts, and `top_senders` for the last `hours_back` hours. Without
   `streams` on feature level 445 or later, one request covers every public
-  channel up to 1,000 messages and `truncated` reports more. Channels that fail
-  are listed in `unavailable_streams`.
+  channel up to 1,000 messages and `truncated` reports more, with
+  `truncated_streams` naming the channels whose counts may be short.
+- `summary.settlement` reports each channel's outcome. Every channel settles on
+  its own: a failed channel is listed in `unavailable_streams` (its reason in
+  `unavailable_stream_reasons` and in `settlement.failed_streams`) while the
+  other channels are still counted. A rate limit (`RATE_LIMIT_HIT` or a
+  `retry-after` delay) stops new requests instead of raising: counts already
+  collected are returned, `settlement.interrupted` gives the reason and retry
+  delay, and `settlement.settled_streams` / `settlement.unsettled_streams` list
+  what was and was not counted. `settlement.status` is `complete` or `partial`.
+  The original fields keep their names and types either way. In the
+  date-anchored mode (`settlement.mode` is `date_anchored`) only channels seen
+  in the returned sample can be named, so `truncated_streams` and
+  `settlement.truncation.affected_streams` list the channels whose counts may
+  be short rather than every public channel.
 - `check_messages_match_narrow` reports which of the given IDs match a Zulip
   narrow. Narrows cannot encode timestamps; use `search_messages` time filters.

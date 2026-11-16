@@ -4,6 +4,9 @@ All notable changes to ZulipChat MCP are documented in this file.
 
 ## [Unreleased]
 
+### Changed
+- `get_daily_summary` settles each channel on its own. A channel that fails no longer stops the rest; it stays in `unavailable_streams` with its reason in `unavailable_stream_reasons`. A rate limit (`RATE_LIMIT_HIT` or `retry-after`) stops new requests, keeps the counts already collected, and reports the interruption plus the settled/unsettled channels in the new `summary.settlement` field instead of raising. The date-anchored single request now also marks `truncated` when the response hits the 1,000-message limit and names the affected channels in `truncated_streams`. `total_messages`, `streams`, `top_senders`, `time_range` and `unavailable_streams` keep their names and types.
+
 ## [0.8.0] - 2026-11-15
 
 Checked on MCP 2026-07-28 through a stdio smoke and real MCP clients against a mock Zulip. A new local bridge gives any ACP coding agent (Claude Code, Codex, OpenCode, Goose, Gemini CLI, Clio Coder) its own Zulip bot, so the owner talks to agents on their machine from any device, and it replaces the topic-bound agent control plane of 0.7. Ordinary Zulip work takes fewer calls and far fewer tokens.
