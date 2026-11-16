@@ -75,13 +75,21 @@ Plans: `implementation_plan_data_scraper.md`, `implementation_plan_ml_models.md`
 - **`isResult` quirk**: `dates` contains **380 entries per season INCLUDING scheduled (future) matches**. Filter with `isResult` (skip when `isResult is False`). All 300 `isResult=False` entries are in the 2026 file (scheduled 2026-27 fixtures).
 - Files are keyed by **season-start year** (`2019.json` = 2019-20 season). The 2019-20 file runs to 2020-08-02 (pandemic delay).
 
+### Fetch reliability contract (both `src/fetch/football_data_csv.py` and `src/fetch/understat.py`)
+- Shared plumbing lives in **`src/fetch/io.py`**: `SeasonStatus` enum (success / skipped / not_found / failed), `SeasonResult`, `FetchSummary`, `atomic_write_text()`, `print_summary()`.
+- **Per-season settlement**: `fetch_season_result()` never raises — each season ends in one of the four states; one season failing does NOT stop later seasons. `fetch_all()` returns/prints a per-season list + totals; `main()` exits **1 and names the failed seasons on stderr** if any failed (404 is "not published", never a failure, so a pure-404 run exits 0).
+- **Atomic writes**: downloads are validated first, then written to a same-dir temp file (`.{name}.*.tmp`) and `os.replace`d onto the target. A failed/half download leaves no half target and no stranded temp file; an existing cache is byte-for-byte preserved. Validation rules: CSV first DATA row's first column must equal the league's `fd_div` (BOM-stripped, header-only/empty payloads also fail); Understat must parse as JSON object with a non-empty `dates` (or legacy `matches`) list. Validation failure = FAILED, old cache kept.
+- **Cache rules unchanged**: completed seasons with a non-empty file are skipped (SKIPPED); the in-progress season always re-downloads even with a cache; `--force` re-downloads all.
+- `fetch_season()` is kept as a backward-compatible wrapper (path on success/skip, None on 404/failure); CLI args (`--league`, `--force`) and output paths are unchanged.
+
 ## Pipeline architecture
 
 ```
 config.py                 # LEAGUES registry, paths, URLs, fetch settings (single source of truth)
 src/fetch/http.py         # get_text() with retry/backoff, polite_sleep()
-src/fetch/football_data_csv.py  # fetch_season/fetch_all(league) -> data/raw/football_data/{league}/{season}.csv
-src/fetch/understat.py    # fetch(league) -> data/raw/understat/{league}/{year}.json
+src/fetch/io.py           # SeasonStatus/SeasonResult/FetchSummary, atomic_write_text(), print_summary()
+src/fetch/football_data_csv.py  # fetch_season_result/fetch_all(league) -> per-season summary; atomic CSV
+src/fetch/understat.py    # same pattern -> data/raw/understat/{league}/{year}.json; exit 1 if any failed
 src/clean/normalize.py    # canonical_team(), parse_date(), season_from_date(), to_int/float_or_none
 src/clean/merge.py        # load_football_data(league), load_understat(league), merge(league)
 src/db/schema.sql         # DDL: teams(league), matches(league), seasons(league), players, player_match_stats
