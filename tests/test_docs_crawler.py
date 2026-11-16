@@ -9,6 +9,7 @@ import pytest
 
 from scraperx.docs_crawler import (
     MIN_PROSE_CHARS,
+    SitemapCoverage,
     _LessAggressiveExtractor,
     _parse_sitemap,
     _safe_slug,
@@ -403,3 +404,337 @@ def test_discover_sitemap_falls_back_to_domain_root(monkeypatch):
     assert tried[0] == "https://example.com/docs/en/sitemap.xml", (
         "the specific path must still be tried FIRST — the root is a fallback"
     )
+
+
+# ── sitemap-index coverage accounting (2026-11) ──────────────────────────────
+#
+# Until this change a child sitemap that failed to fetch produced only a warning
+# log line and was silently skipped: _DIGEST.md still read "Pages crawled: N"
+# with no way to tell whether N was the whole site or a partial result after a
+# missing sub-sitemap. These tests pin the three new coverage facts — children
+# attempted, children succeeded, and a URL+reason failure list — and the rule
+# that ONLY <sitemapindex> children are ever counted as sitemaps.
+
+COVERAGE_INDEX_XML = """<?xml version="1.0" encoding="UTF-8"?>
+<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <sitemap><loc>https://example.com/sitemap-0.xml</loc></sitemap>
+  <sitemap><loc>https://example.com/sitemap-1.xml</loc></sitemap>
+</sitemapindex>"""
+
+
+def _expand_with_coverage(monkeypatch, fake_curl, xml=COVERAGE_INDEX_XML,
+                          index_url="https://example.com/sitemap.xml"):
+    monkeypatch.setattr(dc, "_curl_text", fake_curl)
+    coverage = SitemapCoverage()
+    urls = dc._expand_sitemap(
+        xml, index_url, user_agent="UA", timeout=5, _coverage=coverage,
+    )
+    return urls, coverage
+
+
+def test_expand_coverage_all_children_succeed(monkeypatch):
+    """All children reachable: empty failure list, counters exact."""
+
+    def fake_curl(url, **kw):
+        return {
+            "https://example.com/sitemap-0.xml": CHILD_0_XML,
+            "https://example.com/sitemap-1.xml": CHILD_1_XML,
+        }[url]
+
+    urls, coverage = _expand_with_coverage(monkeypatch, fake_curl)
+
+    assert urls == [
+        "https://example.com/a",
+        "https://example.com/b",
+        "https://example.com/c",
+    ], "returned pages, order and dedup must be unchanged"
+    assert coverage.sub_sitemaps_attempted == 2
+    assert coverage.sub_sitemaps_succeeded == 2
+    assert coverage.failures == []
+
+
+def test_expand_coverage_records_failed_child_but_keeps_other_pages(monkeypatch):
+    """One child raises: every reachable page still returned, failure listed
+    with URL and an exception-type reason."""
+
+    def fake_curl(url, **kw):
+        if url.endswith("sitemap-0.xml"):
+            raise RuntimeError("404 Not Found")
+        return CHILD_1_XML
+
+    urls, coverage = _expand_with_coverage(monkeypatch, fake_curl)
+
+    # The surviving child's pages come back in full, order preserved.
+    assert urls == ["https://example.com/c", "https://example.com/a"]
+    assert coverage.sub_sitemaps_attempted == 2, (
+        "both children were attempted — the failed one still counts as expanded"
+    )
+    assert coverage.sub_sitemaps_succeeded == 1
+    assert len(coverage.failures) == 1
+    failed = coverage.failures[0]
+    assert failed.url == "https://example.com/sitemap-0.xml"
+    assert failed.reason.startswith("RuntimeError"), (
+        "reason must carry the exception type plus a short message"
+    )
+    assert "404" in failed.reason
+
+
+def test_expand_coverage_self_referential_index_hits_depth_limit(monkeypatch):
+    """A self-referential index must terminate AND record the depth cut as a
+    failed child sitemap rather than returning a silent empty list."""
+    loop = """<?xml version="1.0" encoding="UTF-8"?>
+<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <sitemap><loc>https://example.com/loop.xml</loc></sitemap>
+</sitemapindex>"""
+    calls = {"n": 0}
+
+    def fake_curl(url, **kw):
+        calls["n"] += 1
+        return loop
+
+    urls, coverage = _expand_with_coverage(
+        monkeypatch, fake_curl, xml=loop, index_url="https://example.com/sitemap.xml",
+    )
+
+    assert urls == []
+    assert calls["n"] <= dc.MAX_SITEMAP_DEPTH + 1, "recursion must stay bounded"
+    assert coverage.sub_sitemaps_attempted >= 1, (
+        "the loop child was really fetched as a sitemapindex child"
+    )
+    assert coverage.sub_sitemaps_succeeded == coverage.sub_sitemaps_attempted, (
+        "every fetch succeeded — the cut is a depth failure, not an HTTP one"
+    )
+    assert len(coverage.failures) >= 1, "depth truncation must not be silent"
+    cut = coverage.failures[-1]
+    assert cut.url == "https://example.com/loop.xml"
+    assert cut.reason.startswith("SitemapDepthLimitExceeded"), (
+        "the depth cut needs an explicit, distinguishable reason"
+    )
+    assert str(dc.MAX_SITEMAP_DEPTH) in cut.reason
+
+
+def test_expand_coverage_plain_urlset_counts_nothing(monkeypatch):
+    """Page URLs inside a <urlset> are NOT child sitemaps and must never touch
+    the counters or failure list."""
+
+    def fake_curl(url, **kw):
+        raise AssertionError(f"no further fetch expected, got {url}")
+
+    urls, coverage = _expand_with_coverage(
+        monkeypatch, fake_curl, xml=CHILD_0_XML,
+        index_url="https://example.com/sitemap.xml",
+    )
+
+    assert urls == ["https://example.com/a", "https://example.com/b"]
+    assert coverage.sub_sitemaps_attempted == 0
+    assert coverage.sub_sitemaps_succeeded == 0
+    assert coverage.failures == []
+
+
+def test_expand_coverage_without_collector_behaves_as_before(monkeypatch):
+    """Back-compat: omitting _coverage keeps the plain list-returning API and
+    the depth limit surfaces as an empty list, never an uncaught exception."""
+
+    def fake_curl(url, **kw):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(dc, "_curl_text", fake_curl)
+    urls = dc._expand_sitemap(
+        COVERAGE_INDEX_XML, "https://example.com/sitemap.xml",
+        user_agent="UA", timeout=5,
+    )
+    assert urls == []
+
+
+def test_discover_sitemap_returns_coverage_and_keeps_url_contract(monkeypatch):
+    """discover_sitemap keeps its (sitemap_url, urls) tuple shape/order while
+    populating the optional coverage collector."""
+
+    def fake_curl(url, **kw):
+        return {
+            "https://example.com/sitemap.xml": COVERAGE_INDEX_XML,
+            "https://example.com/sitemap-0.xml": CHILD_0_XML,
+            "https://example.com/sitemap-1.xml": CHILD_1_XML,
+        }[url]
+
+    monkeypatch.setattr(dc, "_curl_text", fake_curl)
+    coverage = SitemapCoverage()
+    used, urls = dc.discover_sitemap("https://example.com", _coverage=coverage)
+
+    assert used == "https://example.com/sitemap.xml"
+    assert urls == [
+        "https://example.com/a",
+        "https://example.com/b",
+        "https://example.com/c",
+    ]
+    assert coverage.sub_sitemaps_attempted == 2
+    assert coverage.sub_sitemaps_succeeded == 2
+    assert coverage.failures == []
+
+
+def test_discover_sitemap_discards_coverage_from_failed_probes(monkeypatch):
+    """A first candidate index whose children fail must not leak its counters
+    into the coverage of the candidate that actually succeeds."""
+
+    def fake_curl(url, **kw):
+        if url == "https://example.com/sitemap.xml":
+            # Probed first: an index whose only child 500s and yields no pages.
+            return COVERAGE_INDEX_XML
+        if url.endswith("sitemap-0.xml") or url.endswith("sitemap-1.xml"):
+            raise RuntimeError("500")
+        if url == "https://example.com/sitemap_index.xml":
+            return CHILD_0_XML
+        raise RuntimeError("404")
+
+    monkeypatch.setattr(dc, "_curl_text", fake_curl)
+    coverage = SitemapCoverage()
+    used, urls = dc.discover_sitemap("https://example.com", _coverage=coverage)
+
+    assert used == "https://example.com/sitemap_index.xml"
+    assert urls == ["https://example.com/a", "https://example.com/b"]
+    # The winning sitemap is a plain urlset: zero child sitemaps, zero failures —
+    # the dead first index's accounting was reset, not merged.
+    assert coverage.sub_sitemaps_attempted == 0
+    assert coverage.failures == []
+
+
+def test_crawl_records_sitemap_coverage_and_digest_lines(tmp_path: Path, monkeypatch):
+    """End-to-end: coverage lands on CrawlResult and _DIGEST.md always prints
+    the three lines, including an explicit 'no failed child sitemaps' row."""
+    sitemap_store = {
+        "https://example.com/sitemap.xml": COVERAGE_INDEX_XML,
+        "https://example.com/sitemap-0.xml": CHILD_0_XML,
+        "https://example.com/sitemap-1.xml": CHILD_1_XML,
+    }
+
+    def fake_curl_text(url, **kw):
+        return sitemap_store[url]
+
+    def fake_curl_to_file(url, out_path, *, user_agent, timeout):
+        out_path.write_text(
+            "<main><p>" + ("Real content. " * 200) + "</p></main>",
+            encoding="utf-8",
+        )
+        return 200
+
+    monkeypatch.setattr(dc, "_curl_text", fake_curl_text)
+    monkeypatch.setattr(dc, "_curl_to_file", fake_curl_to_file)
+
+    result = crawl("https://example.com", tmp_path, sleep_between=0)
+
+    assert result.sub_sitemaps_attempted == 2
+    assert result.sub_sitemaps_succeeded == 2
+    assert result.failed_sub_sitemaps == []
+    # Pages from both children (a, b, c) were crawled.
+    assert result.fetched == 3
+    digest = (tmp_path / "_DIGEST.md").read_text(encoding="utf-8")
+    assert "Child sitemaps expanded" in digest
+    assert "Child sitemaps successfully fetched: **2**" in digest
+    assert "无失败子地图" in digest, "empty failure list still gets an explicit row"
+
+
+def test_crawl_digest_lists_failed_child_with_reason(tmp_path: Path, monkeypatch):
+    def fake_curl_text(url, **kw):
+        if url.endswith("sitemap-0.xml"):
+            raise RuntimeError("403 Forbidden")
+        if url.endswith("sitemap.xml"):
+            return COVERAGE_INDEX_XML
+        return CHILD_1_XML
+
+    def fake_curl_to_file(url, out_path, *, user_agent, timeout):
+        out_path.write_text(
+            "<main><p>" + ("Real content. " * 200) + "</p></main>",
+            encoding="utf-8",
+        )
+        return 200
+
+    monkeypatch.setattr(dc, "_curl_text", fake_curl_text)
+    monkeypatch.setattr(dc, "_curl_to_file", fake_curl_to_file)
+
+    result = crawl("https://example.com", tmp_path, sleep_between=0)
+
+    assert result.sub_sitemaps_attempted == 2
+    assert result.sub_sitemaps_succeeded == 1
+    assert len(result.failed_sub_sitemaps) == 1
+    assert result.failed_sub_sitemaps[0].url == "https://example.com/sitemap-0.xml"
+    digest = (tmp_path / "_DIGEST.md").read_text(encoding="utf-8")
+    assert "Failed child sitemaps: **1**" in digest
+    assert "https://example.com/sitemap-0.xml" in digest
+    assert "RuntimeError" in digest
+    assert "403" in digest
+    assert "无失败子地图" not in digest
+
+
+def test_crawl_explicit_urls_have_zero_sitemap_coverage(tmp_path: Path):
+    """With urls=[...] no sitemap walk happens, so coverage stays empty and the
+    digest still renders the explicit no-failure row."""
+
+    def fake(url, out_path, *, user_agent, timeout):
+        out_path.write_text(
+            "<main><p>" + ("Real content. " * 200) + "</p></main>",
+            encoding="utf-8",
+        )
+        return 200
+
+    with patch("scraperx.docs_crawler._curl_to_file", side_effect=fake):
+        result = crawl(
+            "https://example.com", tmp_path,
+            urls=["https://example.com/a"], sleep_between=0,
+        )
+
+    assert result.sub_sitemaps_attempted == 0
+    assert result.sub_sitemaps_succeeded == 0
+    assert result.failed_sub_sitemaps == []
+    digest = (tmp_path / "_DIGEST.md").read_text(encoding="utf-8")
+    assert "Child sitemaps expanded" in digest
+    assert "无失败子地图" in digest
+
+
+def test_cli_prints_hint_only_when_child_sitemaps_fail(tmp_path: Path, monkeypatch, capsys):
+    """The CLI gets one line pointing at the digest's failure list, and only
+    when failures exist."""
+
+    def fake_curl_text(url, **kw):
+        if url.endswith("sitemap-0.xml"):
+            raise RuntimeError("503")
+        if url.endswith("sitemap.xml"):
+            return COVERAGE_INDEX_XML
+        return CHILD_1_XML
+
+    def fake_curl_to_file(url, out_path, *, user_agent, timeout):
+        out_path.write_text(
+            "<main><p>" + ("Real content. " * 200) + "</p></main>",
+            encoding="utf-8",
+        )
+        return 200
+
+    monkeypatch.setattr(dc, "_curl_text", fake_curl_text)
+    monkeypatch.setattr(dc, "_curl_to_file", fake_curl_to_file)
+    monkeypatch.setattr(
+        "sys.argv",
+        ["scraperx", "docs-crawl", "https://example.com", "-o", str(tmp_path),
+         "--quiet", "--sleep-between", "0"],
+    )
+
+    rc = dc._main_docs_crawl()
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "child sitemap(s) failed" in out
+    assert "_DIGEST.md" in out
+
+    # Now the all-success case: no hint line, but the run still works.
+    monkeypatch.setattr(
+        "sys.argv",
+        ["scraperx", "docs-crawl", "https://example.com", "-o",
+         str(tmp_path / "clean"), "--quiet", "--sleep-between", "0"],
+    )
+    good_store = {
+        "https://example.com/sitemap.xml": COVERAGE_INDEX_XML,
+        "https://example.com/sitemap-0.xml": CHILD_0_XML,
+        "https://example.com/sitemap-1.xml": CHILD_1_XML,
+    }
+    monkeypatch.setattr(dc, "_curl_text", lambda url, **kw: good_store[url])
+    rc = dc._main_docs_crawl()
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "child sitemap(s) failed" not in out

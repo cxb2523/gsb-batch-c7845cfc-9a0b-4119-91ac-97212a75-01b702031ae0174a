@@ -88,6 +88,53 @@ class PageResult:
 
 
 @dataclass
+class FailedSitemap:
+    """A child sitemap that could not be expanded.
+
+    Only URLs that were actually fetched as <sitemapindex> children land here —
+    ordinary page URLs inside a <urlset> are never counted as sitemaps.
+    """
+
+    url: str
+    #: ``type(e).__name__`` plus a short message — enough for an operator to
+    #: tell "404" apart from "depth limit", without a full traceback.
+    reason: str
+
+
+@dataclass
+class SitemapCoverage:
+    """Coverage counters accumulated while expanding a sitemap index.
+
+    "Expanded" means a child URL discovered inside a <sitemapindex> was actually
+    handed to the fetcher. Page URLs inside a <urlset> do not count.
+    """
+
+    #: Child sitemaps actually fetched (one entry per <sitemap>/<loc> we opened).
+    sub_sitemaps_attempted: int = 0
+    #: Children whose XML we successfully fetched and parsed into pages or into
+    #: further children. A child cut off by the depth limit is still fetched, so
+    #: it is counted here AND listed in failures.
+    sub_sitemaps_succeeded: int = 0
+    failures: list[FailedSitemap] = field(default_factory=list)
+
+    def reset(self) -> None:
+        self.sub_sitemaps_attempted = 0
+        self.sub_sitemaps_succeeded = 0
+        self.failures = []
+
+    def merge_from(self, other: SitemapCoverage) -> None:
+        self.sub_sitemaps_attempted += other.sub_sitemaps_attempted
+        self.sub_sitemaps_succeeded += other.sub_sitemaps_succeeded
+        self.failures.extend(other.failures)
+
+
+class SitemapDepthLimitExceeded(RuntimeError):
+    """Raised at MAX_SITEMAP_DEPTH so the truncated index becomes a recorded
+    failed child sitemap instead of an empty list that looks like "no pages".
+    """
+
+
+@dataclass
 class CrawlResult:
     """Result of a full docs-site crawl."""
 
@@ -103,6 +150,12 @@ class CrawlResult:
     #: and the file listed 8. A count that does not match the list beneath it.
     walled: int = 0
     errors: int = 0
+    #: Sitemap-index coverage for the discovery phase. All three stay zero when
+    #: the sitemap is a plain <urlset> or an explicit urls=[...] list was given,
+    #: because then no child sitemap was ever expanded.
+    sub_sitemaps_attempted: int = 0
+    sub_sitemaps_succeeded: int = 0
+    failed_sub_sitemaps: list[FailedSitemap] = field(default_factory=list)
 
 
 class _LessAggressiveExtractor(HTMLParser):
@@ -159,13 +212,20 @@ def extract_text(html: str) -> str:
 
 
 def discover_sitemap(root_url: str, *, user_agent: str = DEFAULT_USER_AGENT,
-                     timeout: int = DEFAULT_TIMEOUT) -> tuple[Optional[str], list[str]]:
+                     timeout: int = DEFAULT_TIMEOUT,
+                     _coverage: SitemapCoverage | None = None,
+                     ) -> tuple[Optional[str], list[str]]:
     """Return (sitemap_url_used, list_of_page_urls).
 
     Tries:
       1. <root>/sitemap.xml
       2. <root>/sitemap_index.xml
       3. <root>/robots.txt -> Sitemap: lines
+
+    The returned tuple is unchanged. Pass ``_coverage`` to also receive the
+    sitemap-index expansion counters (children attempted/succeeded/failed);
+    it is reset and only populated once a usable sitemap is found, so failed
+    probes against earlier candidate URLs never leak into the totals.
     """
     base = root_url.rstrip("/")
     candidates = [f"{base}/sitemap.xml", f"{base}/sitemap_index.xml"]
@@ -179,14 +239,19 @@ def discover_sitemap(root_url: str, *, user_agent: str = DEFAULT_USER_AGENT,
         candidates += [f"{domain}/sitemap.xml", f"{domain}/sitemap_index.xml"]
 
     for sitemap_url in candidates:
+        coverage = SitemapCoverage()
         try:
             xml = _curl_text(sitemap_url, user_agent=user_agent, timeout=timeout)
         except Exception as e:  # noqa: BLE001
             logger.debug("Sitemap probe failed for %s: %s", sitemap_url, e)
             continue
-        urls = _expand_sitemap(xml, sitemap_url, user_agent=user_agent, timeout=timeout)
+        urls = _expand_sitemap(xml, sitemap_url, user_agent=user_agent,
+                               timeout=timeout, _coverage=coverage)
         if urls:
             logger.info("Found %d URLs in %s", len(urls), sitemap_url)
+            if _coverage is not None:
+                _coverage.reset()
+                _coverage.merge_from(coverage)
             return sitemap_url, urls
 
     # Fall back to robots.txt
@@ -196,12 +261,16 @@ def discover_sitemap(root_url: str, *, user_agent: str = DEFAULT_USER_AGENT,
             line = line.strip()
             if line.lower().startswith("sitemap:"):
                 sitemap_url = line.split(":", 1)[1].strip()
+                coverage = SitemapCoverage()
                 xml = _curl_text(sitemap_url, user_agent=user_agent, timeout=timeout)
                 urls = _expand_sitemap(xml, sitemap_url, user_agent=user_agent,
-                                       timeout=timeout)
+                                       timeout=timeout, _coverage=coverage)
                 if urls:
                     logger.info("Found %d URLs via robots.txt -> %s",
                                 len(urls), sitemap_url)
+                    if _coverage is not None:
+                        _coverage.reset()
+                        _coverage.merge_from(coverage)
                     return sitemap_url, urls
     except Exception:
         pass
@@ -215,13 +284,34 @@ MAX_SITEMAP_DEPTH = 3
 MAX_CHILD_SITEMAPS = 50
 
 
+def _failure_reason(exc: BaseException) -> str:
+    """Exception type plus a short, single-line message.
+
+    The digest is operator-facing, so this stays terse: enough to tell a 404
+    RuntimeError apart from the depth-limit cut, without a traceback or a
+    multi-kilobyte curl stderr line.
+    """
+    raw = str(exc).strip()
+    msg = raw.splitlines()[0] if raw else ""
+    reason = f"{type(exc).__name__}: {msg}" if msg else type(exc).__name__
+    return reason if len(reason) <= 200 else reason[:197] + "..."
+
+
 def _expand_sitemap(xml: str, sitemap_url: str, *, user_agent: str,
-                    timeout: int, _depth: int = 0) -> list[str]:
+                    timeout: int, _depth: int = 0,
+                    _coverage: SitemapCoverage | None = None) -> list[str]:
     """Return page URLs, following <sitemapindex> children when present.
 
     Without this, an index yields its CHILD SITEMAP urls, the caller crawls those
     XML files as if they were docs pages, and the run reports success over a
     near-empty result ("Crawled 1 pages, 0 errors" on a 1000-page site).
+
+    When ``_coverage`` is supplied it accumulates what the walk actually covered:
+    every child URL fetched counts as attempted, every fetch that returned XML
+    counts as succeeded, and both fetch failures and depth-limit cuts append a
+    :class:`FailedSitemap`. Only children of a <sitemapindex> are ever counted —
+    page URLs inside a <urlset> are not sitemaps. One failed child never aborts
+    the remaining children.
     """
     pages = _parse_sitemap(xml)
     if pages:
@@ -229,11 +319,16 @@ def _expand_sitemap(xml: str, sitemap_url: str, *, user_agent: str,
     if not _is_sitemap_index(xml):
         return []
     if _depth >= MAX_SITEMAP_DEPTH:
+        # Raising (rather than silently returning []) lets the PARENT frame
+        # record this index as a failed child with an explicit reason. An empty
+        # list here used to look identical to "this index had no pages".
         logger.warning(
             "sitemap index nested deeper than %d at %s — stopping",
             MAX_SITEMAP_DEPTH, sitemap_url,
         )
-        return []
+        raise SitemapDepthLimitExceeded(
+            f"sitemap index nested deeper than MAX_SITEMAP_DEPTH={MAX_SITEMAP_DEPTH}"
+        )
 
     children = _locs(xml)[:MAX_CHILD_SITEMAPS]
     logger.info("%s is a sitemap index -> %d child sitemap(s)",
@@ -241,13 +336,30 @@ def _expand_sitemap(xml: str, sitemap_url: str, *, user_agent: str,
     collected: list[str] = []
     seen: set[str] = set()
     for child in children:
+        if _coverage is not None:
+            _coverage.sub_sitemaps_attempted += 1
         try:
             child_xml = _curl_text(child, user_agent=user_agent, timeout=timeout)
         except Exception as e:  # noqa: BLE001 — one bad child must not sink the rest
             logger.warning("child sitemap %s failed: %s", child, e)
+            if _coverage is not None:
+                _coverage.failures.append(FailedSitemap(child, _failure_reason(e)))
             continue
-        for u in _expand_sitemap(child_xml, child, user_agent=user_agent,
-                                 timeout=timeout, _depth=_depth + 1):
+        if _coverage is not None:
+            # Fetch succeeded even if expansion below gets cut by the depth
+            # limit — that child is a separate failure record, not a fetch miss.
+            _coverage.sub_sitemaps_succeeded += 1
+        try:
+            child_pages = _expand_sitemap(
+                child_xml, child, user_agent=user_agent,
+                timeout=timeout, _depth=_depth + 1, _coverage=_coverage,
+            )
+        except SitemapDepthLimitExceeded as e:
+            logger.warning("child sitemap %s not expanded: %s", child, e)
+            if _coverage is not None:
+                _coverage.failures.append(FailedSitemap(child, _failure_reason(e)))
+            continue
+        for u in child_pages:
             if u not in seen:
                 seen.add(u)
                 collected.append(u)
@@ -395,8 +507,12 @@ def crawl(root_url: str, output_dir: str | Path, *,
     out_dir.mkdir(parents=True, exist_ok=True)
 
     sitemap_url = None
+    coverage = SitemapCoverage()
     if urls is None:
-        sitemap_url, urls = discover_sitemap(root_url, user_agent=user_agent, timeout=timeout)
+        sitemap_url, urls = discover_sitemap(
+            root_url, user_agent=user_agent, timeout=timeout,
+            _coverage=coverage,
+        )
         if not urls:
             raise RuntimeError(
                 f"No URLs found for {root_url}. Supply urls=[...] explicitly "
@@ -416,7 +532,14 @@ def crawl(root_url: str, output_dir: str | Path, *,
         if max_pages and len(deduped) >= max_pages:
             break
 
-    result = CrawlResult(root_url=root_url, output_dir=out_dir, sitemap_url=sitemap_url)
+    result = CrawlResult(
+        root_url=root_url,
+        output_dir=out_dir,
+        sitemap_url=sitemap_url,
+        sub_sitemaps_attempted=coverage.sub_sitemaps_attempted,
+        sub_sitemaps_succeeded=coverage.sub_sitemaps_succeeded,
+        failed_sub_sitemaps=list(coverage.failures),
+    )
 
     for url in deduped:
         slug = _safe_slug(url, root_url)
@@ -621,6 +744,25 @@ def _write_digest(result: CrawlResult) -> None:
         "",
         f"- Sitemap: `{result.sitemap_url or '(none — explicit URL list)'}`",
         f"- Pages crawled: **{result.fetched}**",
+        # Coverage of the sitemap-index walk. All three lines are ALWAYS
+        # written, including the empty-failure case: a missing line could be
+        # read as "not measured", while "0 failed" says the walk was complete.
+        f"- Child sitemaps expanded (sub-sitemaps fetched): "
+        f"**{result.sub_sitemaps_attempted}**",
+        f"- Child sitemaps successfully fetched: **{result.sub_sitemaps_succeeded}**",
+    ]
+    if result.failed_sub_sitemaps:
+        lines.append(
+            f"- Failed child sitemaps: **{len(result.failed_sub_sitemaps)}** "
+            "(页面覆盖可能不完整 / page coverage may be incomplete):"
+        )
+        for failed in result.failed_sub_sitemaps:
+            lines.append(f"    - `{failed.url}` — {failed.reason}")
+    else:
+        # Never omit this row — operators grep the digest for the failure
+        # section, and its absence must not be ambiguous.
+        lines.append("- Failed child sitemaps: **0** — 无失败子地图")
+    lines += [
         f"- Pages with <{MIN_PROSE_CHARS} chars (shell candidates): **{result.shells}**",
         f"- Errors: **{result.errors}**",
         "",
@@ -750,6 +892,14 @@ def _main_docs_crawl() -> int:
     print(f"  Walled (curl blocked): {result.walled}")
     print(f"  Errors: {result.errors}")
     print(f"  Digest: {result.output_dir}/_DIGEST.md")
+    if result.failed_sub_sitemaps:
+        # One line at the terminal pointing at the authoritative list in the
+        # digest — the per-URL reasons live there, the CLI only flags that
+        # "Pages crawled" is a partial figure for this run.
+        print(
+            f"  WARNING: {len(result.failed_sub_sitemaps)} child sitemap(s) failed to "
+            f"expand — see the failed child sitemap list in {result.output_dir}/_DIGEST.md"
+        )
     if result.shells:
         print(f"  Render queue: {result.output_dir}/_SHELLS.md")
     if result.walled:
