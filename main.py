@@ -8,29 +8,26 @@ Description:
 from auto_score.deploy_stragegies import *
 from auto_score.utils.proxy_decorator import IS_AUTHOR_ENV
 
-from auto_score.utils.singleton import get_instance, get_handler, GetHandlers
+from auto_score.utils.singleton import get_handler, GetHandlers
 from auto_score.utils.logger import LoggerManager
 from auto_score.directly_request.mms import MMS
+from auto_score.collector import (
+    parse_last_download,
+    process_subscriptions,
+    build_progress_updates,
+    write_last_download_signal,
+)
 
 from auto_score.ms_auth import MSAuth
 from auto_score.onedrive.patch import upload_large_file
 from auto_score.email import EmailHandler
 
-import hashlib
 import os
 import base64
 
 log_manager = LoggerManager(f"log/{__name__}.log")
 logger = log_manager.logger
 ERROR_MSGS = []
-
-
-def parse_last_download(lines):
-    last_download = {}
-    for line in lines:
-        md5, timestamp = line.strip().split(" ")
-        last_download[md5] = float(timestamp)
-    return last_download
 
 
 def generate_xoauth2(username, token):
@@ -86,52 +83,52 @@ if __name__ == "__main__":
         last_download_lines = {}
 
     ## 3. for each sub, try to find new links in rss data and call cloudreve offline download
+    # Each subscription is processed independently: a fetch exception, a
+    # failed download or an empty result only marks that author as failed
+    # and never interrupts the remaining authors.
+    outcomes = process_subscriptions(
+        subscriptions,
+        last_downloads,
+        get_handler,
+        error_collector=collect_errors,
+    )
+
     all_tasks_success = True
     num_newly_downloads = 0
     titles_newly_download = []
-    latest_downloads = {}
-    for sub in subscriptions:
-        parts = sub.strip().split("|")
-        assert len(parts) >= 2
-        source_name = parts[0]
-        user = parts[1]
+    # variables kept for the summary/email section below
+    max_sheetnum = 0
+    last_sheetnum = -1
+    for outcome in outcomes:
+        if outcome.failed:
+            all_tasks_success = False
+            logger.error(
+                "Subscription failed | source=%s user=%s status=%s reason=%s",
+                outcome.source,
+                outcome.user,
+                outcome.status,
+                outcome.error,
+            )
+        elif outcome.status == "success":
+            num_newly_downloads += outcome.sheet_count
+            titles_newly_download.extend(outcome.titles)
+            max_sheetnum = max(max_sheetnum, outcome.max_sheetnum or 0)
 
-        full_description = "".join(parts)
-        md5 = hashlib.md5(full_description.encode("utf-8")).hexdigest()
-        last_sheetnum = last_downloads.get(md5, -1)
-        latest_downloads[md5] = last_sheetnum
-
-        parser = get_instance(source_name)
-
-        # if parser and parser.is_available:
-        handler = get_handler(source_name)
-        links, max_sheetnum, titles = handler.get_recent_sheets(
-            user, int(last_sheetnum)
+    failed_authors = [
+        f"{o.source}|{o.user} ({o.status})" for o in outcomes if o.failed
+    ]
+    empty_authors = [
+        f"{o.source}|{o.user}" for o in outcomes if o.status == "empty"
+    ]
+    if failed_authors:
+        logger.error(
+            "Failed subscriptions this run: %s", "; ".join(failed_authors)
         )
-        if len(links) > 0:  # only call downloading when having something new
-            # if cloudreve.create_directory(folder_to_root_dir): # also ok when folder exists
-            print(f"{source_name}_handler")
-            is_download_success = handler.download_sheets(links)
-            # is_download_success = cloudreve.add_offline_download_task(links, folder_to_root_dir)
-            if is_download_success:
-                num_newly_downloads += len(links)
-                latest_downloads[md5] = max_sheetnum
-                titles_newly_download.extend(titles)
-                logger.info(
-                    f"Successfully download {len(links)} links into {strategy.savefolder_path}."
-                )
-            else:  # failed when downloading
-                all_tasks_success = False
-                collect_errors(
-                    f"Failed when downloading {user}'s sheets in RSS source {source_name}."
-                )
-
-        else:  # nothing new
-            logger.warning("No new link found")
-
-        # else:   # failed when getting parser
-        #     all_tasks_success = False
-        #     collect_errors(f"RSS source {source_name} is not available.")
+    if empty_authors:
+        logger.warning(
+            "Subscriptions with no new sheet this run: %s",
+            "; ".join(empty_authors),
+        )
 
     ### 4. collect all sheets
     all_sheets_dir = []
@@ -165,11 +162,11 @@ if __name__ == "__main__":
                 collect_errors("cannot refresh onedrive token")
 
     ## 6. update download data
-    with open(last_download_filename, "w") as file:
-        for md5, max_sheetnum in latest_downloads.items():
-            if max_sheetnum:
-                file.write(f"{md5} {max_sheetnum}\n")
-        logger.info("Update last download signal successfully.")
+    # Only subscriptions processed this run are written: successful authors
+    # advance to their new max sheetId, while failed/empty authors keep
+    # their previously persisted value (never reset to 0, never deleted).
+    latest_downloads = build_progress_updates(outcomes, last_downloads)
+    write_last_download_signal(last_download_filename, latest_downloads)
 
     ## 7. send email
     has_error_prefix = "[ERROR] " if len(ERROR_MSGS) > 0 else ""
