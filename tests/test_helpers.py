@@ -50,7 +50,7 @@ def test_backup_roundtrip_and_bak_fallback(tmp_path):
 def test_detail_cache_ttl(monkeypatch, tmp_path):
     monkeypatch.setattr(detail_cache, "CACHE_DIR", tmp_path)
     detail_cache.put("javdb", "ABC-123", {"title": "t"})
-    assert detail_cache.get("javdb", "ABC-123") == {"title": "t"}
+    assert detail_cache.get("javdb", "ABC-123") == {"title": "t", "source": "javdb"}
     p = detail_cache._cache_path("javdb", "ABC-123")
     expired = time.time() - detail_cache.TTL_SECONDS - 10
     os.utime(p, (expired, expired))
@@ -63,7 +63,7 @@ def test_detail_cache_ignores_legacy_titles(monkeypatch, tmp_path):
     legacy.write_text(json.dumps({"title": "误取的推荐标题"}), encoding="utf-8")
     assert detail_cache.get("javdb", "ADN-813") is None
     detail_cache.put("javdb", "ADN-813", {"title": "详情主标题"})
-    assert detail_cache.get("javdb", "ADN-813") == {"title": "详情主标题"}
+    assert detail_cache.get("javdb", "ADN-813") == {"title": "详情主标题", "source": "javdb"}
     assert legacy.exists()  # 只隔离旧缓存，不删除用户数据。
 
 
@@ -145,6 +145,15 @@ def test_nfo_optional_fields_absent(tmp_path):
     assert "<trailer>" not in content
     assert "<year>" not in content
     assert 'type="javdb"' not in content
+    assert "<source>" not in content
+
+
+def test_nfo_source_field(tmp_path):
+    out = str(tmp_path / "t3.nfo")
+    generate_nfo({"code": "ABC-1", "title": "T", "date": "", "studio": "",
+                  "tags": [], "actors": [], "plot": "", "source": "jav321"}, out)
+    content = open(out, encoding="utf-8").read()
+    assert "<source>jav321</source>" in content
 
 
 # ---------- undo_journal ----------

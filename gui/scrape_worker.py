@@ -116,12 +116,17 @@ class ScrapeWorker(QRunnable):
                 else:
                     detail = None
 
-                    # 磁盘缓存：TTL 内同番号重复刮削零网络请求。
-                    # 用户明确要求重新刮削时（force_refresh）跳过缓存
+                    # 磁盘缓存按来源分键：JAVDB 主源 TTL 内命中则零网络请求；
+                    # JAV321 降级缓存只作兜底——即使命中也仍会先尝试 JAVDB，
+                    # 主源恢复即以其结果为准并回写 JAVDB 缓存，不再复用降级数据。
+                    # 用户强制刷新（force_refresh）时绕过全部缓存重新走网络。
+                    degraded_detail = None
                     if not self.force_refresh:
-                        detail = detail_cache.get("javdb", self.code)
+                        detail = detail_cache.get(detail_cache.SOURCE_JAVDB, self.code)
                         if detail:
-                            self.signals.progress.emit(self.file_path, "命中本地刮削缓存...")
+                            self.signals.progress.emit(self.file_path, "命中本地刮削缓存 (JAVDB)...")
+                        else:
+                            degraded_detail = detail_cache.get(detail_cache.SOURCE_JAV321, self.code)
 
                     if not detail:
                         try:
@@ -132,26 +137,35 @@ class ScrapeWorker(QRunnable):
                             adapter = _get_thread_adapter("javdb", self.proxies)
                             detail = adapter.get_video_by_code(self.code)
                             if detail:
-                                detail_cache.put("javdb", self.code, detail)
+                                detail["source"] = detail_cache.SOURCE_JAVDB
+                                detail_cache.put(detail_cache.SOURCE_JAVDB, self.code, detail)
                         except Exception as scrape_err:
                             last_error = scrape_err
                             log.error(f"[JAVDB] 刮削过程中发生网络异常: {scrape_err}")
 
-                    # 若 JAVDB 刮削失败或返回空，降级回退至 JAV321 直连
+                    # 若 JAVDB 刮削失败或返回空，降级回退至 JAV321。
+                    # 降级结果写入 JAV321 自己的缓存键，绝不覆盖 JAVDB 条目。
                     if not detail:
-                        try:
-                            if self.is_cancelled:
-                                self.signals.finished.emit(self.file_path, "cancelled")
-                                return
-                            self.signals.progress.emit(self.file_path, "JAVDB 刮削失败，正在降级回退至 JAV321 (直连)...")
-                            adapter_fallback = _get_thread_adapter("jav321", self.proxies)
-                            detail = adapter_fallback.get_video_by_code(self.code)
-                            if detail:
-                                detail_cache.put("javdb", self.code, detail)
-                                self.signals.progress.emit(self.file_path, "成功从 JAV321 平台获取到刮削数据。")
-                        except Exception as fallback_err:
-                            last_error = fallback_err
-                            log.error(f"[JAV321] 降级刮削也失败: {fallback_err}")
+                        if degraded_detail is not None:
+                            # 本地已有降级缓存：避免对 JAV321 重复出网
+                            detail = degraded_detail
+                            self.signals.progress.emit(
+                                self.file_path, "JAVDB 不可用，使用本地 JAV321 降级缓存...")
+                        else:
+                            try:
+                                if self.is_cancelled:
+                                    self.signals.finished.emit(self.file_path, "cancelled")
+                                    return
+                                self.signals.progress.emit(self.file_path, "JAVDB 刮削失败，正在降级回退至 JAV321 (直连)...")
+                                adapter_fallback = _get_thread_adapter("jav321", self.proxies)
+                                detail = adapter_fallback.get_video_by_code(self.code)
+                                if detail:
+                                    detail["source"] = detail_cache.SOURCE_JAV321
+                                    detail_cache.put(detail_cache.SOURCE_JAV321, self.code, detail)
+                                    self.signals.progress.emit(self.file_path, "成功从 JAV321 平台获取到刮削数据。")
+                            except Exception as fallback_err:
+                                last_error = fallback_err
+                                log.error(f"[JAV321] 降级刮削也失败: {fallback_err}")
 
                 if not detail:
                     # 区分"确实查不到"与"网络/代理异常"，否则用户无从排查
@@ -321,6 +335,7 @@ class ScrapeWorker(QRunnable):
                     "rating": rating_10,
                     "trailer": detail.get("preview_video", ""),
                     "javdb_id": detail.get("video_id", ""),
+                    "source": detail.get("source", ""),
                 }
                 from lib.nfo_generator import generate_nfo
                 generate_nfo(nfo_data, nfo_path)

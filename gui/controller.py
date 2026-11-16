@@ -1452,8 +1452,11 @@ class Controller:
         actors_str = ", ".join(detail.get("actors", [])) or "无"
         studio_str = detail.get("series", "") or detail.get("maker", "") or detail.get("publisher", "") or "无"
         date_str = detail.get("date", "") or "无"
-        
+        source_str = {"javdb": "JAVDB", "jav321": "JAV321（降级源）"}.get(
+            str(detail.get("source", "")).lower(), "未知")
+
         info_details_text = (
+            f"数据来源: {source_str}\n"
             f"片商: {studio_str}\n"
             f"发行日期: {date_str}\n"
             f"演员: {actors_str}\n\n"

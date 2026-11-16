@@ -16,6 +16,10 @@ def generate_nfo(data: dict, output_path: str):
         javdb_uid = ET.SubElement(root, "uniqueid", type="javdb")
         javdb_uid.text = data["javdb_id"]
 
+    # 详情来源站点（javdb / jav321），供界面与媒体库区分主源与降级数据
+    if data.get("source"):
+        ET.SubElement(root, "source").text = str(data["source"])
+
     # 发行日期
     date = data.get("date", "")
     ET.SubElement(root, "premiered").text = date
