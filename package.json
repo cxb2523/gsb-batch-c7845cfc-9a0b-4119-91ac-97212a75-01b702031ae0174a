@@ -1,0 +1,68 @@
+{
+    "name": "@harshvz/crawler",
+    "version": "1.4.0",
+    "description": "A powerful web scraping tool built with Playwright that crawls websites using BFS or DFS algorithms, captures screenshots, and extracts content",
+    "main": "dist/index.js",
+    "types": "dist/index.d.ts",
+    "type": "module",
+    "bin": {
+        "scraper": "./dist/index.js",
+        "crawler": "./dist/index.js"
+    },
+    "scripts": {
+        "dev": "tsx watch src/index.ts",
+        "build": "tsc",
+        "start": "node dist/index.js",
+        "prepublishOnly": "npm run build",
+        "test": "echo \"Error: no test specified\" && exit 1"
+    },
+    "keywords": [
+        "web-scraping",
+        "playwright",
+        "crawler",
+        "scraper",
+        "bfs",
+        "dfs",
+        "screenshot",
+        "cli",
+        "automation",
+        "web-crawler",
+        "content-extraction",
+        "seo",
+        "metadata",
+        "obscura"
+    ],
+    "author": {
+        "name": "Harsh",
+        "url": "https://github.com/harshvz"
+    },
+    "license": "ISC",
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/harshvz/crawler.git"
+    },
+    "bugs": {
+        "url": "https://github.com/harshvz/crawler/issues"
+    },
+    "homepage": "https://github.com/harshvz/crawler#readme",
+    "files": [
+        "dist",
+        "README.md",
+        "LICENSE"
+    ],
+    "engines": {
+        "node": ">=16.0.0"
+    },
+    "devDependencies": {
+        "@types/yargs": "^17.0.35",
+        "nodemon": "^3.1.11",
+        "tsx": "^4.22.4",
+        "typescript": "^5.9.3"
+    },
+    "dependencies": {
+        "inquirer": "^13.2.0",
+        "obscura-node": "^1.0.2",
+        "playwright-core": "^1.61.1",
+        "yargs": "^18.0.0"
+    }
+}
