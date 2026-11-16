@@ -1,0 +1,30 @@
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+.pytest_cache/
+.mypy_cache/
+*.db
+data/
+.env
+*.mp3
+*.wav
+.git-backup-before-rewrite/
+
+# Daemon output — scraping results stay on local disk only, NEVER public repo
+# (2026-04-27). bmw_corpus + future scrapers append to JSONL files that
+# eventually exceed GitHub's 100MB per-file cap. History rewrite for the
+# 11 already-pushed auto-commits is tracked separately as a force-push task.
+output/
+*.jsonl
+*.jsonl.processed
+
+# Local safety backups from filter-repo / similar rewrites — never tracked
+.git.backup-*/
+
+# claude plugin eval output (aggregate-result.json, report.html per run)
+evals/results/

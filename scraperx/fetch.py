@@ -1,0 +1,713 @@
+"""smart_fetch — universal URL fetcher with Jina → urllib → Playwright → Scrapling cascade.
+
+Designed for the wojak-wojtek wiki research stack: any "fetch URL → maybe-Cloudflare-walled" call.
+Each cascade leg trades speed for resilience.
+
+Modes (ordered by speed/quality tradeoff):
+    1. jina:              https://r.jina.ai/<url> — clean markdown extraction, Cloudflare-aware
+                          Best for: research articles, docs, news. Returns rendered text content.
+    2. urllib:            raw HTTP via stdlib — fast, plain HTML, no JS execution
+                          Best for: static pages, JSON endpoints, RSS feeds.
+    3. playwright:        full headless Chromium render — slowest but bypasses bot-walls
+                          Best for: JS-heavy SPAs, sites that 403 plain HTTP.
+    4. scrapling_stealth: patchright Chromium + browserforge fingerprints + Turnstile
+                          auto-solver. Last-resort leg for sites that 403 even plain
+                          Playwright (Arkham Intel, some Cloudflare-walled DEX UIs).
+                          Opt-in dep (``scraperx[stealth]``); raises ScraplingNotAvailable
+                          if missing — cascade records the error and the call returns
+                          empty content rather than crashing.
+
+Cache: per-URL in ``~/.scraperx/social.db`` (``web_fetch_cache`` table). Default TTL 24h.
+
+Usage:
+    from scraperx.fetch import smart_fetch
+    result = smart_fetch("https://example.com")
+    print(result.content[:200], result.mode_used, result.elapsed_ms)
+
+    # Skip cache (force refetch):
+    result = smart_fetch(url, no_cache=True)
+
+    # Force a specific mode (skip cascade):
+    result = smart_fetch(url, prefer="urllib", strict=True)
+
+Cache hits are cheap; cascade misses fall through silently (errors collected on result.errors).
+
+What counts as success (2026-10-28): a non-empty body with HTTP status < 400 that is not a block page
+(``detect_block_page``). Before that date any non-empty body counted: the ledger held 8 playwright "successes",
+4 of them HTTP 404/403 pages, each cached for 24 h. A 404/410 from a browser leg ends the cascade (the page does
+not exist; a stealth retry cannot change that). The jina leg runs only with a key (``JINA_API_KEY``): keyless
+r.jina.ai answered 403 to this host, 0 successes in 2,363 attempts.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import ipaddress
+import logging
+import os
+import re
+import socket
+import sqlite3
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
+from functools import partial
+from typing import Any, Callable, Literal, Sequence
+from urllib.parse import quote, urlparse
+from urllib.request import Request, urlopen
+
+from scraperx.method_telemetry import preferred_order as _preferred_order
+from scraperx.method_telemetry import record as _telemetry_record
+
+logger = logging.getLogger(__name__)
+
+# Public — re-exported via scraperx/__init__.py
+__all__ = ["FetchResult", "smart_fetch", "FetchMode", "LegUnavailable", "detect_block_page"]
+
+FetchMode = Literal["jina", "urllib", "playwright", "scrapling_stealth"]
+# Cascade order: cheap-and-clean first, expensive bot-bypass last.
+# scrapling_stealth runs AFTER plain playwright because it pulls a heavier
+# patched-Chromium binary, takes 30-90s for Cloudflare's solver round-trip,
+# and is only worth it when plain headless Chromium already 403'd.
+_CASCADE_DEFAULT: tuple[FetchMode, ...] = (
+    "jina",
+    "urllib",
+    "playwright",
+    "scrapling_stealth",
+)
+
+DEFAULT_DB_PATH = os.path.expanduser("~/.scraperx/social.db")
+DEFAULT_TIMEOUT = 30
+DEFAULT_TTL = 86400  # 24h, matches WEB_FETCH_TTL in social_db.py
+DEFAULT_USER_AGENT = (
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 scraperx-fetch/1.0"
+)
+JINA_BASE = "https://r.jina.ai/"
+_JINA_KEY_ENV = ("JINA_API_KEY", "SCRAPERX_JINA_API_KEY")
+
+
+class LegUnavailable(RuntimeError):
+    """A cascade leg that cannot run here (missing key). Recorded on result.errors, never in telemetry:
+    it says nothing about the target site."""
+
+
+# A block or challenge page served INSTEAD of the content, often with HTTP 200 (Imperva: Scrapling issue #472,
+# 2026-09-30, ~83 chars "Request unsuccessful. Incapsula incident ID"). Each marker is one the vendor's block page
+# carries and a normal page behind the same vendor does not: Cloudflare, DataDome, PerimeterX and Imperva also
+# inject their sensor scripts into normal pages, so "challenge-platform", "datadome", "perimeterx" or
+# "_Incapsula_Resource" alone would flag real content. Only the head of the page is scanned.
+_BLOCK_MARKERS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("cloudflare_challenge", re.compile(
+        r"window\._cf_chl_opt|<title>\s*Just a moment\.\.\.\s*</title>|<title>\s*Attention Required! \| Cloudflare",
+        re.IGNORECASE)),
+    ("imperva", re.compile(r"Incapsula incident ID", re.IGNORECASE)),
+    ("datadome", re.compile(r"captcha-delivery\.com", re.IGNORECASE)),
+    ("perimeterx", re.compile(r"id=[\"']px-captcha[\"']|_pxCaptcha", re.IGNORECASE)),
+    ("akamai", re.compile(
+        r"<title>\s*Access Denied\s*</title>[\s\S]{0,4000}errors(?:\.|&#46;)edgesuite(?:\.|&#46;)net", re.IGNORECASE)),
+    ("anubis", re.compile(
+        r"<title>\s*Making sure you(?:'|&#39;|\u2019)re not a bot!?\s*</title>|/\.within\.website/x/cmd/anubis/",
+        re.IGNORECASE)),
+    # Gandalf (gandalf.nerdvpn.de) fronts some Nitter instances: a meta-refresh to /.gandalf/check (2026-10-28).
+    ("gandalf", re.compile(r"/\.gandalf/check|Gandalf is checking your connection", re.IGNORECASE)),
+    ("jina_upstream_error", re.compile(r"^Warning: Target URL returned error \d{3}", re.MULTILINE)),
+)
+_BLOCK_SCAN_CHARS = 20_000
+
+
+def detect_block_page(content: str) -> str | None:
+    """The vendor whose block / challenge page this is ("cloudflare_challenge", "imperva", "datadome",
+    "perimeterx", "akamai", "anubis", "gandalf", "jina_upstream_error"), or None for a page that looks like content."""
+    head = (content or "")[:_BLOCK_SCAN_CHARS]
+    for vendor, rx in _BLOCK_MARKERS:
+        if rx.search(head):
+            return vendor
+    return None
+
+
+# Schema mirror — defense in depth, matches social_db.py._SCHEMA.
+# Every consumer guarantees its own table exists; idempotent CREATE IF NOT EXISTS.
+_FETCH_SCHEMA = """
+CREATE TABLE IF NOT EXISTS web_fetch_cache (
+    url_hash TEXT PRIMARY KEY,
+    url TEXT NOT NULL,
+    content TEXT NOT NULL,
+    mode_used TEXT NOT NULL,
+    fetched_at REAL NOT NULL,
+    ttl_seconds INTEGER NOT NULL DEFAULT 86400,
+    http_status INTEGER,
+    elapsed_ms INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_web_fetch_url ON web_fetch_cache(url);
+CREATE INDEX IF NOT EXISTS idx_web_fetch_fetched_at ON web_fetch_cache(fetched_at);
+"""
+
+
+@dataclass
+class FetchResult:
+    """Result of a smart_fetch call.
+
+    Attributes:
+        url: The URL that was requested (verbatim).
+        content: The fetched body. Empty string on total failure.
+        mode_used: Which cascade leg succeeded ("jina"/"urllib"/"playwright"/"cache").
+                   Empty string if all legs failed.
+        elapsed_ms: Wall-clock time spent on the actual fetch (excluding cache lookup).
+        was_cached: True if the result came from web_fetch_cache.
+        http_status: HTTP status code of the successful leg, or None for jina/playwright.
+        errors: List of (mode, error_message) tuples for legs that failed before success.
+    """
+
+    url: str
+    content: str = ""
+    mode_used: str = ""
+    elapsed_ms: int = 0
+    was_cached: bool = False
+    http_status: int | None = None
+    errors: list[tuple[str, str]] = field(default_factory=list)
+
+    @property
+    def ok(self) -> bool:
+        """True iff at least one cascade leg returned non-empty content."""
+        return bool(self.content) and bool(self.mode_used)
+
+
+# ---------------------------------------------------------------------------
+# Cache helpers
+# ---------------------------------------------------------------------------
+
+
+def _url_hash(url: str) -> str:
+    """Stable hash of a URL — sha256 hex digest. Caller doesn't need to normalize."""
+    return hashlib.sha256(url.encode("utf-8")).hexdigest()
+
+
+# Per-path singleton connection cache. Opening/closing SQLite per fetch is an
+# anti-pattern (running CREATE TABLE IF NOT EXISTS on every call, lock contention
+# under threads). One Connection per db_path, guarded by a lock for write paths.
+_DB_CONN_CACHE: dict[str, sqlite3.Connection] = {}
+_DB_CONN_LOCK = threading.Lock()
+
+
+def _open_db(db_path: str | None = None) -> sqlite3.Connection:
+    """Return a process-wide cached Connection for db_path; first call sets up schema.
+
+    Uses ``check_same_thread=False`` so a single Connection can serve threaded
+    callers; the module-level lock serializes writes. This is fine because the
+    write workload is light (one row per cache miss).
+    """
+    path = db_path or DEFAULT_DB_PATH
+    cached = _DB_CONN_CACHE.get(path)
+    if cached is not None:
+        return cached
+    with _DB_CONN_LOCK:
+        # Double-checked locking — another thread may have raced ahead
+        cached = _DB_CONN_CACHE.get(path)
+        if cached is not None:
+            return cached
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        conn = sqlite3.connect(path, check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        try:
+            from scraperx._sqlite_pragmas import apply_pragmas
+            apply_pragmas(conn)
+        except ImportError:
+            # Tolerate older scraperx layouts; basic WAL is enough for fetch cache.
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=NORMAL")
+        conn.executescript(_FETCH_SCHEMA)
+        _DB_CONN_CACHE[path] = conn
+        return conn
+
+
+def _cache_get(url: str, db_path: str | None = None) -> FetchResult | None:
+    """Return cached FetchResult if fresh (within ttl_seconds), else None."""
+    conn = _open_db(db_path)
+    row = conn.execute(
+        """SELECT url, content, mode_used, fetched_at, ttl_seconds,
+                  http_status, elapsed_ms
+           FROM web_fetch_cache WHERE url_hash = ?""",
+        (_url_hash(url),),
+    ).fetchone()
+    if row is None:
+        return None
+    age = time.time() - row["fetched_at"]
+    if age > row["ttl_seconds"]:
+        return None
+    return FetchResult(
+        url=row["url"],
+        content=row["content"],
+        mode_used="cache",  # tag explicitly so caller can distinguish
+        elapsed_ms=row["elapsed_ms"] or 0,
+        was_cached=True,
+        http_status=row["http_status"],
+    )
+
+
+def _cache_put(
+    result: FetchResult,
+    ttl: int = DEFAULT_TTL,
+    db_path: str | None = None,
+) -> None:
+    """Persist a successful FetchResult to web_fetch_cache. No-op on failed results."""
+    if not result.ok:
+        return
+    conn = _open_db(db_path)
+    with _DB_CONN_LOCK:
+        conn.execute(
+            """INSERT OR REPLACE INTO web_fetch_cache
+               (url_hash, url, content, mode_used, fetched_at, ttl_seconds,
+                http_status, elapsed_ms)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                _url_hash(result.url),
+                result.url,
+                result.content,
+                result.mode_used,
+                time.time(),
+                ttl,
+                result.http_status,
+                result.elapsed_ms,
+            ),
+        )
+        conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# SSRF guard
+# ---------------------------------------------------------------------------
+
+
+def _is_private_or_loopback(host: str) -> bool:
+    """True if host (literal IP or hostname) resolves to a private/loopback/link-local IP.
+
+    Blocks RFC1918 (10/8, 172.16/12, 192.168/16), 127.0.0.0/8, ::1, link-local
+    (169.254/16, fe80::/10), multicast, and reserved ranges. Used to prevent
+    SSRF abuse where smart_fetch could be tricked into probing internal infra.
+    """
+    if not host:
+        return True  # paranoid: empty host = block
+    try:
+        # Resolve hostname → all addresses; literal IPs pass through resolve too
+        infos = socket.getaddrinfo(host, None)
+    except (socket.gaierror, UnicodeError):
+        return True  # can't resolve = treat as unsafe
+    for info in infos:
+        addr = info[4][0]
+        try:
+            ip = ipaddress.ip_address(addr)
+        except ValueError:
+            return True
+        if (
+            ip.is_private
+            or ip.is_loopback
+            or ip.is_link_local
+            or ip.is_multicast
+            or ip.is_reserved
+            or ip.is_unspecified
+        ):
+            return True
+    return False
+
+
+def _check_ssrf(url: str, *, allow_private: bool = False) -> str | None:
+    """Returns None if URL is safe, else a string describing why it's blocked.
+
+    The Jina Reader leg always goes to r.jina.ai (already safe) so this only
+    matters for the urllib + Playwright legs. Tests can pass allow_private=True.
+    """
+    if allow_private:
+        return None
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        return f"unsupported scheme: {parsed.scheme!r}"
+    host = parsed.hostname or ""
+    if _is_private_or_loopback(host):
+        return f"refusing to fetch private/loopback host: {host!r}"
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Cascade legs
+# ---------------------------------------------------------------------------
+
+
+def _jina_key() -> str | None:
+    for name in _JINA_KEY_ENV:
+        v = (os.environ.get(name) or "").strip()
+        if v:
+            return v
+    return None
+
+
+def _fetch_jina(url: str, timeout: int) -> tuple[str, int | None]:
+    """Fetch via Jina Reader. Returns (content, None). Raises on failure.
+
+    Needs a key (``JINA_API_KEY``): without one r.jina.ai answered 403 to this host in 0.4 s (2026-10-28),
+    and the ledger held 0 successes in 2,363 keyless attempts, so the leg raises LegUnavailable instead.
+    """
+    key = _jina_key()
+    if not key:
+        raise LegUnavailable(f"no Jina key in {' or '.join(_JINA_KEY_ENV)} (keyless r.jina.ai answers 403 here)")
+    # r.jina.ai expects a URL-encoded target appended to base; it returns clean markdown extraction.
+    target = JINA_BASE + quote(url, safe=":/?&=#")
+    req = Request(
+        target,
+        headers={"User-Agent": DEFAULT_USER_AGENT, "Accept": "text/plain", "Authorization": f"Bearer {key}"},
+    )
+    with urlopen(req, timeout=timeout) as resp:  # noqa: S310 — trusted host
+        body = resp.read()
+        text = body.decode("utf-8", errors="replace")
+        if not text.strip():
+            raise RuntimeError("jina returned empty body")
+        # Jina doesn't expose the upstream HTTP status — return None.
+        return text, None
+
+
+def _fetch_urllib(url: str, timeout: int) -> tuple[str, int]:
+    """Fetch via stdlib urllib. Returns (content, http_status). Raises on failure."""
+    req = Request(url, headers={"User-Agent": DEFAULT_USER_AGENT})
+    with urlopen(req, timeout=timeout) as resp:  # noqa: S310 — caller-controlled URL
+        status = getattr(resp, "status", None) or resp.getcode()
+        body = resp.read()
+        # Encoding cascade: header_charset → utf-8 → latin-1 (never raises).
+        # Some servers misdeclare the charset; if header says ISO-8859-1 but
+        # body is mostly multi-byte, the utf-8 fallback usually catches it.
+        charset = resp.headers.get_content_charset() or "utf-8"
+        try:
+            return body.decode(charset, errors="strict"), int(status)
+        except (LookupError, UnicodeDecodeError):
+            pass
+        try:
+            return body.decode("utf-8", errors="strict"), int(status)
+        except UnicodeDecodeError:
+            return body.decode("latin-1", errors="replace"), int(status)
+
+
+def _fetch_playwright(url: str, timeout: int) -> tuple[str, int | None]:
+    """Fetch via headless Playwright Chromium. Slowest leg, bypasses bot-walls.
+
+    Raises PlaywrightNotAvailable if optional dep missing.
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError as e:  # pragma: no cover — optional dep
+        raise RuntimeError(f"playwright not installed: {e}") from e
+
+    timeout_ms = max(timeout * 1000, 5000)
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(headless=True)
+        try:
+            page = browser.new_page(user_agent=DEFAULT_USER_AGENT)
+            response = page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+            status = response.status if response is not None else None
+            content = page.content()
+            return content, status
+        finally:
+            browser.close()
+
+
+# ---------------------------------------------------------------------------
+# Where a leg RUNS (not just what it returns)
+# ---------------------------------------------------------------------------
+
+# Both of these drive Playwright's *sync* API. Playwright refuses that API on a
+# thread that owns a running asyncio loop and raises immediately:
+#   "It looks like you are using Playwright Sync API inside the asyncio loop."
+# So a caller shaped `async def f(): smart_fetch(url)` -- a sync call inside a
+# coroutine -- silently loses BOTH browser legs. The stdlib legs (jina, urllib)
+# have no such constraint and stay on the caller's thread.
+_BROWSER_MODES: frozenset[str] = frozenset({"playwright", "scrapling_stealth"})
+
+# Outer bound on waiting for the worker thread. The leg already enforces
+# `timeout` itself; this only stops a wedged browser from hanging the caller
+# forever, and is deliberately generous (Turnstile solving is 30-90s).
+_OFFLOAD_GRACE_S = 30
+
+
+def _loop_is_running() -> bool:
+    """True when the CURRENT thread owns a running asyncio event loop."""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return False
+    return True
+
+
+def _call_leg(
+    mode: str,
+    leg: Callable[..., tuple[str, int | None]],
+    url: str,
+    timeout: int,
+) -> tuple[str, int | None]:
+    """Run one cascade leg, moving the Playwright-backed ones off the loop thread.
+
+    MEASURED 2026-09-15 -- this is not a theoretical hazard. Same URL, same leg:
+    a sync caller got ``ok=True`` in 0.57s; the identical call inside
+    ``asyncio.run`` failed in 0.00s (playwright) / 0.08s (stealth). In
+    production ``~/.scraperx/method-telemetry.jsonl`` carried 9205 attempts on
+    ``dexscreener.com`` with **playwright 0/2292 and scrapling_stealth 0/2292**,
+    all from ca-gate's ``upstream/dexscreener.py::_scraperx_fallback`` -- an
+    ``async def`` calling ``smart_fetch`` directly. Failure latencies of
+    14-54 ms are the fingerprint: far too fast to be a wall.
+
+    A worker thread owns no loop, so the sync API is legal there. Exceptions
+    propagate unchanged, which matters: the cascade must keep telling a WALL
+    apart from a broken call shape.
+
+    No running loop -> the leg is called inline exactly as before, so a sync
+    caller pays nothing for a thread it does not need.
+    """
+    if mode not in _BROWSER_MODES or not _loop_is_running():
+        return leg(url, timeout)
+
+    executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"scraperx-{mode}")
+    try:
+        future = executor.submit(leg, url, timeout)
+        return future.result(timeout=timeout + _OFFLOAD_GRACE_S)
+    finally:
+        # Never block the caller on a browser that refuses to die; a straggler
+        # thread is joined at interpreter exit.
+        executor.shutdown(wait=False)
+
+
+def _fetch_scrapling_stealth(
+    url: str,
+    timeout: int,
+    *,
+    extra_kwargs: dict[str, Any] | None = None,
+) -> tuple[str, int | None]:
+    """Fetch via Scrapling's StealthyFetcher — last-resort Cloudflare bypass.
+
+    Delegates to ``scraperx.scrapling_stealth.fetch_stealth`` which lazy-imports
+    the optional Scrapling dep so this module never hard-requires it. Raises
+    ``ScraplingNotAvailable`` (RuntimeError subclass) if Scrapling is missing —
+    cascade catches and records the error, then the call returns empty content
+    if every leg failed.
+
+    Why last in the cascade:
+        - Heaviest install footprint (~50 MB patchright Chromium + browserforge)
+        - Slowest per-call (30-90s when solving Turnstile)
+        - Only adds value when plain Playwright ALREADY 403'd
+    """
+    # Local import keeps this module's own import time fast and avoids cycles.
+    from scraperx.scrapling_stealth import fetch_stealth
+    return fetch_stealth(url, timeout=timeout, extra_kwargs=extra_kwargs)
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+
+def smart_fetch(
+    url: str,
+    *,
+    prefer: FetchMode | None = None,
+    adaptive: bool = True,
+    timeout: int = DEFAULT_TIMEOUT,
+    ttl: int = DEFAULT_TTL,
+    no_cache: bool = False,
+    strict: bool = False,
+    allow_private: bool = False,
+    db_path: str | None = None,
+    stealth_profile: str | None = None,
+    stealth_kwargs: dict[str, Any] | None = None,
+) -> FetchResult:
+    """Fetch a URL with the Jina → urllib → Playwright cascade.
+
+    The ``prefer`` argument REORDERS the entire cascade: the chosen leg runs
+    first, then the remaining legs in default order ("jina", "urllib",
+    "playwright"). With ``strict=True`` only the preferred leg runs.
+
+    Args:
+        url: The URL to fetch.
+        prefer: Which cascade leg to try first. Default "jina" (best for content
+                extraction). Other legs run as fallbacks if the preferred fails,
+                unless ``strict=True``.
+        timeout: Per-leg timeout in seconds. Default 30.
+        ttl: Cache TTL for successful fetches, in seconds. Default 86400 (24h).
+        no_cache: If True, skip cache lookup AND skip cache write.
+        strict: If True, ONLY try ``prefer``; do not fall through. Useful for
+                tests or when caller knows exactly which mode they want.
+        allow_private: If True, skip the SSRF guard and allow private/loopback
+                       hosts. Off by default — defense against URL injection.
+        db_path: Override the cache DB path (default ~/.scraperx/social.db).
+                 Mostly for tests.
+        stealth_profile: Directory for a PERSISTENT browser profile used by the
+                 ``scrapling_stealth`` leg. This is the difference between a
+                 cold, cookie-less browser on every call and a session that
+                 REMEMBERS — Cloudflare clearance cookies, and any login you
+                 established earlier, survive across calls and across process
+                 restarts. Created if absent. Give each host its own directory
+                 (e.g. ``~/.cache/scraperx/profiles/example.com``): profiles are
+                 not something to share between unrelated sites.
+
+                 Added 2026-08-02. Scrapling has supported this the whole time
+                 (``StealthySession(user_data_dir=...)`` →
+                 ``launch_persistent_context``) and our wrapper already forwarded
+                 arbitrary kwargs — but no call site ever passed one, so every
+                 stealth fetch paid the full 30-90s Turnstile round-trip again
+                 and could never present an authenticated cookie. The capability
+                 was installed and unreachable; this is the wire.
+        stealth_kwargs: Escape hatch forwarded verbatim to the stealth leg
+                 (``proxy``, ``useragent``, ``locale``, ``timezone_id``,
+                 ``block_ads``, ``real_chrome``, ``retries``, …). Authoritative
+                 list: ``scrapling.engines._browsers._types``. Merged AFTER
+                 ``stealth_profile``, so an explicit ``user_data_dir`` here wins.
+                 NOTE: passing ``proxy_rotator`` disables persistence upstream —
+                 the two are mutually exclusive branches.
+
+    Returns:
+        FetchResult — check ``result.ok`` to see if the fetch succeeded.
+        On total failure, content is empty and errors lists each leg's error.
+
+    Notes:
+        - Network errors per-leg are caught and recorded on result.errors;
+          the next leg is tried automatically (unless strict=True).
+        - smart_fetch never raises on transport errors — only on programmer
+          error (e.g. unknown ``prefer`` value).
+        - Cache key is sha256(url); callers don't need to normalize.
+    """
+    if prefer is not None and prefer not in _CASCADE_DEFAULT:
+        raise ValueError(
+            f"prefer must be one of {_CASCADE_DEFAULT}, got {prefer!r}"
+        )
+
+    # SSRF guard — applies to ALL legs (Jina honors the URL too)
+    ssrf_reason = _check_ssrf(url, allow_private=allow_private)
+    if ssrf_reason is not None:
+        result = FetchResult(url=url)
+        result.errors.append(("ssrf_guard", ssrf_reason))
+        return result
+
+    # Cache lookup
+    if not no_cache:
+        cached = _cache_get(url, db_path=db_path)
+        if cached is not None:
+            return cached
+
+    # Build cascade order: preferred first, then the rest in default order.
+    # ── cascade ordering ─────────────────────────────────────────────────────
+    # The order used to be a frozen constant, while a self-learning ledger sat
+    # in the tree wired only into reddit.py. So on a walled host we would try
+    # jina (403), urllib (403), playwright (403), stealth (200) — in that exact
+    # order, forever, three wasted attempts per URL for the life of the project.
+    #
+    # Ranking is PER HOST: jina may be perfect for one site and useless for the
+    # next, and a global average would hide both facts.
+    #
+    # An EXPLICIT `prefer` is an instruction, not a suggestion — telemetry may
+    # reorder the FALLBACKS behind it but never demotes the leg the caller named.
+    # `prefer=None` (the default) means the caller expressed no preference, so
+    # the ledger picks. With no ledger, or fewer than MIN_SAMPLES events,
+    # preferred_order returns the default order unchanged — identical behaviour
+    # to before, by construction.
+    domain = urlparse(url).netloc or None
+
+    def _rank(methods: Sequence[FetchMode]) -> list[FetchMode]:
+        """Rank by ledger. Fail-open LOCALLY — instrumentation may never break a fetch.
+
+        method_telemetry is already fail-open internally, but relying on another
+        module's internals for a safety guarantee is exactly how a guarantee
+        silently disappears. Cheap to own it here.
+        """
+        if not adaptive:
+            return list(methods)
+        try:
+            return _preferred_order("smart_fetch", list(methods), target_domain=domain)
+        except Exception as e:  # noqa: BLE001
+            logger.debug("cascade ranking unavailable, using default order: %s", e)
+            return list(methods)
+
+    def _note(mode: str, success: bool, latency_ms: int, status: int | None = None) -> None:
+        try:
+            _telemetry_record("smart_fetch", mode, domain or "", success,
+                              latency_ms=latency_ms, http_status=status)
+        except Exception as e:  # noqa: BLE001
+            logger.debug("telemetry record failed for %s: %s", mode, e)
+
+    if prefer is None:
+        ordered = _rank(_CASCADE_DEFAULT)
+        prefer = ordered[0]
+        rest = tuple(ordered[1:])
+    else:
+        rest = tuple(_rank([m for m in _CASCADE_DEFAULT if m != prefer]))
+
+    cascade: tuple[FetchMode, ...] = (prefer,) if strict else (prefer,) + rest
+
+    result = FetchResult(url=url)
+
+    # Stealth options are bound onto the leg with partial() so the dispatch loop
+    # below keeps calling every leg with the same (url, timeout) signature. When
+    # no options are given the bare function is used, so the monkeypatch-by-name
+    # pattern in the existing tests keeps working untouched.
+    stealth_leg = _fetch_scrapling_stealth
+    merged_stealth: dict[str, Any] = {}
+    if stealth_profile:
+        profile_dir = os.path.abspath(os.path.expanduser(stealth_profile))
+        os.makedirs(profile_dir, exist_ok=True)
+        merged_stealth["user_data_dir"] = profile_dir
+    if stealth_kwargs:
+        merged_stealth.update(stealth_kwargs)  # explicit wins over the shorthand
+    if merged_stealth:
+        stealth_leg = partial(_fetch_scrapling_stealth, extra_kwargs=merged_stealth)
+
+    leg_fns = {
+        "jina": _fetch_jina,
+        "urllib": _fetch_urllib,
+        "playwright": _fetch_playwright,
+        "scrapling_stealth": stealth_leg,
+    }
+
+    for mode in cascade:
+        leg = leg_fns[mode]
+        t0 = time.monotonic()
+        try:
+            content, status = _call_leg(mode, leg, url, timeout)
+            elapsed_ms = int((time.monotonic() - t0) * 1000)
+            if not content or not content.strip():
+                result.errors.append((mode, "empty body"))
+                # An empty body is a FAILURE for ranking purposes: the leg
+                # answered but gave us nothing usable, which is exactly the
+                # outcome we want demoted next time.
+                _note(mode, False, elapsed_ms, status)
+                continue
+            if status is not None and status >= 400:
+                # The browser legs hand back the error page itself; it is not the content.
+                result.errors.append((mode, f"HTTP {status}"))
+                _note(mode, False, elapsed_ms, status)
+                if mode in _BROWSER_MODES and status in (404, 410):
+                    result.http_status = status
+                    break  # a real browser was told the page does not exist
+                continue
+            blocked = detect_block_page(content)
+            if blocked:
+                result.errors.append((mode, f"block page: {blocked}"))
+                _note(mode, False, elapsed_ms, status)
+                continue
+            _note(mode, True, elapsed_ms, status)
+            result.content = content
+            result.mode_used = mode
+            result.elapsed_ms = elapsed_ms
+            result.http_status = status
+            break
+        except LegUnavailable as e:
+            result.errors.append((mode, f"skipped: {e}"))
+            continue
+        except Exception as e:  # noqa: BLE001 — record + advance to next leg
+            elapsed_ms = int((time.monotonic() - t0) * 1000)
+            err = f"{type(e).__name__}: {e}"
+            result.errors.append((mode, err))
+            _note(mode, False, elapsed_ms)
+            logger.debug("smart_fetch %s leg failed in %dms: %s", mode, elapsed_ms, err)
+            continue
+
+    # Cache only on success
+    if result.ok and not no_cache:
+        _cache_put(result, ttl=ttl, db_path=db_path)
+
+    return result

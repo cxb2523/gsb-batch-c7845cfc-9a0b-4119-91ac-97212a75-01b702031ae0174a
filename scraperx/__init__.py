@@ -1,0 +1,234 @@
+"""ScraperX — multi-method X/Twitter scraper + YouTube transcriber + blockchain explorer."""
+
+from scraperx.authenticity import ThreadAuthenticity, check_thread_authenticity
+from scraperx.avatar_matcher import AvatarMatcher, VerifiedAvatarRegistry
+from scraperx.github_analyzer import (
+    GithubAnalyzer,
+    GithubReport,
+    InvalidRepoUrlError,
+)
+from scraperx.github_analyzer import (
+    analyze_repo as analyze_github_repo,
+)
+from scraperx.github_analyzer import (
+    parse_repo_url as parse_github_repo_url,
+)
+from scraperx.video_discovery import VideoRef, discover_videos, fetch_any_video_transcript
+from scraperx.vimeo_scraper import VimeoResult, VimeoScraper, parse_vimeo_url
+from scraperx.silent_video_ocr import (
+    FrameOCR,
+    SilentVideoNotAvailable,
+    SilentVideoResult,
+    has_audio_stream,
+    transcribe_silent_video,
+)
+
+from .cookie_banner import (
+    BannerSelector,
+    DEFAULT_SELECTORS,
+    DismissResult,
+    dismiss_cookie_banner,
+    dismiss_cookie_banner_async,
+)
+from .explorer_label import (
+    ExplorerNotSupported,
+    LabelResult,
+    detect_explorer,
+    extract_label,
+    page_title,
+    parse_title,
+)
+from .fetch import FetchResult, detect_block_page, smart_fetch
+from .scrapling_stealth import (
+    DEFAULT_STEALTH_TIMEOUT,
+    ScraplingNotAvailable,
+    StealthPageResult,
+    StealthSessionHandle,
+    fetch_stealth,
+    fetch_stealth_session,
+    fetch_stealth_xhr,
+    stealth_session,
+)
+from .adaptive_select import parse as adaptive_parse
+from .site_crawl import CrawlOutcome, crawl
+from .page_markdown import MarkdownUnavailable, fetch_markdown, html_to_markdown
+from .fingerprint_audit import (
+    CurlCffiNotAvailable,
+    Diagnosis403,
+    FingerprintAudit,
+    audit_fingerprint,
+    diagnose_403,
+)
+from .gh_discover import RepoCandidate, discover_repos
+from .js_state import (
+    ChartSeries,
+    ChartSnapshot,
+    SpaState,
+    extract_chart_data,
+    extract_chart_data_async,
+    extract_spa_state,
+    extract_spa_state_async,
+)
+from .pdf_text_parser import ColumnRow, ParseResult, parse_pdf_with_columns
+from .quota_session import QuotaSession, QuotaSessionConfig
+from .reddit import (
+    RedditComment,
+    RedditError,
+    RedditPost,
+    RedditScraper,
+    RedditThread,
+    get_subreddit_posts,
+    search_reddit,
+    search_subreddit,
+)
+from .reddit import (
+    get_thread as get_reddit_thread,
+)
+from .bluesky import BlueskyError, BlueskyPost, BlueskyProfile
+from .bluesky import get_author_posts as get_bluesky_posts
+from .bluesky import get_profile as get_bluesky_profile
+from .bluesky import get_thread as get_bluesky_thread
+from .bluesky import search_posts as search_bluesky
+from .telegram import TelegramChannel, TelegramError, TelegramPost
+from .telegram import get_channel_info as get_telegram_channel
+from .telegram import get_channel_posts as get_telegram_posts
+from .telegram import search_channel as search_telegram_channel
+from .reverse_image import (
+    DEFAULT_ENGINES,
+    ENGINES,
+    EngineHit,
+    build_search_url,
+    reverse_image_search,
+)
+from .tv_symbol_resolver import SymbolResolution, resolve_symbol
+from .profile import XProfile, get_profile
+from .scraper import Tweet, TweetNotFoundError, XScraper
+from .wayback import (
+    CdxEntry,
+    MultiGenerationResult,
+    WaybackError,
+    query_cdx,
+    wayback_multi_generation_probe,
+)
+from .screenshot import (
+    PlaywrightNotAvailable,
+    screenshot_url,
+)
+from .search import search_tweets
+from .social_db import SocialDB
+from .thread import Thread, get_thread
+from .token_extractor import TokenMention, extract_token_mentions
+
+__version__ = "1.13.0"
+
+__all__ = [
+    "AvatarMatcher",
+    "CurlCffiNotAvailable",
+    "Diagnosis403",
+    "FingerprintAudit",
+    "audit_fingerprint",
+    "diagnose_403",
+    "BannerSelector",
+    "CdxEntry",
+    "ChartSeries",
+    "ChartSnapshot",
+    "ColumnRow",
+    "DEFAULT_ENGINES",
+    "DEFAULT_SELECTORS",
+    "DismissResult",
+    "ENGINES",
+    "EngineHit",
+    "ExplorerNotSupported",
+    "FetchResult",
+    "LabelResult",
+    "GithubAnalyzer",
+    "GithubReport",
+    "InvalidRepoUrlError",
+    "MultiGenerationResult",
+    "ParseResult",
+    "PlaywrightNotAvailable",
+    "QuotaSession",
+    "QuotaSessionConfig",
+    "RedditComment",
+    "RedditError",
+    "RedditPost",
+    "RedditScraper",
+    "RedditThread",
+    "RepoCandidate",
+    "SocialDB",
+    "SpaState",
+    "SymbolResolution",
+    "Thread",
+    "ThreadAuthenticity",
+    "TokenMention",
+    "Tweet",
+    "TweetNotFoundError",
+    "VerifiedAvatarRegistry",
+    "VideoRef",
+    "VimeoResult",
+    "VimeoScraper",
+    "DEFAULT_STEALTH_TIMEOUT",
+    "ScraplingNotAvailable",
+    "WaybackError",
+    "XProfile",
+    "XScraper",
+    "analyze_github_repo",
+    "build_search_url",
+    "check_thread_authenticity",
+    "detect_block_page",
+    "detect_explorer",
+    "discover_repos",
+    "discover_videos",
+    "dismiss_cookie_banner",
+    "dismiss_cookie_banner_async",
+    "extract_chart_data",
+    "extract_chart_data_async",
+    "extract_label",
+    "extract_spa_state",
+    "extract_spa_state_async",
+    "extract_token_mentions",
+    "fetch_any_video_transcript",
+    "fetch_stealth",
+    "fetch_stealth_session",
+    "fetch_stealth_xhr",
+    "crawl",
+    "CrawlOutcome",
+    "fetch_markdown",
+    "html_to_markdown",
+    "MarkdownUnavailable",
+    "adaptive_parse",
+    "stealth_session",
+    "StealthPageResult",
+    "StealthSessionHandle",
+    "get_profile",
+    "get_reddit_thread",
+    "get_subreddit_posts",
+    "get_thread",
+    "page_title",
+    "parse_github_repo_url",
+    "parse_pdf_with_columns",
+    "parse_title",
+    "parse_vimeo_url",
+    "query_cdx",
+    "resolve_symbol",
+    "reverse_image_search",
+    "screenshot_url",
+    "search_reddit",
+    "BlueskyError",
+    "BlueskyPost",
+    "BlueskyProfile",
+    "get_bluesky_posts",
+    "get_bluesky_profile",
+    "get_bluesky_thread",
+    "search_bluesky",
+    "TelegramChannel",
+    "TelegramError",
+    "TelegramPost",
+    "get_telegram_channel",
+    "get_telegram_posts",
+    "search_telegram_channel",
+    "search_subreddit",
+    "search_tweets",
+    "smart_fetch",
+    "wayback_multi_generation_probe",
+]
