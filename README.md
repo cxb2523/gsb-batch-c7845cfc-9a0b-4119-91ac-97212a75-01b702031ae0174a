@@ -58,7 +58,7 @@ This app solves these problems by converting, cleaning, and merging your Google 
 3. **Choose cleaning options** - Keep the three toggles on to remove activity segments, remove duplicates, and split the result into files of 2,000 records or fewer for Google My Maps.
 4. **Click "Convert"** - The app merges and cleans everything. If a file can't be read, the error names it and offers to remove it and retry.
 5. **Download your results** - Get CSV (for Google My Maps), KML (for mapping tools), or JSON (for backup). Use **Start over** to convert a new set of files.
-6. **Getting place names** - Newer records in `timeline.json` don't include the place name. If you want to enhance your timeline data by retrieving the place name, you can use the apps script provided in the `tools` folder. Be sure to review the README in that directory for more information.
+6. **Getting place names** - Newer records in `timeline.json` don't include the place name. If you want to enhance your timeline data by retrieving the place name, you can use the apps script provided in the `tools` folder. It retries rate limits a few times, stops instead of burning quota if the API stays unavailable, and reports what was filled in, what was not found, and where to resume. Be sure to review the README in that directory for more information.
 
 ### Privacy Note
 
