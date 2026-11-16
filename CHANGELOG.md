@@ -2,6 +2,13 @@
 
 All notable changes to this package. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the package uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `getTitlesAtUrl(urls, options?)`: fetches several pages at once and resolves to one `GetTitleResult` per URL, in input order. A failing URL settles its own entry as a `GetTitleError` and never fails the batch; the promise never rejects. Takes every `getTitleAtUrl` option plus `concurrency` (default 8, capped at 32) and `totalTimeout`, after which unfinished entries settle as `TIMEOUT` while finished ones keep their results.
+- CLI: several URLs as arguments, or one per line on stdin when no argument is given, fetched with `--concurrency <n>`. `--json` prints an array of results when there is more than one URL. The exit code is 1 when any URL fails, 0 when all succeed, 2 for bad usage.
+
 ## [3.0.0] - 2026-09-25
 
 A rewrite in TypeScript with no runtime dependencies, published as both ES module and CommonJS, with types for each.

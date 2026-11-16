@@ -20,10 +20,16 @@ after(async () => {
 });
 
 function run(...arguments_) {
+  return runWithInput(undefined, ...arguments_);
+}
+
+// `input` is piped to the CLI's stdin; undefined closes stdin right away, as an empty pipe would.
+function runWithInput(input, ...arguments_) {
   return new Promise(resolve => {
-    execFile(process.execPath, [cli, ...arguments_], {encoding: 'utf8'}, (error, stdout, stderr) => {
+    const child = execFile(process.execPath, [cli, ...arguments_], {encoding: 'utf8'}, (error, stdout, stderr) => {
       resolve({code: error ? error.code : 0, stdout, stderr});
     });
+    child.stdin.end(input);
   });
 }
 
@@ -60,8 +66,7 @@ test('no URL prints the usage on stderr and exits 2', async () => {
   assert.match(stderr, /Usage/u);
 });
 
-test('two URLs, an unknown option, or a bad --timeout exit 2', async () => {
-  assert.equal((await run(`${server.url}/ok`, `${server.url}/ok`)).code, 2);
+test('an unknown option, a bad --timeout or a bad --concurrency exits 2', async () => {
   const unknown = await run('--nope', `${server.url}/ok`);
   assert.equal(unknown.code, 2);
   assert.match(unknown.stderr, /--nope/u);
@@ -70,13 +75,19 @@ test('two URLs, an unknown option, or a bad --timeout exit 2', async () => {
     assert.equal(bad.code, 2, timeout);
     assert.match(bad.stderr, /--timeout takes a positive number of milliseconds/u);
   }
+
+  for (const concurrency of ['--concurrency=abc', '--concurrency=0', '--concurrency=1.5']) {
+    const bad = await run(concurrency, `${server.url}/ok`);
+    assert.equal(bad.code, 2, concurrency);
+    assert.match(bad.stderr, /--concurrency takes a positive whole number/u);
+  }
 });
 
 test('--help and -h print the usage on stdout and exit 0', async () => {
   for (const flag of ['--help', '-h']) {
     const {code, stdout} = await run(flag);
     assert.equal(code, 0);
-    assert.match(stdout, /Usage\n\s+\$ get-title-at-url <url>/u);
+    assert.match(stdout, /Usage\n\s+\$ get-title-at-url <url\.\.\.>/u);
   }
 });
 
@@ -109,4 +120,53 @@ test('--timeout against a slow page exits 1 with TIMEOUT', async () => {
   const json = await run('--timeout=50', '--json', `${server.url}/slow`);
   assert.equal(json.code, 1);
   assert.equal(JSON.parse(json.stdout).error.code, 'TIMEOUT');
+});
+
+test('several URLs print one title per line in input order and exit 0', async () => {
+  const {code, stdout, stderr} = await run(`${server.url}/ok`, `${server.url}/ok`);
+  assert.equal(code, 0);
+  assert.equal(stdout, 'Fixture Page\nFixture Page\n');
+  assert.equal(stderr, '');
+});
+
+test('a failing URL in a batch names the URL on stderr and exits 1, the others still print', async () => {
+  const {code, stdout, stderr} = await run(`${server.url}/ok`, `${server.url}/not-found`);
+  assert.equal(code, 1);
+  assert.equal(stdout, 'Fixture Page\n');
+  assert.equal(stderr, `error: ${server.url}/not-found: HTTP 404 Not Found\n`);
+});
+
+test('--json with several URLs prints an array of results in input order', async () => {
+  const {code, stdout} = await run('--json', `${server.url}/not-found`, `${server.url}/ok`);
+  assert.equal(code, 1);
+  const results = JSON.parse(stdout);
+  assert.equal(results.length, 2);
+  assert.equal(results[0].error.code, 'HTTP_ERROR');
+  assert.equal(results[0].status, 404);
+  assert.deepEqual(results[1], {title: 'Fixture Page', url: `${server.url}/ok`, status: 200});
+});
+
+test('with no argument, URLs come one per line from stdin', async () => {
+  const {code, stdout} = await runWithInput(`${server.url}/ok\n\n${server.url}/not-found\n`, '--json');
+  assert.equal(code, 1);
+  const results = JSON.parse(stdout);
+  assert.equal(results.length, 2);
+  assert.equal(results[0].title, 'Fixture Page');
+  assert.equal(results[1].error.code, 'HTTP_ERROR');
+});
+
+test('all URLs from stdin succeeding exits 0', async () => {
+  const {code, stdout, stderr} = await runWithInput(`${server.url}/ok\n${server.url}/ok\n`);
+  assert.equal(code, 0);
+  assert.equal(stdout, 'Fixture Page\nFixture Page\n');
+  assert.equal(stderr, '');
+});
+
+test('--concurrency limits how many pages are fetched at once', async () => {
+  server.stats.maxConcurrent = 0;
+  const urls = Array.from({length: 4}, () => `${server.url}/held`);
+  const {code, stdout} = await run('--concurrency', '2', ...urls);
+  assert.equal(code, 0);
+  assert.equal(stdout, 'Held Page\n'.repeat(4));
+  assert.equal(server.stats.maxConcurrent, 2);
 });

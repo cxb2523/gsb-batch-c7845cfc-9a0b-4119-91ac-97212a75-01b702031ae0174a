@@ -127,6 +127,26 @@ It resolves to one of:
 | `NOT_HTML` | The response is not `text/html` or `application/xhtml+xml` |
 | `NO_TITLE` | The page has no title |
 
+### getTitlesAtUrl(urls, options?)
+
+Fetches several pages at once and resolves to one result per URL, in the order of `urls`. Each entry is the same `GetTitleResult` `getTitleAtUrl` resolves to; a failing URL settles its own entry as a `GetTitleError` and never fails the others, and the promise never rejects.
+
+```js
+import {getTitlesAtUrl} from 'get-title-at-url';
+
+const results = await getTitlesAtUrl(['https://example.com/', 'https://example.org/']);
+for (const {title, error} of results) {
+  console.log(title ?? error.message);
+}
+```
+
+It takes every `getTitleAtUrl` option (applied to each URL), plus:
+
+| Option | Type | Default | What it does |
+|---|---|---|---|
+| `concurrency` | `number` | `8` | At most this many requests run at once (capped at 32) |
+| `totalTimeout` | `number` | none | Milliseconds before the whole batch stops; entries still unfinished then settle as `TIMEOUT`, finished ones keep their results |
+
 ### extractTitle(html, options?)
 
 Returns the title of an HTML string, or `undefined` when there is none. Synchronous, with no network and no DOM, so it runs anywhere.
@@ -160,16 +180,18 @@ Or install it once with `npm install --global get-title-at-url`.
 
 ```text
 Usage
-  $ get-title-at-url <url> [--timeout <ms>] [--json]
+  $ get-title-at-url <url...> [--timeout <ms>] [--concurrency <n>] [--json]
+  $ ... | get-title-at-url [options]   (URLs, one per line, on stdin)
 
 Options
-  --timeout <ms>  Give up after this many milliseconds (default 10000)
-  --json          Print the whole result as JSON, even on failure
-  --help, -h      Show this help
-  --version, -v   Show the version
+  --timeout <ms>      Give up on a page after this many milliseconds (default 10000)
+  --concurrency <n>   Fetch at most this many pages at once (default 8)
+  --json              Print the whole result as JSON, even on failure (an array when there is more than one URL)
+  --help, -h          Show this help
+  --version, -v       Show the version
 ```
 
-It prints the title and exits `0`. When it cannot get one it prints `error: <message>` on stderr and exits `1`; bad usage exits `2`. With `--json` it prints the whole result on stdout:
+It prints each title on its own line and exits `0`. When it cannot get a title it prints `error: <message>` on stderr (naming the URL when there is more than one) and exits `1` if any URL failed; bad usage exits `2`. With `--json` it prints the whole result on stdout — a single object for one URL, an array in input order for several:
 
 ```json
 {

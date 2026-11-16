@@ -116,12 +116,23 @@ const routes = {
 
 export async function startFixtureServer() {
   const received = new Map();
-  const stats = {endlessBytes: 0};
+  const stats = {endlessBytes: 0, concurrent: 0, maxConcurrent: 0};
   const server = createServer((request, response) => {
     const {pathname, searchParams} = new URL(request.url, 'http://127.0.0.1');
     if (pathname === '/record') {
       received.set(searchParams.get('id'), request.headers);
       send(response, 200, page('Recorded'));
+      return;
+    }
+
+    // Holds the response for a moment so the batch tests can measure how many requests run at once.
+    if (pathname === '/held') {
+      stats.concurrent += 1;
+      stats.maxConcurrent = Math.max(stats.maxConcurrent, stats.concurrent);
+      response.on('close', () => {
+        stats.concurrent -= 1;
+      });
+      later(response, 100, () => send(response, 200, page('Held Page')));
       return;
     }
 

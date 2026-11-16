@@ -76,6 +76,13 @@ The longest delay timers accept.
 */
 const MAX_TIMEOUT = 2_147_483_647;
 
+const DEFAULT_CONCURRENCY = 8;
+
+/**
+A batch may not widen past this many requests at once.
+*/
+const MAX_CONCURRENCY = 32;
+
 const DEFAULT_MAX_BYTES = 1_048_576;
 
 const ACCEPT = 'text/html,application/xhtml+xml;q=0.9,*/*;q=0.1';
@@ -145,6 +152,70 @@ export async function getTitleAtUrl(url: string | URL, options: GetTitleOptions 
 }
 
 export default getTitleAtUrl;
+
+export type GetTitlesOptions = GetTitleOptions & {
+  /**
+  At most this many requests run at once. Default `8`; values past 32 are capped there, values under 1 become 1.
+  */
+  concurrency?: number;
+  /**
+  Milliseconds before the whole batch stops; entries still unfinished then settle as `TIMEOUT`, while finished ones keep their results. No limit by default. Values past 2^31 - 1 (about 24.8 days) are capped there.
+  */
+  totalTimeout?: number;
+};
+
+/**
+Fetch several pages and get each of their titles.
+
+One request per URL, at most `concurrency` of them at once; the results come back in the order of `urls`, each the same `GetTitleResult` `getTitleAtUrl` resolves to. A failing URL settles its own entry as a `GetTitleError` and never fails the others, and the promise never rejects.
+
+@param urls - Absolute `http:` or `https:` URLs.
+@param options - Every `GetTitleOptions` (applied to each URL), plus `concurrency` and a `totalTimeout` for the whole batch.
+
+@example
+```
+import {getTitlesAtUrl} from 'get-title-at-url';
+
+const results = await getTitlesAtUrl(['https://example.com/', 'https://example.org/']);
+for (const {title, error} of results) {
+  console.log(title ?? error.message);
+}
+```
+*/
+export async function getTitlesAtUrl(urls: Array<string | URL>, options: GetTitlesOptions = {}): Promise<GetTitleResult[]> {
+  const settings = options ?? {};
+  const list = Array.isArray(urls) ? urls : [];
+  const concurrency = Math.max(1, toLimit(settings.concurrency, DEFAULT_CONCURRENCY, MAX_CONCURRENCY));
+  const controller = new AbortController();
+  const timer = typeof settings.totalTimeout === 'number' && !Number.isNaN(settings.totalTimeout)
+    ? setTimeout(() => {
+      controller.abort();
+    }, toLimit(settings.totalTimeout, 0, MAX_TIMEOUT))
+    : undefined;
+  // An entry still waiting when the total timeout fires reaches getTitleAtUrl with an already-aborted signal and settles as TIMEOUT without touching the network.
+  const signal = anySignal([settings.signal, controller.signal]);
+  const results: GetTitleResult[] = Array.from({length: list.length});
+  const entries = list.entries();
+  const worker = async (): Promise<void> => {
+    for (const [index, url] of entries) {
+      try {
+        // eslint-disable-next-line no-await-in-loop -- each worker fetches one URL after another; `concurrency` workers run side by side
+        results[index] = await getTitleAtUrl(url, {...settings, signal});
+      } catch (error) {
+        // The single-URL call never rejects; this keeps even an options object that throws when read from breaking the batch.
+        results[index] = failure(new GetTitleError('NETWORK_ERROR', `Request failed: ${describeError(error)}`, {url: describe(url), cause: error}));
+      }
+    }
+  };
+
+  try {
+    await Promise.all(Array.from({length: Math.min(concurrency, list.length)}, worker));
+  } finally {
+    clearTimeout(timer);
+  }
+
+  return results;
+}
 
 async function fetchTitle(target: URL, options: GetTitleOptions): Promise<GetTitleResult> {
   const timeout = toLimit(options.timeout, DEFAULT_TIMEOUT, MAX_TIMEOUT);
