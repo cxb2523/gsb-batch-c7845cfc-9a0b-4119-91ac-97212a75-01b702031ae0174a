@@ -1,0 +1,79 @@
+[project]
+name = "xx-auto-jobs-applier"
+version = "0.1.0"
+description = "AI-assisted job search and application automation for hh.ru"
+requires-python = ">=3.12"
+dependencies = [
+    "httpx>=0.28.1",
+    "jsonschema==4.23.0",
+    "jsonschema-specifications==2023.12.1",
+    "langchain==1.2.15",
+    "langchain-community==0.4.1",
+    "langchain-core==1.3.0",
+    "langchain-google-genai==4.2.2",
+    "langchain-openai==1.1.7",
+    "Levenshtein==0.25.1",
+    "loguru==0.7.2",
+    "PyYAML==6.0.2",
+    "playwright",
+    "python-dotenv",
+    "telethon==1.39.0",
+    "python-telegram-bot==21.9",
+    "sqlalchemy>=2.0.51",
+    "pymorphy3>=2.0.6",
+]
+
+[dependency-groups]
+dev = [
+    "pytest==8.3.4",
+    "pytest-asyncio==0.26.0",
+    "pytest-cov==6.0.0",
+    "pytest-mock==3.14.0",
+]
+
+# Application, not a distributable package — uv manages the env without building it.
+[tool.uv]
+package = false
+
+[tool.black]
+line-length = 100
+target-version = ['py312']
+include = '\.pyi?$'
+extend-exclude = '''
+# A regex preceded with ^/ will apply only to files and directories
+# in the root of the project.
+^/build/
+^/dist/
+^/\.eggs/
+^/\.git/
+^/\.hg/
+^/\.mypy_cache/
+^/\.nox/
+^/\.tox/
+^/\.venv/
+^/venv/
+'''
+
+[tool.isort]
+profile = "black"
+line_length = 100
+multi_line_output = 3
+include_trailing_comma = true
+force_grid_wrap = 0
+use_parentheses = true
+ensure_newline_before_comments = true
+skip = [
+    ".git",
+    ".eggs",
+    ".hg",
+    ".mypy_cache",
+    ".nox",
+    ".tox",
+    ".venv",
+    "venv",
+    "build",
+    "dist"]
+
+[tool.pytest.ini_options]
+testpaths = ["./tests/"]
+filterwarnings = ["ignore::DeprecationWarning", "ignore:Support for class-based"]
