@@ -2,10 +2,12 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter
 
+from app.collect_router import router as collect_router
 from app.config import get_settings
 from app.schemas import HealthResponse, ProjectResponse
 
 router = APIRouter()
+router.include_router(collect_router)
 
 
 @router.get("/health", tags=["system"], response_model=HealthResponse)
@@ -32,6 +34,7 @@ def project_info() -> ProjectResponse:
             "项目欢迎页",
             "健康检查接口",
             "项目元信息接口",
+            "可续取采集批次接口",
             "Swagger / ReDoc 文档",
         ],
     )
