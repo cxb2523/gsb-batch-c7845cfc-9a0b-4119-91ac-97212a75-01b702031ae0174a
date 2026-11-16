@@ -77,10 +77,82 @@ if(_h){
 /* Insert body */
 document.body.innerHTML=_b;
 
-/* FIX4: re-execute scripts sequentially, preserving order */
+/* FIX4: re-execute scripts sequentially, preserving order.
+   Every external script is settled exactly once (onload, onerror or
+   timeout), so a 404 / blocked / hanging script can never stall the
+   chain. Inline scripts still run synchronously and in source order. */
 var x84kb1=0;
+var _scriptTimeout=8000;
+var _stat={ok:0,fail:0,inline:0,failures:[]};
+var _settledAll=false;
+var _panel=null;
+
+/* Visible settlement panel: success/failure counts plus failed src+reason */
+function _renderReport(){
+  if(!_panel){
+    _panel=document.createElement('div');
+    _panel.id='_restore_report';
+    _panel.setAttribute('data-restore-report','1');
+    _panel.setAttribute('style','position:fixed;left:8px;bottom:8px;z-index:2147483647;max-width:min(520px,80vw);max-height:45vh;overflow:auto;box-sizing:border-box;padding:8px 12px;border:1px solid #c9a227;border-radius:4px;background:#fffbeb;color:#111;font:12px/1.6 ui-monospace,SFMono-Regular,Consolas,monospace;text-align:left;box-shadow:0 2px 10px rgba(0,0,0,.18);');
+  }
+  if(!_panel.parentNode){
+    _host().appendChild(_panel);
+  }
+  while(_panel.firstChild) _panel.removeChild(_panel.firstChild);
+
+  var _head=document.createElement('div');
+  _head.className='_restore_summary';
+  _head.textContent='还原结算：成功 '+_stat.ok+' / 失败 '+_stat.fail+(_settledAll?'':'（还原中…）');
+  _panel.appendChild(_head);
+
+  var _inlineLine=document.createElement('div');
+  _inlineLine.textContent='内联脚本：'+_stat.inline+' 个已按序执行';
+  _panel.appendChild(_inlineLine);
+
+  if(_stat.failures.length){
+    var _failTitle=document.createElement('div');
+    _failTitle.textContent='失败脚本（'+_stat.failures.length+'）：';
+    _panel.appendChild(_failTitle);
+    var _failList=document.createElement('ol');
+    _failList.setAttribute('style','margin:2px 0 0 18px;padding:0;');
+    for(var _fi=0;_fi<_stat.failures.length;_fi++){
+      var _li=document.createElement('li');
+      _li.setAttribute('data-src',_stat.failures[_fi].src);
+      _li.textContent=_stat.failures[_fi].src+' — '+_stat.failures[_fi].reason;
+      _failList.appendChild(_li);
+    }
+    _panel.appendChild(_failList);
+  }
+}
+
+function _fail(_src,_reason){
+  var _rec={src:_src,reason:_reason};
+  _stat.fail++;
+  _stat.failures.push(_rec);
+  return _rec;
+}
+
+/* A classic <script> fetch already in flight cannot be cancelled by the page,
+   so a resource that answers after the timeout may still execute. Keep that
+   visible instead of hiding it: annotate the failure record (auditable). */
+function _noteLate(_rec){
+  if(!_rec||_rec.late) return;
+  _rec.late=true;
+  _rec.reason+='；该脚本在超时后仍返回，浏览器可能已延迟执行';
+  _renderReport();
+}
+
+function _host(){
+  /* Scripts and the panel go into <body> when available, otherwise the
+     document element, so a missing body can't break the chain. */
+  return document.body||document.documentElement;
+}
+
 function _next(){
-  if(x84kb1>=UbaiTH.length) return;
+  if(x84kb1>=UbaiTH.length){
+    if(!_settledAll){ _settledAll=true; _renderReport(); }
+    return;
+  }
   var BfV2mQ=UbaiTH[x84kb1++];
   var ecQJQH=document.createElement('script');
   var a48hco=BfV2mQ[2]||{};
@@ -88,16 +160,58 @@ function _next(){
     try{ ecQJQH.setAttribute(jnLqcr,a48hco[jnLqcr]); }catch(_e){}
   }
   if(BfV2mQ[0]){
-    ecQJQH.src=BfV2mQ[1];
+    var _srcUrl=BfV2mQ[1];
+    var _done=false;
+    var _timer=null;
+    var _failRec=null;
+    var _settle=function(_ok,_reason){
+      if(_done) return;
+      _done=true;
+      if(_timer!==null){ clearTimeout(_timer); _timer=null; }
+      if(_ok){
+        _stat.ok++;
+      }else{
+        _failRec=_fail(_srcUrl,_reason);
+        /* Best-effort: drop the dead node so it is not left in the DOM.
+           (The in-flight fetch itself cannot be cancelled by the page.) */
+        try{ if(ecQJQH.parentNode) ecQJQH.parentNode.removeChild(ecQJQH); }catch(_e){}
+      }
+      _renderReport();
+      _next();
+    };
     ecQJQH.async=false;
-    ecQJQH.onload=ecQJQH.onerror=function(){ _next(); };
-    document.body.appendChild(ecQJQH);
+    ecQJQH.onload=function(){
+      if(_done){ _noteLate(_failRec); return; }
+      _settle(true,'');
+    };
+    ecQJQH.onerror=function(){
+      if(_done){ _noteLate(_failRec); return; }
+      _settle(false,'加载失败（onerror：404、跨域拦截或网络错误）');
+    };
+    ecQJQH.src=_srcUrl;
+    _timer=setTimeout(function(){ _settle(false,'加载超时（timeout：'+_scriptTimeout+' 毫秒内无响应）'); },_scriptTimeout);
+    try{
+      _host().appendChild(ecQJQH);
+    }catch(_e){
+      _settle(false,'脚本插入失败（'+( _e&&_e.message?_e.message:String(_e) )+'）');
+    }
   }else{
     ecQJQH.textContent=BfV2mQ[1];
-    document.body.appendChild(ecQJQH);
+    var _inlineOk=true;
+    try{
+      _host().appendChild(ecQJQH);
+    }catch(_e){
+      /* A runtime error raised by the inline script itself does not reach
+         here (it surfaces as a window error), but insertion failure does.
+         Either way the remaining chain must keep running. */
+      _inlineOk=false;
+    }
+    if(_inlineOk) _stat.inline++;
+    _renderReport();
     _next();
   }
 }
+_renderReport();
 _next();
 }
 
