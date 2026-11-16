@@ -326,7 +326,7 @@ completed with stop_reason max_items / max_pages means a limit ended it; stopped
 
 Each result has url and, when the crawl has output_format, content_status (pending, fetched, failed) and, once fetched, content_url: pass it to crawl_content as content.
 
-While the crawl runs the list is partial (partial=true): call again later with the returned next_cursor to get only the URLs kept since. A stopped crawl can still add URLs from pages fetched before the stop for up to 10 minutes, so next_cursor stays set during that window: call again later. next_cursor is null once the crawl ended and every URL was read.`,
+While the crawl runs the list is partial (partial=true): call again later with the returned next_cursor to get only the URLs kept since. A stopped crawl can still add URLs from pages fetched before the stop for up to 10 minutes, so next_cursor stays set during that window: call again later. next_cursor is null once the crawl ended and every URL was read. If a page of the read fails, the reply keeps the URLs read so far and carries a failure with the error's code and message: call again with next_cursor to continue where the read stopped.`,
       inputSchema: {
         crawl_id: crawlIdSchema,
         cursor: z.string().nullish().describe("next_cursor from a previous crawl_results call, to continue from there"),
@@ -348,7 +348,14 @@ While the crawl runs the list is partial (partial=true): call again later with t
           count: read.results.length,
           partial,
           next_cursor: read.next_cursor,
-          ...(partial ? { note: resultsNote(read.status, ended, full) } : {}),
+          ...(read.failure
+            ? {
+                failure: read.failure,
+                note: `A page of the read failed (${read.failure.code}), so the URLs already read are kept and the read stopped early. Call crawl_results again with next_cursor to continue where it stopped.`,
+              }
+            : partial
+              ? { note: resultsNote(read.status, ended, full) }
+              : {}),
           results: read.results,
         });
       } catch (e) {

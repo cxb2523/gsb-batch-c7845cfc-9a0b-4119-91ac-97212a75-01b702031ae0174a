@@ -471,17 +471,35 @@ export const DEFAULT_LIMIT = 100;
 /** Default wait in seconds, below the 60 s after which many MCP clients cancel a tool call. */
 export const DEFAULT_WAIT_SECONDS = 50;
 
+/** Why a read stopped early: the page after next_cursor failed even after its retries. */
+export interface ResultsFailure {
+  /** The CrawlError code the failing request mapped to. */
+  code: string;
+  message: string;
+  status?: number;
+  detail?: string;
+  server_code?: string;
+  retry_after?: number;
+}
+
 export interface ResultsRead {
   results: CrawlResult[];
   /** Pass back as cursor to continue. Null once the crawl ended and every result was read. */
   next_cursor: string | null;
   status: string;
+  /**
+   * Set when a page after the first failed and the read stopped early, keeping what was read.
+   * next_cursor is then the failed page's cursor: pass it back as cursor to resume without
+   * skipping or repeating results.
+   */
+  failure?: ResultsFailure;
 }
 
 /**
  * Reads results from `cursor` on, following next_cursor until it is null (crawl ended,
  * all read), a page comes back empty (a running crawl has nothing new yet), or
- * `limit` results are read.
+ * `limit` results are read. A first-page failure throws; a later page's failure returns
+ * what was read, with `failure` saying why and next_cursor set to resume from.
  */
 export async function readResults(
   id: string,
@@ -490,16 +508,31 @@ export async function readResults(
   const limit = opts.limit ?? DEFAULT_LIMIT;
   const results: CrawlResult[] = [];
   let cursor = opts.cursor;
+  let status: string | undefined;
   for (;;) {
-    const page = await getCrawl(id, { ...opts, cursor, limit: limit - results.length });
+    let page: CrawlWithResults;
+    try {
+      page = await getCrawl(id, { ...opts, cursor, limit: limit - results.length });
+    } catch (e) {
+      // Nothing read yet: the caller gets the error as before. Otherwise keep what was read and
+      // hand back the failed page's own cursor, so a retry refetches exactly that page.
+      if (status === undefined) throw e;
+      return { results, next_cursor: cursor ?? null, status, failure: resultsFailure(e) };
+    }
     const rows = page.results ?? [];
     results.push(...rows);
+    status = page.status;
     const next = page.next_cursor ?? null;
     if (next === null || results.length >= limit || rows.length === 0) {
-      return { results, next_cursor: next, status: page.status };
+      return { results, next_cursor: next, status };
     }
     cursor = next;
   }
+}
+
+function resultsFailure(e: unknown): ResultsFailure {
+  if (e instanceof CrawlError) return e.toJSON();
+  return { code: "CRAWL_FAILED", message: e instanceof Error ? e.message : String(e) };
 }
 
 /**

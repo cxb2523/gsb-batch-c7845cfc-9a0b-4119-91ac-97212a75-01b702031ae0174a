@@ -299,6 +299,90 @@ test("readResults stops at limit and asks only for what is left", async () => {
   assert.deepEqual(limits, ["3", "1"]);
 });
 
+test("readResults keeps what it read when a later page fails after its retries, and resumes from its cursor", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let pageTwoFails = true;
+  const cursors: Array<string | null> = [];
+  const fetchImpl = (async (input: RequestInfo | URL) => {
+    const c = new URL(String(input)).searchParams.get("cursor");
+    cursors.push(c);
+    if (c === "p2") {
+      return pageTwoFails
+        ? jsonResponse({ code: "x", title: "x", status: 503 }, 503)
+        : jsonResponse({
+            ...crawl("completed"),
+            results: [{ url: "https://example.com/product/3" }],
+            next_cursor: null,
+          });
+    }
+    return jsonResponse({
+      ...crawl("running"),
+      results: [{ url: "https://example.com/product/1" }, { url: "https://example.com/product/2" }],
+      next_cursor: "p2",
+    });
+  }) as typeof fetch;
+
+  const read = await settle(t, readResults("c_1", { apiKey: "k", fetchImpl }));
+  assert.deepEqual(
+    read.results.map((r) => r.url),
+    ["https://example.com/product/1", "https://example.com/product/2"]
+  );
+  assert.equal(read.next_cursor, "p2", "the failed page's cursor, so a retry refetches exactly that page");
+  assert.equal(read.status, "running");
+  assert.equal(read.failure?.code, "CRAWL_FAILED");
+  assert.equal(read.failure?.status, 503);
+  assert.match(read.failure?.message ?? "", /Crawl request failed/);
+  assert.equal(cursors.filter((c) => c === "p2").length, 4, "1 try and 3 retries on the failing page");
+
+  pageTwoFails = false;
+  const resumed = await readResults("c_1", { apiKey: "k", fetchImpl, cursor: read.next_cursor ?? undefined });
+  assert.deepEqual(
+    resumed.results.map((r) => r.url),
+    ["https://example.com/product/3"],
+    "the resume neither skips nor repeats results"
+  );
+  assert.equal(resumed.next_cursor, null);
+  assert.equal(resumed.status, "completed");
+  assert.equal(resumed.failure, undefined);
+});
+
+test("readResults does not retry a later page's 500 and still returns what it read", async () => {
+  let calls = 0;
+  const fetchImpl = (async (input: RequestInfo | URL) => {
+    calls++;
+    const c = new URL(String(input)).searchParams.get("cursor");
+    if (c === "p2") return jsonResponse({ code: "x", title: "x", status: 500 }, 500);
+    return jsonResponse({
+      ...crawl("completed"),
+      results: [{ url: "https://example.com/product/1" }],
+      next_cursor: "p2",
+    });
+  }) as typeof fetch;
+  const read = await readResults("c_1", { apiKey: "k", fetchImpl });
+  assert.deepEqual(
+    read.results.map((r) => r.url),
+    ["https://example.com/product/1"]
+  );
+  assert.equal(read.next_cursor, "p2");
+  assert.equal(read.status, "completed");
+  assert.equal(read.failure?.code, "CRAWL_FAILED");
+  assert.equal(read.failure?.status, 500);
+  assert.equal(calls, 2, "a 500 is not retried");
+});
+
+test("readResults throws when the first page fails", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const plain = (async () => jsonResponse({ code: "x", title: "x", status: 500 }, 500)) as typeof fetch;
+  await assert.rejects(readResults("c_1", { apiKey: "k", fetchImpl: plain }), (e: unknown) => {
+    return e instanceof CrawlError && e.code === "CRAWL_FAILED" && e.status === 500;
+  });
+  const { calls, fetchImpl } = sequence([503, 503, 503, 503, 503]);
+  await assert.rejects(settle(t, readResults("c_1", { apiKey: "k", fetchImpl })), (e: unknown) => {
+    return e instanceof CrawlError && e.code === "CRAWL_FAILED" && e.status === 503;
+  });
+  assert.equal(calls.length, 4, "the first page uses the GET retry policy, then throws");
+});
+
 test("waitForCrawl polls with limit=1 until terminal and drops the results page", async () => {
   const statuses = ["running", "running", "completed"];
   const limits: Array<string | null> = [];

@@ -236,6 +236,33 @@ test("crawl_results on an ended crawl still says partial when the call filled it
   assert.equal(body.note, "More results remain: call crawl_results again with next_cursor.");
 });
 
+test("crawl_results keeps the URLs read when a page fails mid-read and says how to continue", async () => {
+  const { handlers } = register();
+  const out = await withFetch(
+    (url) => {
+      const c = new URL(url).searchParams.get("cursor");
+      return c === "p2"
+        ? jsonResponse({ code: "x", title: "x", status: 500 }, 500)
+        : jsonResponse({ ...crawl("completed"), results: [{ url: "https://example.com/p/1" }], next_cursor: "p2" });
+    },
+    () => handlers.crawl_results({ crawl_id: "c_1" })
+  );
+  const body = JSON.parse(out.content[0].text);
+  assert.equal(body.ok, true);
+  assert.equal(body.count, 1);
+  assert.equal(body.partial, true);
+  assert.equal(body.next_cursor, "p2");
+  assert.equal(body.failure.code, "CRAWL_FAILED");
+  assert.equal(body.failure.status, 500);
+  assert.match(body.failure.message, /Crawl request failed/);
+  assert.match(body.note, /failed/);
+  assert.match(body.note, /next_cursor/);
+  assert.deepEqual(
+    body.results.map((r: { url: string }) => r.url),
+    ["https://example.com/p/1"]
+  );
+});
+
 test("crawl_create's schema takes only its own inputs and drops unknown ones", () => {
   const shape = register().configs.crawl_create.inputSchema;
   const parsed = z.object(shape).parse({ url: "https://example.com/", depth: 1, extract_calls: 3 });
