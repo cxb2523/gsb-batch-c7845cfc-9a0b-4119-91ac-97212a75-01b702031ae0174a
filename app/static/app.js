@@ -202,6 +202,25 @@ const App = (() => {
   }
 
   function renderDashboard(d) {
+    // Scrape failure banner — never silently show stale data
+    const banner = document.getElementById("scrape-error-banner");
+    if (banner) {
+      if (d.scrape_ok === false) {
+        banner.innerHTML =
+          '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>' +
+          "<span><strong>Couldn't refresh from KPLC.</strong> " +
+          escapeHtml(d.scrape_error || "The portal could not be reached.") +
+          " Showing last saved data." +
+          (d.last_scrape_at
+            ? " Last successful sync: " + formatDate(new Date(d.last_scrape_at)) + "."
+            : "") +
+          "</span>";
+        banner.style.display = "flex";
+      } else {
+        banner.style.display = "none";
+      }
+    }
+
     // Meter number badge
     const meterNumEl = document.getElementById("hero-meter-num");
     if (meterNumEl)
@@ -337,6 +356,9 @@ const App = (() => {
       manual: "Manual",
       sms: "SMS",
       kplc: "KPLC",
+      api_serial: "KPLC API · meter no.",
+      api_account: "KPLC API · account",
+      html_fallback: "KPLC HTML fallback",
     };
     if (!src) return "Unknown";
     return (
@@ -837,7 +859,16 @@ const App = (() => {
 
     try {
       const res = await api("/dashboard/refresh", "POST");
-      toast("KPLC details updated successfully!", "success");
+      if (res.scrape_ok === false) {
+        toast(
+          res.scrape_error
+            ? "KPLC fetch failed: " + res.scrape_error
+            : "KPLC fetch failed — showing saved data",
+          "error",
+        );
+      } else {
+        toast("KPLC details updated successfully!", "success");
+      }
       await loadDashboard();
     } catch (e) {
       toast(e.detail || "Failed to fetch tokens from KPLC", "error");

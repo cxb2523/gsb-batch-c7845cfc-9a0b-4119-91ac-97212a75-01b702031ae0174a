@@ -42,11 +42,18 @@ async def refresh_kplc_data(
         raise HTTPException(status_code=404, detail="No meter registered")
 
     try:
-        await _poll_single_meter(meter, db, source="manual_fetch")
-        meter.last_scrape_at = datetime.now(timezone.utc)
-        stats = await compute_usage(meter, db)
-        await save_usage_snapshot(meter.id, stats, db)
-        await db.commit()
+        scrape_result = await _poll_single_meter(meter, db, source="manual_fetch")
+        if scrape_result.success:
+            meter.last_scrape_at = datetime.now(timezone.utc)
+            stats = await compute_usage(meter, db)
+            await save_usage_snapshot(meter.id, stats, db)
+            await db.commit()
+        else:
+            # Failed scrape: nothing was written, and last_scrape_at must
+            # stay where it was so the staleness remains visible.
+            await db.rollback()
+            # Rollback expires ORM attributes — re-load before reading them.
+            await db.refresh(meter)
     except Exception as e:
         await db.rollback()
         raise HTTPException(
@@ -54,8 +61,14 @@ async def refresh_kplc_data(
         )
 
     return {
-        "status": "ok",
-        "message": "KPLC data updated successfully",
+        "status": "ok" if scrape_result.success else "error",
+        "message": (
+            "KPLC data updated successfully"
+            if scrape_result.success
+            else "KPLC fetch failed — showing previously saved data"
+        ),
+        "scrape_ok": scrape_result.success,
+        "scrape_error": scrape_result.error,
         "last_scrape_at": meter.last_scrape_at,
     }
 
@@ -94,14 +107,32 @@ async def get_dashboard(
 
     is_stale = last_scrape_at is None or (now - last_scrape_at) >= min_interval
 
+    # Three-state scrape rule: a failed scrape must neither advance
+    # last_scrape_at nor write a usage snapshot. scrape_ok/scrape_error are
+    # surfaced to the frontend so it can warn instead of silently showing
+    # stale data.
+    scrape_ok = True
+    scrape_error = None
+
     if is_stale:
         try:
-            await _poll_single_meter(meter, db, source="page_refresh")
-            meter.last_scrape_at = now
-            await db.flush()
+            scrape_result = await _poll_single_meter(meter, db, source="page_refresh")
+            if scrape_result.success:
+                meter.last_scrape_at = now
+                await db.flush()
+            else:
+                scrape_ok = False
+                scrape_error = scrape_result.error or "KPLC query failed"
+                logger.warning(
+                    "Live KPLC fetch on dashboard load failed for meter %s: %s",
+                    meter.meter_number,
+                    scrape_error,
+                )
         except Exception as e:
             # Don't break the dashboard if KPLC is slow/unreachable —
             # fall back to whatever's already in the DB.
+            scrape_ok = False
+            scrape_error = str(e)
             logger.warning(
                 "Live KPLC fetch on dashboard load failed for meter %s: %s",
                 meter.meter_number,
@@ -109,7 +140,8 @@ async def get_dashboard(
             )
 
     stats = await compute_usage(meter, db)
-    await save_usage_snapshot(meter.id, stats, db)
+    if scrape_ok:
+        await save_usage_snapshot(meter.id, stats, db)
     await db.flush()
 
     # Reload tokens in case the live fetch above inserted new ones (the
@@ -137,6 +169,8 @@ async def get_dashboard(
         total_tokens_count=total_tokens,
         telegram_linked=current_user.telegram_chat_id is not None,
         last_scrape_at=meter.last_scrape_at,
+        scrape_ok=scrape_ok,
+        scrape_error=scrape_error,
     )
 
 

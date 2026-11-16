@@ -29,14 +29,44 @@ logger = logging.getLogger(__name__)
 settings = get_settings()
 
 
+class ScrapeStatus:
+    """Three-state outcome of a single collection attempt."""
+    OK = "ok"          # query succeeded and returned records
+    EMPTY = "empty"    # query succeeded but there are genuinely no records
+    FAILED = "failed"  # no query path produced a valid response
+
+
+# Query path identifiers — stored on each Token row for traceability
+# (so we can tell which path broke when KPLC changes their portal).
+SOURCE_API_SERIAL = "api_serial"      # newContractList?serialNumberMeter=...
+SOURCE_API_ACCOUNT = "api_account"    # newContractList?accountReference=...
+SOURCE_HTML_FALLBACK = "html_fallback"
+
+
+@dataclass
+class PathOutcome:
+    """Outcome of a single query path (API serial / API account / HTML fallback)."""
+    path: str
+    error: Optional[str] = None  # None = the path returned a structurally valid response
+
+    @property
+    def ok(self) -> bool:
+        return self.error is None
+
+
 @dataclass
 class ScrapResult:
     """Result of a scrape attempt."""
     tokens: list[ScrapedToken]
     tariff: Optional[str]
-    success: bool
+    status: str  # one of ScrapeStatus.OK / EMPTY / FAILED
     error: Optional[str] = None
     account_reference: Optional[str] = None  # KPLC's accountReference, stored for future queries
+
+    @property
+    def success(self) -> bool:
+        """True when at least one query path returned a valid response (incl. empty)."""
+        return self.status != ScrapeStatus.FAILED
 
 
 async def scrape_meter_tokens(
@@ -47,8 +77,10 @@ async def scrape_meter_tokens(
     """
     Fetch and parse KPLC self-service portal for a given meter number.
 
-    Returns a ScrapResult with parsed token records and tariff info.
-    Fails gracefully — returns empty list and error message on failure.
+    Three-state outcome:
+    - OK:     at least one path returned a valid response containing records
+    - EMPTY:  at least one path returned a valid response, none had records
+    - FAILED: every path failed (network error, non-200, unparseable response)
     """
     close_session = False
     if session is None:
@@ -64,16 +96,28 @@ async def scrape_meter_tokens(
         close_session = True
 
     try:
-        tokens, tariff, account_reference = await _fetch_and_parse(session, meter_number, account_number)
+        tokens, tariff, account_reference, outcomes = await _fetch_and_parse(
+            session, meter_number, account_number
+        )
+
+        if any(o.ok for o in outcomes):
+            status = ScrapeStatus.OK if tokens else ScrapeStatus.EMPTY
+            error = None
+        else:
+            status = ScrapeStatus.FAILED
+            error = "; ".join(f"{o.path}: {o.error}" for o in outcomes if o.error) or \
+                "all KPLC query paths failed"
+
         return ScrapResult(
             tokens=tokens,
             tariff=tariff or (tokens[0].tariff if tokens else None),
-            success=True,
+            status=status,
+            error=error,
             account_reference=account_reference,
         )
     except Exception as exc:
         logger.warning("KPLC sync: meter %s returned error (%s)", meter_number, exc)
-        return ScrapResult(tokens=[], tariff=None, success=False, error=str(exc))
+        return ScrapResult(tokens=[], tariff=None, status=ScrapeStatus.FAILED, error=str(exc))
     finally:
         if close_session:
             await session.close()
@@ -136,29 +180,69 @@ async def _fetch_and_parse(
     session: aiohttp.ClientSession,
     meter_number: str,
     account_number: Optional[str],
-) -> tuple[list[ScrapedToken], Optional[str], Optional[str]]:
+) -> tuple[list[ScrapedToken], Optional[str], Optional[str], list[PathOutcome]]:
     """
-    Query KPLC production API for token purchase history and contract info.
-    Returns (tokens, tariff, account_reference).
+    Query KPLC production API for token purchase history and contract info,
+    falling back to HTML scraping when the API yields nothing.
+
+    Returns (tokens, tariff, account_reference, outcomes) where outcomes
+    records per-path success/failure so the caller can apply the three-state
+    rule: any structurally valid response (even an empty list) means the
+    query succeeded; failure requires ALL paths to have failed.
     """
+    outcomes: list[PathOutcome] = []
+    all_tokens: list[ScrapedToken] = []
+    tariff: Optional[str] = None
+    account_reference: Optional[str] = None
+
     # Try KPLC REST API (the real endpoint the KPLC website uses)
     try:
         bearer = await _get_kplc_bearer_token(session)
-        if bearer:
-            tokens, tariff, account_reference = await _query_kplc_api(session, bearer, meter_number, account_number)
-            if tokens or tariff:
-                return tokens, tariff, account_reference
     except Exception as e:
-        logger.warning("KPLC API query failed for meter %s: %s", meter_number, e)
+        bearer = None
+        logger.warning("KPLC bearer token request raised for meter %s: %s", meter_number, e)
 
-    # Fallback: Try HTML search form scraping
-    html = await _try_search(session, meter_number, account_number)
-    if html:
-        parsed = _parse_html(html)
-        if parsed:
-            return parsed, (parsed[0].tariff if parsed else None), None
+    if bearer:
+        try:
+            tokens, tariff, account_reference, api_outcomes = await _query_kplc_api(
+                session, bearer, meter_number, account_number
+            )
+            outcomes.extend(api_outcomes)
+            all_tokens.extend(tokens)
+        except Exception as e:
+            logger.warning("KPLC API query failed for meter %s: %s", meter_number, e)
+            outcomes.append(PathOutcome("api", f"unexpected error ({e})"))
+    else:
+        outcomes.append(PathOutcome("api", "could not obtain KPLC bearer token"))
 
-    return [], None, None
+    # Fallback: Try HTML search form scraping (only when the API gave us nothing)
+    if not all_tokens:
+        html = await _try_search(session, meter_number, account_number)
+        if html is not None:
+            parsed = _parse_html(html)
+            for tok in parsed:
+                tok.source = SOURCE_HTML_FALLBACK
+            all_tokens.extend(parsed)
+            # A results page we could fetch and parse is a valid response,
+            # even if it contained zero token rows.
+            outcomes.append(PathOutcome(SOURCE_HTML_FALLBACK))
+            if not tariff and parsed:
+                tariff = parsed[0].tariff
+        else:
+            outcomes.append(PathOutcome(
+                SOURCE_HTML_FALLBACK,
+                "no usable HTML response (network error, non-200 status, or unrecognized page)",
+            ))
+
+    # Deduplicate across all paths by token_number (earliest entry wins)
+    seen: set[str] = set()
+    unique_tokens: list[ScrapedToken] = []
+    for tok in all_tokens:
+        if tok.token_number not in seen:
+            seen.add(tok.token_number)
+            unique_tokens.append(tok)
+
+    return unique_tokens, tariff, account_reference, outcomes
 
 
 async def _query_kplc_api(
@@ -166,14 +250,16 @@ async def _query_kplc_api(
     bearer_token: str,
     meter_number: str,
     account_number: Optional[str],
-) -> tuple[list[ScrapedToken], Optional[str], Optional[str]]:
+) -> tuple[list[ScrapedToken], Optional[str], Optional[str], list[PathOutcome]]:
     """Query KPLC production API for token purchase history (same endpoint the website uses).
-    
+
     Queries by both serialNumberMeter and accountReference (if available) then deduplicates,
     because KPLC's API hard-caps at 4 records per query and the two endpoints can return
     different windows of the transaction history.
-    
-    Returns (tokens, tariff, account_reference).
+
+    Returns (tokens, tariff, account_reference, outcomes). Each queried URL produces a
+    PathOutcome: ok when the response was HTTP 200 with a structurally valid body
+    (an empty data list still counts as a valid response), failed otherwise.
     """
     headers = {
         "Authorization": f"Bearer {bearer_token}",
@@ -185,18 +271,41 @@ async def _query_kplc_api(
     all_tokens: list[ScrapedToken] = []
     tariff: Optional[str] = None
     discovered_account_ref: Optional[str] = None
+    outcomes: list[PathOutcome] = []
 
-    async def _fetch_one(url: str) -> list[ScrapedToken]:
-        """Fetch colPrepayment from a single URL, updating shared state."""
+    async def _fetch_one(url: str, source: str) -> list[ScrapedToken]:
+        """Fetch colPrepayment from a single URL, updating shared state.
+
+        Appends a PathOutcome for this path and returns the parsed tokens
+        (empty both when the path failed and when it validly had no records).
+        """
         nonlocal tariff, discovered_account_ref
         fetched: list[ScrapedToken] = []
         try:
             async with session.get(url, headers=headers, ssl=False) as resp:
-                if resp.status == 200:
+                if resp.status != 200:
+                    body_text = await resp.text()
+                    logger.warning(
+                        "KPLC returned %d for meter %s: %s", resp.status, meter_number, body_text[:200]
+                    )
+                    outcomes.append(PathOutcome(source, f"HTTP {resp.status} from KPLC API"))
+                    return fetched
+                try:
                     body = await resp.json()
-                    data = body.get("data", []) if isinstance(body, dict) else body
-                    if data and isinstance(data, list) and len(data) > 0:
-                        record = data[0]
+                except Exception as e:
+                    outcomes.append(PathOutcome(source, f"unparseable JSON response ({e})"))
+                    return fetched
+                data = body.get("data", []) if isinstance(body, dict) else body
+                if not isinstance(data, list):
+                    outcomes.append(PathOutcome(source, "unexpected response structure (data is not a list)"))
+                    return fetched
+
+                # Structurally valid response — even an empty list means the
+                # query succeeded and there simply are no records.
+                outcomes.append(PathOutcome(source))
+                if data:
+                    record = data[0]
+                    if isinstance(record, dict):
                         # Capture accountReference for future queries
                         if not discovered_account_ref:
                             discovered_account_ref = record.get("accountReference")
@@ -208,27 +317,24 @@ async def _query_kplc_api(
                         for item in col_prepayment:
                             tok = _parse_col_prepayment_item(item)
                             if tok:
+                                tok.source = source
                                 fetched.append(tok)
                         if fetched and not tariff:
                             tariff = fetched[0].tariff
-                elif resp.status in (422, 404):
-                    body_text = await resp.text()
-                    logger.warning(
-                        "KPLC returned %d for meter %s: %s", resp.status, meter_number, body_text[:200]
-                    )
         except Exception as e:
             logger.debug("KPLC query error for %s: %s", url[-60:], e)
+            outcomes.append(PathOutcome(source, f"request error ({e})"))
         return fetched
 
     # Primary: query by serial number
     serial_url = f"{PROD_BASE_URL}/publicData/4/newContractList?serialNumberMeter={meter_number}"
-    serial_tokens = await _fetch_one(serial_url)
+    serial_tokens = await _fetch_one(serial_url, SOURCE_API_SERIAL)
     all_tokens.extend(serial_tokens)
 
     # If caller supplied an account_number, also query by it
     if account_number and account_number != discovered_account_ref:
         acc_url = f"{PROD_BASE_URL}/publicData/4/newContractList?accountReference={account_number}"
-        acc_tokens = await _fetch_one(acc_url)
+        acc_tokens = await _fetch_one(acc_url, SOURCE_API_ACCOUNT)
         all_tokens.extend(acc_tokens)
 
     # If API told us an accountReference different from what we already queried, use it too
@@ -237,7 +343,7 @@ async def _query_kplc_api(
         already_queried_acc = account_number == discovered_account_ref
         if not already_queried_acc:
             acc_url2 = f"{PROD_BASE_URL}/publicData/4/newContractList?accountReference={discovered_account_ref}"
-            acc_tokens2 = await _fetch_one(acc_url2)
+            acc_tokens2 = await _fetch_one(acc_url2, SOURCE_API_ACCOUNT)
             all_tokens.extend(acc_tokens2)
 
     # Deduplicate by token_number (preserving order, earliest entry wins)
@@ -253,7 +359,7 @@ async def _query_kplc_api(
         meter_number, len(unique_tokens), len(all_tokens),
     )
 
-    return unique_tokens, tariff, discovered_account_ref
+    return unique_tokens, tariff, discovered_account_ref, outcomes
 
 
 def _parse_col_prepayment_item(item: dict) -> Optional[ScrapedToken]:

@@ -1186,6 +1186,23 @@ nav.bottom-nav a svg { width: 22px; height: 22px; }
 .toast svg { width: 18px; height: 18px; flex-shrink: 0; }
 .toast.success { background: var(--success-soft); color: var(--success-fg); border: 1px solid var(--success); }
 .toast.error { background: var(--danger-soft); color: var(--danger-fg); border: 1px solid var(--danger); }
+
+/* Banner shown on the dashboard when the live KPLC fetch failed */
+.scrape-error-banner {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 12px 16px;
+    margin-bottom: 14px;
+    border-radius: var(--radius-sm);
+    font-size: 0.85rem;
+    font-weight: 500;
+    line-height: 1.45;
+    background: var(--danger-soft);
+    color: var(--danger-fg);
+    border: 1px solid var(--danger);
+}
+.scrape-error-banner svg { width: 18px; height: 18px; flex-shrink: 0; margin-top: 1px; }
 .toast.info { background: var(--brand-navy-soft); color: var(--brand-navy); border: 1px solid var(--brand-navy); }
 @keyframes slideDown {
     from { transform: translateY(-12px); opacity: 0; }

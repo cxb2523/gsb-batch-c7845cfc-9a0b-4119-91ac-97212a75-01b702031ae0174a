@@ -74,11 +74,19 @@ async def backfill_and_schedule(meter_id: int):
                 return
 
             logger.info("Starting backfill for meter %s", meter.meter_number)
-            await _poll_single_meter(meter, db, source="backfill_scrape")
+            scrape_result = await _poll_single_meter(meter, db, source="backfill_scrape")
 
-            # Compute initial usage stats
-            stats = await compute_usage(meter, db)
-            await save_usage_snapshot(meter.id, stats, db)
+            # Compute initial usage stats — only when the scrape actually
+            # succeeded; a failed scrape must not write a snapshot built on
+            # an empty/unchanged token table as if it were fresh data.
+            if scrape_result.success:
+                stats = await compute_usage(meter, db)
+                await save_usage_snapshot(meter.id, stats, db)
+            else:
+                logger.warning(
+                    "Backfill scrape failed for meter %s: %s",
+                    meter.meter_number, scrape_result.error,
+                )
             await db.commit()
             logger.info("Backfill complete for meter %s", meter.meter_number)
         except Exception as e:
@@ -117,7 +125,18 @@ async def poll_all_meters():
                 await asyncio.sleep(min(delay, 60))  # Cap per-meter delay at 60s for daily runs
 
                 try:
-                    await _poll_single_meter(meter, db, source="periodic_scrape")
+                    scrape_result = await _poll_single_meter(meter, db, source="periodic_scrape")
+                    if not scrape_result.success:
+                        # Scrape failed: do NOT advance last_scrape_at and do
+                        # NOT write a usage snapshot — the meter stays "stale"
+                        # so the gap is visible and the next cycle retries.
+                        logger.warning(
+                            "Poll: scrape failed for meter %s, keeping last_scrape_at unchanged: %s",
+                            meter.meter_number, scrape_result.error,
+                        )
+                        await db.rollback()
+                        continue
+
                     meter.last_scrape_at = datetime.now(timezone.utc)
 
                     # Recompute usage
@@ -140,6 +159,10 @@ async def poll_all_meters():
 async def _poll_single_meter(meter: Meter, db: AsyncSession, source: str):
     """
     Scrape a single meter, diff with existing tokens, insert new ones.
+
+    Returns the ScrapResult so callers can apply the three-state rule:
+    only advance last_scrape_at / write usage snapshots when the scrape
+    succeeded (status OK or EMPTY); never on FAILED.
     """
     scrape_result = await scrape_meter_tokens(
         meter_number=meter.meter_number,
@@ -149,7 +172,7 @@ async def _poll_single_meter(meter: Meter, db: AsyncSession, source: str):
     if not scrape_result.success:
         logger.warning("Scrape failed for meter %s: %s", meter.meter_number,
                         scrape_result.error)
-        return
+        return scrape_result
 
     # Updating tariff if found
     if scrape_result.tariff and not meter.tariff:
@@ -161,7 +184,10 @@ async def _poll_single_meter(meter: Meter, db: AsyncSession, source: str):
     )
     existing_tokens = set(row[0] for row in existing_result.all())
 
-    # Insert only new tokens
+    # Insert only new tokens. Each token carries the query path that produced
+    # it (api_serial / api_account / html_fallback) for traceability; the
+    # `source` argument (periodic_scrape / manual_fetch / ...) is the fallback
+    # for records that somehow lack a path stamp.
     new_count = 0
     for scraped in scrape_result.tokens:
         if scraped.token_number not in existing_tokens:
@@ -172,7 +198,7 @@ async def _poll_single_meter(meter: Meter, db: AsyncSession, source: str):
                 amount=scraped.amount,
                 payment_mode=scraped.payment_mode,
                 purchased_at=scraped.purchased_at,
-                source=source,
+                source=scraped.source or source,
             )
             db.add(token)
             existing_tokens.add(scraped.token_number)
@@ -182,6 +208,8 @@ async def _poll_single_meter(meter: Meter, db: AsyncSession, source: str):
         logger.info("Inserted %d new tokens for meter %s", new_count, meter.meter_number)
     else:
         logger.debug("No new tokens for meter %s", meter.meter_number)
+
+    return scrape_result
 
 
 async def _check_and_alert(meter: Meter, stats: dict, db: AsyncSession):

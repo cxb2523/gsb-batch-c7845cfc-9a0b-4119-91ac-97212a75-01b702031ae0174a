@@ -98,6 +98,11 @@ class DashboardState(BaseModel):
     total_tokens_count: int
     telegram_linked: bool
     last_scrape_at: Optional[datetime]
+    # Whether the live KPLC fetch attempted during this request succeeded.
+    # True when no fetch was needed (data still fresh) or the fetch succeeded
+    # (including "valid response, zero records"); False only on real failure.
+    scrape_ok: bool = True
+    scrape_error: Optional[str] = None
 
 
 class UsageSnapshotOut(BaseModel):
@@ -133,3 +138,7 @@ class ScrapedToken(BaseModel):
     payment_mode: Optional[str]
     purchased_at: Optional[datetime]
     tariff: Optional[str] = None
+    # Which query path produced this record: "api_serial" (by meter number),
+    # "api_account" (by account reference) or "html_fallback". Stamped by the
+    # scraper and persisted on the Token row for traceability.
+    source: Optional[str] = None
