@@ -199,6 +199,13 @@ class HTTPSLookup(AbstractDataLookup[Input, Output]):
         )
 
     def get_last_query_info(self) -> Dict[str, JSONType]:
+        """Info about the last query, added to data-dumps:
+        - "url": URL of the last request actually made
+          (the final URL after any redirections)
+        - "response-time": time taken by that request, in seconds
+        - "response-status": HTTP status of that request
+        - "rate-limit-wait": present only on rate-capped lookups when the
+          rate limiter stalled the query; wait duration in seconds"""
         base = dict()
         base.update(super().get_last_query_info())
         base.update(self._last_query_info)
@@ -208,7 +215,12 @@ class HTTPSLookup(AbstractDataLookup[Input, Output]):
 class RedirectFollower(HTTPSLookup[Input, Output]):
     """Follows redirection up to max_depth
     returns final data
-    Only works with fixed attributes for domain/path/query..."""
+    Only works with fixed attributes for domain/path/query...
+
+    Query info: every hop goes through HTTPSLookup.get_data, so
+    get_last_query_info() reflects the last request actually made:
+    after following redirections, "url" is the final requested URL
+    (with that request's "response-status" and "response-time")."""
 
     max_depth = 10
     depth = 0
@@ -232,11 +244,26 @@ class RedirectFollower(HTTPSLookup[Input, Output]):
             self.domain = split[0]
             self.path = split[1]
             data = super().get_data()
+        if self.depth > 0 and "url" not in self._last_query_info:
+            # Redirects were followed, but the last request failed before
+            # recording its info: still report the final requested URL
+            self._last_query_info = {
+                **self._last_query_info,
+                "url": f"https://{self.get_domain()}{self.get_path()}",
+            }
         return data
 
 
 class HTTPSRateCapedLookup(HTTPSLookup[Input, Output]):
-    """Add a rate cap to respect polite server requirements"""
+    """Add a rate cap to respect polite server requirements
+
+    When the rate limiter actually stalls a query, the wait duration
+    (in seconds) is recorded in the query info under the
+    rate_limit_wait_key ("rate-limit-wait"). The key is absent when
+    no wait occurred."""
+
+    # Key in the query info holding the rate limiter wait time, in seconds
+    rate_limit_wait_key: ClassVar[str] = "rate-limit-wait"
 
     # Time of last query
     # This is a class attribute to the given lookup
@@ -251,11 +278,20 @@ class HTTPSRateCapedLookup(HTTPSLookup[Input, Output]):
     def get_data(self) -> Optional[Data]:
         since_last_query = time() - self.last_query_time
         wait = self.query_delay - since_last_query
+        waited: Optional[float] = None
         if wait >= 0.0:
             logger.debug("Rate limiter: sleeping for {wait}s", wait=round(wait, 3))
             sleep(wait)
+            waited = wait
         self.__class__.last_query_time = time()
         data = super().get_data()
+        if waited is not None:
+            # Record how long the rate limiter stalled this query.
+            # Done after super().get_data() as it resets _last_query_info
+            self._last_query_info = {
+                **self._last_query_info,
+                self.rate_limit_wait_key: round(waited, 3),
+            }
         new_cap = self.update_rate_cap()  # update rate cap with response headers
         if new_cap is not None:
             self.__class__.query_delay = new_cap * 1.1  # round up for good measure

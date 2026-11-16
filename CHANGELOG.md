@@ -1,5 +1,12 @@
 # Change Log
 
+## Unreleased
+
+- Query info (used in `--dump-data` files) now always reports the final URL
+  actually requested after following redirections, even if that last request
+  failed, and rate-capped lookups record the rate limiter wait time under the
+  `rate-limit-wait` key (only present when a wait occurred).
+
 ## Version 1.5.0 - 2026-11-04
 
 - Fix crash when merging long author lists with duplicates
