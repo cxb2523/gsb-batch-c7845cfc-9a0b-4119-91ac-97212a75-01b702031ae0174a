@@ -1,2 +1,2 @@
 # pylint: disable=missing-module-docstring
-from .gevent_keywords import GeventKeywords
+from .gevent_keywords import CoroutineResult, CoroutineStatus, GeventKeywords

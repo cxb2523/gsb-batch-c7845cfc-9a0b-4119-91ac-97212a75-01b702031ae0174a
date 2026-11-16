@@ -62,6 +62,53 @@ Sleep Wrapper
 
 ```
 
+### Fault tolerant runs (partial failures and timeouts)
+
+By default `Run Coroutines` keeps the fail-fast behaviour: the first exception raised by a
+coroutine is re-raised and the values of the whole bundle are lost.
+
+When collecting data it is often better to settle every item individually.
+Pass `raise_on_failure=${False}` (or `continue_on_failure=${True}`) to get one result
+object per coroutine, in the order the coroutines were added:
+
+```robotframework
+    Create Gevent Bundle    alias=crawl
+    Add Coroutine    Fetch Item    url=https://example.com/1    alias=crawl
+    Add Coroutine    Fetch Item    url=https://example.com/broken    alias=crawl
+    Add Coroutine    Fetch Item    url=https://example.com/slow    alias=crawl
+    ${results}    Run Coroutines    alias=crawl    timeout=10    raise_on_failure=${False}
+
+    FOR    ${result}    IN    @{results}
+        IF    $result['status'] == 'completed'
+            Log    Collected: ${result['value']}
+        ELSE
+            Log    Skipped ${result['keyword_name']}: ${result['reason']}
+        END
+    END
+```
+
+Each result is a dictionary (also usable as an object) with these fields:
+
+| field | description |
+| --- | --- |
+| `keyword_name` | the keyword that was added as a coroutine |
+| `status` | `completed`, `exception` or `timeout` |
+| `value` | returned value for completed coroutines, otherwise `None` |
+| `exception` / `exception_type` / `exception_message` | the failure details |
+| `reason` | human readable failure reason, `None` when completed |
+| `successful` / `failed` / `timed_out` | boolean shortcuts |
+
+Coroutines that are still running when `timeout` expires are killed (they do not keep
+writing in the background) and reported with the `timeout` status. In every case - success,
+failure or timeout - the bundle is emptied at the end of the execution, so the same alias can
+be populated and executed again.
+
+```robotframework
+    # after a run the bundle can be reused with the same alias
+    Add Coroutine    Fetch Item    url=https://example.com/1    alias=crawl
+    ${results}    Run Coroutines    alias=crawl    continue_on_failure=${True}
+```
+
 
 See -  [Keyword Documentation](https://eldaduzman.github.io/robotframework-gevent/GeventLibrary.html)
 ### run test:
