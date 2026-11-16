@@ -28,3 +28,23 @@
 - **GitHub Integration:** Provided instructions on how to create a GitHub repository, clone it, add a documentation file (`changes_documentation.md`), and push changes to GitHub.
 
 These changes enhance the functionality of the `NHANESDataAPI` class, improve code organization, and provide comprehensive documentation for users. Users can now easily understand the class's purpose, available methods, and how to interact with the API effectively.
+
+## NHANES pyTOOL API - Multi-cycle retrieve_data resilience
+
+### Class: NHANESDataAPI
+
+### Modified Methods:
+- **`retrieve_data(data_category, cycle, filename, include_uncommon_variables=True)`:** The multi-cycle path no longer aborts (discarding already-retrieved cycles) when a single cycle fails, and no longer silently skips cycles with no data file. Each requested cycle is settled individually:
+  - Cycles whose data file is missing are marked `skipped` (with a reason) instead of being silently dropped.
+  - Cycles whose retrieval raises an error are marked `failed` (with the exception details) instead of aborting the whole request.
+  - If at least one cycle succeeds, the merged data from the successful cycles is returned. If every cycle fails or is skipped, a `ValueError` is still raised (no empty-frame "success").
+  - When `include_uncommon_variables=False`, the merged data is trimmed to the variables common to the cycles that actually succeeded.
+  - The `year` column continues to mark the source cycle of every row.
+  - The single-cycle path keeps its existing return/raise behavior.
+
+### New Methods:
+- **`_read_cycle_data(cycle_year, data_file_name)` Private Method:** Single point where raw cycle data is loaded (network access by default). Can be overridden/patched to inject locally fabricated data for testing.
+- **`get_last_cycle_report()` Method:** Returns the per-cycle settlement report from the most recent multi-cycle `retrieve_data` call.
+
+### New Attributes:
+- **`last_cycle_report`:** A list of `{'cycle', 'status', 'reason'}` dicts (one per requested cycle, in request order; status is `success`, `skipped`, or `failed`). Also attached to multi-cycle results as `result.attrs['cycle_report']`, so the settlement info travels with the return value rather than only being printed.

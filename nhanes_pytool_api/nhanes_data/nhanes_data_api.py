@@ -23,10 +23,22 @@ class NHANESDataAPI:
     - _check_cycle(input_cycle): Check the validity of a cycle and return valid cycle(s) based on input.
     - _check_in_between_cycle(start_year, end_year): Check for valid cycles within a range.
     - _get_data_filename(data_category, cycle_year, data_file_description): Get the data file name for a specific cycle year and data file description.
+    - _read_cycle_data(cycle_year, data_file_name): Read the raw data for a single cycle year (single point of network/file access, injectable for testing).
     - get_common_and_uncommon_variables(data_category, cycle_years): Find common and uncommon variables across multiple cycle years for a specific data category.
     - retrieve_data(data_category, cycle, filename, include_uncommon_variables=True): Retrieve data for a specific data category, cycle year(s), and data file description.
+    - get_last_cycle_report(): Return the per-cycle settlement report produced by the most recent multi-cycle retrieve_data call.
     - join_data_files(cycle_year, data_category1, file_name1, data_category2, file_name2, include_uncommon_variables=True): Join two data files from specified data categories and file names based on the common variable SEQN.
 
+    Per-cycle settlement report:
+    After a multi-cycle retrieve_data call, ``self.last_cycle_report`` (also returned by
+    get_last_cycle_report() and attached to the result as ``result.attrs['cycle_report']``)
+    holds a list of dicts, one per requested cycle, in request order::
+
+        {'cycle': '2005-2006', 'status': 'success' | 'skipped' | 'failed', 'reason': str | None}
+
+    - 'success': data was retrieved and included in the merged result.
+    - 'skipped': no data file exists for that cycle (reason explains why).
+    - 'failed': retrieval raised an error (reason contains the exception details).
     """
 
     __cycle_list = [
@@ -59,6 +71,7 @@ class NHANESDataAPI:
         data_directory (str): Directory where data will be stored.
         """
         self.data_directory = data_directory
+        self.last_cycle_report = None
 
     def list_data_categories(self):
         """
@@ -276,6 +289,35 @@ class NHANESDataAPI:
             raise ValueError(f"No data file found for Data Category: {data_category}, Year: {cycle_year}, Data File Description: {data_file_description}")
 
 
+    def _read_cycle_data(self, cycle_year, data_file_name):
+        """
+        Read the raw data file for a single cycle year.
+
+        This is the single point where cycle data is loaded (from the CDC website by
+        default). Tests or callers may override/patch this method to inject locally
+        fabricated data instead of performing network access.
+
+        Args:
+        cycle_year (str): The cycle year for which data is requested, e.g. '2005-2006'.
+        data_file_name (str): The data file name (without extension) for that cycle.
+
+        Returns:
+        pd.DataFrame: The raw data for the requested cycle.
+        """
+        return pd.read_sas(f"https://wwwn.cdc.gov/Nchs/Nhanes/{cycle_year}/{data_file_name}.XPT")
+
+
+    def get_last_cycle_report(self):
+        """
+        Return the per-cycle settlement report from the most recent multi-cycle retrieve_data call.
+
+        Returns:
+        list of dict or None: A list of {'cycle', 'status', 'reason'} entries (one per
+        requested cycle, in request order), or None if no multi-cycle retrieval has run yet.
+        """
+        return self.last_cycle_report
+
+
 
     def get_common_and_uncommon_variables(self, data_category, cycle_years):
         """
@@ -406,50 +448,88 @@ class NHANESDataAPI:
         specific_variables (list of str, optional): List of specific variables to retrieve. Defaults to None, meaning all variables will be retrieved.
 
         Returns:
-        pd.DataFrame: A pandas DataFrame containing the retrieved data.
+        pd.DataFrame: A pandas DataFrame containing the retrieved data. For multi-cycle
+        requests the per-cycle settlement report is attached as
+        ``result.attrs['cycle_report']`` and is also available via
+        ``self.last_cycle_report`` / ``get_last_cycle_report()``.
 
         Raises:
-        Exception: If there is an error retrieving the data.
+        ValueError: If the cycle input is invalid, or if every requested cycle failed or
+        was skipped (no data could be retrieved at all).
+
+        Multi-cycle behavior:
+        - A cycle whose data file is missing is marked 'skipped' and does not abort the request.
+        - A cycle whose retrieval raises an error is marked 'failed' (with the reason) and
+          does not abort the request; data from the remaining successful cycles is still
+          merged and returned.
+        - When include_uncommon_variables is False, the merged data is trimmed to the
+          variables common to the cycles that actually succeeded.
+        - The 'year' column marks the source cycle of every row.
         """
         temp_cycle_list = self._check_cycle(cycle)
         if not temp_cycle_list:
             raise ValueError("Invalid cycle input.")
-        
+
+        self.last_cycle_report = None
+
         if len(temp_cycle_list) == 1:
             data_file_name = self._get_data_filename(data_category, temp_cycle_list[0], filename)
             if data_file_name is None:
                 raise ValueError(f"No data file found for Data Category: {data_category}, Year: {temp_cycle_list[0]}, Data File Description: {filename}")
-            data = pd.read_sas(f"https://wwwn.cdc.gov/Nchs/Nhanes/{temp_cycle_list[0]}/{data_file_name}.XPT")
+            data = self._read_cycle_data(temp_cycle_list[0], data_file_name)
             data['year'] = temp_cycle_list[0]
             return data
 
         data_frames = []  # List to store individual data frames from different cycles
-
-        common_variables, uncommon_variables, _ = self.get_common_and_uncommon_variables(data_category, temp_cycle_list)
+        successful_cycles = []  # Cycles whose data was actually retrieved
+        cycle_report = []  # Per-cycle settlement info: {'cycle', 'status', 'reason'}
 
         for cycle_year in temp_cycle_list:
             try:
                 data_file_name = self._get_data_filename(data_category, cycle_year, filename)
-                if data_file_name is None:
-                    continue  # Skip this cycle if the data file name is not found
-                data = pd.read_sas(f"https://wwwn.cdc.gov/Nchs/Nhanes/{cycle_year}/{data_file_name}.XPT")
-                
-                # Include or exclude uncommon variables based on the parameter
-                if include_uncommon_variables is False:
-                    data = data[common_variables]
-
-                # Add a 'year' column indicating the cycle year
-                data['year'] = cycle_year
-
-                data_frames.append(data)
+            except ValueError as e:
+                # No data file exists for this cycle: skip it, don't abort the request.
+                cycle_report.append({'cycle': cycle_year, 'status': 'skipped', 'reason': str(e)})
+                continue
             except Exception as e:
-                raise ValueError(f"Error fetching data for cycle {cycle_year}: {str(e)}")
+                cycle_report.append({'cycle': cycle_year, 'status': 'failed', 'reason': f"{type(e).__name__}: {str(e)}"})
+                continue
+
+            if data_file_name is None:
+                cycle_report.append({'cycle': cycle_year, 'status': 'skipped',
+                                     'reason': f"No data file found for Data Category: {data_category}, Year: {cycle_year}, Data File Description: {filename}"})
+                continue
+
+            try:
+                data = self._read_cycle_data(cycle_year, data_file_name)
+            except Exception as e:
+                cycle_report.append({'cycle': cycle_year, 'status': 'failed', 'reason': f"{type(e).__name__}: {str(e)}"})
+                continue
+
+            # Add a 'year' column indicating the cycle year
+            data['year'] = cycle_year
+
+            data_frames.append(data)
+            successful_cycles.append(cycle_year)
+            cycle_report.append({'cycle': cycle_year, 'status': 'success', 'reason': None})
+
+        self.last_cycle_report = cycle_report
 
         if not data_frames:
-            raise ValueError(f"No data available for the specified data category and cycle years.")
-        
+            summary = "; ".join(f"{entry['cycle']}: {entry['status']} ({entry['reason']})" for entry in cycle_report)
+            raise ValueError(f"No data available for the specified data category and cycle years. "
+                             f"Every requested cycle failed or was skipped. Per-cycle status: {summary}")
+
+        # Include or exclude uncommon variables based on the parameter. The common
+        # variables are computed across the cycles that actually succeeded.
+        if include_uncommon_variables is False and len(successful_cycles) >= 2:
+            common_variables, _, _ = self.get_common_and_uncommon_variables(data_category, successful_cycles)
+            data_frames = [df[[variable for variable in common_variables if variable in df.columns] + ['year']]
+                           for df in data_frames]
+
         # Concatenate data frames from different cycles
         concatenated_data = pd.concat(data_frames, ignore_index=True)
+        concatenated_data.attrs['cycle_report'] = cycle_report
         return concatenated_data
 
     def join_data_files(self, cycle_year, data_category1, file_name1, data_category2, file_name2, include_uncommon_variables=True):
