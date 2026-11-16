@@ -14,7 +14,9 @@
 1. :meth:`MomentObserver.snapshot` / :meth:`MomentObserver.diff` —— 快照与轮询
 2. :meth:`MomentObserver.export` —— 立即解密并复制到持久目录，写映射条目
    （幂等：同 key 同内容跳过；跨 key 同内容记别名）
-3. :meth:`MomentObserver.capture` —— 结合朋友圈界面滚动（或自定义动作）自动捕获
+3. :meth:`MomentObserver.capture` —— 结合朋友圈界面滚动（或自定义动作）自动捕获；
+   结算结果按 成功 / 幂等跳过 / 失败 分类，每个 key 带归属轮次，整体结局区分
+   「达到目标数 / 轮数用尽 / 无新增可导出」
 
 无 UI 部分只依赖 :class:`~wechatauto.moment.MomentDB`；带 UI 部分
 （:meth:`visible_items` / :meth:`scroll` / :meth:`capture`）需要朋友圈界面。
@@ -131,9 +133,31 @@ class MomentObserver:
             media_index=media_index, kind=kind,
             mapping_path=self.mapping_path)
 
-    def export_new(self, new_keys: Dict[tuple, str], **meta) -> List[dict]:
-        """把 ``diff``/``poll`` 得到的新增 key 全部固化导出。"""
-        return [self.export(k, p, **meta) for k, p in sorted(new_keys.items())]
+    def export_new(self, new_keys: Dict[tuple, str],
+                   round_no: Optional[int] = None,
+                   default_kind: str = "image", **meta) -> List[dict]:
+        """把 ``diff``/``poll`` 得到的新增 key 全部固化导出。
+
+        单个 key 失败（含未预期异常）只记入该条结果，**不中断**后续 key。
+        每条结果都带 ``key``（给出 ``round_no`` 时还带 ``round``）；失败条目
+        保证有可判读的 ``reason``。
+        """
+        out: List[dict] = []
+        for key, p in sorted(new_keys.items()):
+            ckind = key[1] if len(key) > 1 else ""
+            kind = "video" if ckind == "Video" else default_kind
+            try:
+                r = self.export(key, p, kind=kind, **meta)
+            except Exception as e:
+                r = {"status": "error", "reason": f"export exception: {e}"}
+            r = dict(r)
+            r["key"] = key
+            if round_no is not None:
+                r["round"] = round_no
+            if r.get("status") not in ("ok", "skip") and not r.get("reason"):
+                r["reason"] = f"export failed (status={r.get('status')})"
+            out.append(r)
+        return out
 
     # ------------------------------------------------------------------
     # UI 观察（需要朋友圈界面）
@@ -169,6 +193,11 @@ class MomentObserver:
         if settle and settle > 0:
             time.sleep(settle)
 
+    # 整体结局（``capture`` 返回值的 ``outcome`` 字段）
+    OUTCOME_TARGET_REACHED = "target_reached"      # 达到目标数
+    OUTCOME_STEPS_EXHAUSTED = "steps_exhausted"    # 轮数用尽
+    OUTCOME_NO_NEW_KEYS = "no_new_keys"            # 无新增可导出
+
     def capture(self, steps: int = 12, delta: int = -200, settle: float = 2.5,
                 target: int = 3, before: Optional[Dict[tuple, str]] = None,
                 action: Optional[Callable[[int], Any]] = None,
@@ -190,13 +219,26 @@ class MomentObserver:
             read_screen: 是否读取屏幕可见条目来推断发布者（无界面时设 False）。
 
         Returns:
-            dict: ``{"exported", "skipped", "failed", "steps_run", "mapping_path"}``。
+            dict:
+              - ``outcome``: 整体结局，三选一 —— ``"target_reached"``
+                （达到目标数）、``"steps_exhausted"``（轮数用尽）、
+                ``"no_new_keys"``（全程无新增可导出；空结果，不是失败）。
+              - ``exported`` / ``skipped`` / ``failed``: 按 key 结算的明细，
+                每条都带 ``key`` 与归属轮次 ``round``；``failed`` 条目另带
+                可判读的 ``reason``。同一 key 全程只结算一次（缓存被清理后
+                重新下载出同 key 也不会重复计入）。
+              - ``rounds``: 每轮汇总 ``{"round", "new_keys", "exported",
+                "skipped", "failed"}``。
+              - ``steps_run`` / ``mapping_path``。
         """
         baseline = before if before is not None else self.snapshot()
         exported: List[dict] = []
         skipped: List[dict] = []
         failed: List[dict] = []
+        rounds: List[dict] = []
+        seen: set = set()          # 已结算的 key（成功/跳过/失败都算，全程只结一次）
         steps_run = 0
+        outcome = self.OUTCOME_STEPS_EXHAUSTED
 
         for step in range(max(1, steps)):
             steps_run = step + 1
@@ -206,36 +248,51 @@ class MomentObserver:
                 self.scroll(delta=delta, times=1, settle=settle)
 
             new = self.diff(baseline)
-            if not new:
-                continue
-            nick = nickname
-            if not nick and read_screen:
-                for item in self.visible_items():
-                    if item.get("publisher"):
-                        nick = item["publisher"]
-                        break
-            results = self.export_new(new, tid=tid, nickname=nick,
-                                      default_kind=default_kind)
-            for r in results:
-                status = r.get("status")
-                if status == "ok":
-                    exported.append(r)
-                elif status == "skip":
-                    skipped.append(r)
-                else:
-                    failed.append(r)
-                    wxlog.debug(f'固化缓存失败：{r}')
             baseline = self.snapshot()
+            fresh = {k: p for k, p in new.items() if k not in seen}
+            round_rec = {"round": steps_run, "new_keys": len(new),
+                         "exported": 0, "skipped": 0, "failed": 0}
+            if fresh:
+                nick = nickname
+                if not nick and read_screen:
+                    for item in self.visible_items():
+                        if item.get("publisher"):
+                            nick = item["publisher"]
+                            break
+                results = self.export_new(fresh, round_no=steps_run, tid=tid,
+                                          nickname=nick,
+                                          default_kind=default_kind)
+                for r in results:
+                    seen.add(r["key"])
+                    status = r.get("status")
+                    if status == "ok":
+                        exported.append(r)
+                        round_rec["exported"] += 1
+                    elif status == "skip":
+                        skipped.append(r)
+                        round_rec["skipped"] += 1
+                    else:
+                        failed.append(r)
+                        round_rec["failed"] += 1
+                        wxlog.debug(f'固化缓存失败：{r}')
+            rounds.append(round_rec)
 
             if target and len(exported) >= target:
+                outcome = self.OUTCOME_TARGET_REACHED
                 break
+        else:
+            # 轮数用尽：全程没有任何 key 进入结算 → 空结果（区别于失败）
+            if not (exported or skipped or failed):
+                outcome = self.OUTCOME_NO_NEW_KEYS
 
         if failed:
             wxlog.info(f'观察闭环：成功={len(exported)} 跳过={len(skipped)} 失败={len(failed)}')
         return {
+            "outcome": outcome,
             "exported": exported,
             "skipped": skipped,
             "failed": failed,
+            "rounds": rounds,
             "steps_run": steps_run,
             "mapping_path": self.mapping_path,
         }

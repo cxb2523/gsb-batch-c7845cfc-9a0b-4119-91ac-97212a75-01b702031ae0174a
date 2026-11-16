@@ -39,12 +39,21 @@ def main() -> None:
     res = obs.capture(steps=args.steps, target=args.target, delta=args.delta,
                       settle=args.settle, nickname=args.nickname, tid=args.tid)
 
-    print(f"\n轮数: {res['steps_run']}")
+    outcome_text = {
+        "target_reached": "达到目标数",
+        "steps_exhausted": "轮数用尽",
+        "no_new_keys": "无新增可导出",
+    }.get(res["outcome"], res["outcome"])
+    print(f"\n结局: {res['outcome']}（{outcome_text}）  轮数: {res['steps_run']}")
     print(f"固化: {len(res['exported'])}  跳过(已存在): {len(res['skipped'])}  失败: {len(res['failed'])}")
     for r in res["exported"]:
-        print("  +", os.path.basename(r.get("path", "")), "sha=%s" % r.get("sha256", "")[:16])
+        print("  +", os.path.basename(r.get("path", "")), "sha=%s" % r.get("sha256", "")[:16],
+              "round=%s" % r.get("round"))
     for r in res["skipped"]:
-        print("  =", os.path.basename(r.get("path", "")), "(幂等跳过)")
+        print("  =", os.path.basename(r.get("path") or ""), "(幂等跳过)",
+              "round=%s" % r.get("round"))
+    for r in res["failed"]:
+        print("  !", r.get("key"), "round=%s" % r.get("round"), "原因:", r.get("reason"))
 
     mapping = obs.mapping()
     print(f"\n映射条目: {len(mapping)}")

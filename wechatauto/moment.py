@@ -3853,14 +3853,17 @@ class MomentDB:
             mapping_path: 映射 JSON 路径（默认 ``<export_root>/mapping.json``）。
 
         Returns:
-            dict: ``{"status", "exported", "sha256", "path", "group"}``。
+            dict: ``{"status", "exported", "sha256", "path", "group"}``；
+            失败时 ``status`` 为 ``"error"``/``"decrypt-failed"`` 且带可判读的
+            ``"reason"``（映射损坏或不可写也会如实报失败，不会静默当成功）。
         """
         month, ckind, kstr = key
         root = self._export_root()
         try:
             os.makedirs(root, exist_ok=True)
         except OSError as e:
-            return {"status": "error", "reason": f"mkdir: {e}"}
+            return {"status": "error", "key": key, "path": path,
+                    "reason": f"mkdir: {e}"}
 
         mapping_path = mapping_path or os.path.join(root, "mapping.json")
         mdir = os.path.dirname(mapping_path)
@@ -3868,46 +3871,64 @@ class MomentDB:
             try:
                 os.makedirs(mdir, exist_ok=True)
             except OSError as e:
-                return {"status": "error", "reason": f"mkdir mapping dir: {e}"}
+                return {"status": "error", "key": key, "path": path,
+                        "reason": f"mkdir mapping dir: {e}"}
         mapping = {}
         if os.path.isfile(mapping_path):
             try:
                 with open(mapping_path, "r", encoding="utf-8") as fp:
                     mapping = json.load(fp)
-            except Exception:
-                mapping = {}
+            except (OSError, ValueError) as e:
+                # 映射损坏/不可读必须如实报失败：静默当成空表会继续导出并
+                # 在写回时**覆盖掉**既有映射条目，等于把损坏升级成丢失。
+                return {"status": "error", "key": key, "path": path,
+                        "reason": f"mapping corrupt: {e}"}
+            if not isinstance(mapping, dict):
+                return {"status": "error", "key": key, "path": path,
+                        "reason": "mapping corrupt: 顶层不是 JSON 对象"}
 
         data = self.decrypt_cache(path)
         if not data:
-            return {"status": "decrypt-failed", "key": key, "path": path}
+            return {"status": "decrypt-failed", "key": key, "path": path,
+                    "reason": "解密失败或明文为空（缓存可能已被清理）"}
 
         sha = hashlib.sha256(data).hexdigest()
         # 幂等 1：同一 key + 同一 sha256 已导出 → 跳过
         existing = mapping.get(kstr)
-        if existing and existing.get("sha256") == sha:
+        if isinstance(existing, dict) and existing.get("sha256") == sha:
             return {"status": "skip", "exported": False,
                     "sha256": sha, "path": existing.get("path")}
         # 幂等 2（跨 key 内容级去重）：缓存易失、每轮下载 key 可能重生成，
         # 但同一视觉动态的**解密字节一致**。已导出过该 sha256 → 跳过，
         # 并把新 key 记别名指向既有导出，避免内容级重复导出。
+        alias_target = None
         for other_key, other in mapping.items():
+            if other_key == "_aliases" or not isinstance(other, dict):
+                continue
             if other.get("sha256") == sha:
-                mapping.setdefault("_aliases", {})[kstr] = other_key
-                try:
-                    with open(mapping_path, "w", encoding="utf-8") as fp:
-                        json.dump(mapping, fp, ensure_ascii=False, indent=2)
-                except OSError:
-                    pass
-                return {"status": "skip", "exported": False,
-                        "sha256": sha, "path": other.get("path"),
-                        "alias_of": other_key}
+                alias_target = (other_key, other)
+                break
+        if alias_target is not None:
+            other_key, other = alias_target
+            mapping.setdefault("_aliases", {})[kstr] = other_key
+            try:
+                with open(mapping_path, "w", encoding="utf-8") as fp:
+                    json.dump(mapping, fp, ensure_ascii=False, indent=2)
+            except OSError as e:
+                # 别名写不进去 = 映射不可写，如实报失败而非静默当成功
+                return {"status": "error", "key": key, "path": path,
+                        "reason": f"mapping write: {e}"}
+            return {"status": "skip", "exported": False,
+                    "sha256": sha, "path": other.get("path"),
+                    "alias_of": other_key}
 
         group = str(tid) if tid else "unknown"
         group_dir = export_dir or os.path.join(root, group)
         try:
             os.makedirs(group_dir, exist_ok=True)
         except OSError as e:
-            return {"status": "error", "reason": f"mkdir group: {e}"}
+            return {"status": "error", "key": key, "path": path,
+                    "reason": f"mkdir group: {e}"}
 
         fname = kstr + ("." + ("mp4" if not data.startswith(b"\xff\xd8") else "jpg"))
         out_path = os.path.join(group_dir, fname)
@@ -3915,7 +3936,8 @@ class MomentDB:
             with open(out_path, "wb") as fp:
                 fp.write(data)
         except OSError as e:
-            return {"status": "error", "reason": f"write: {e}"}
+            return {"status": "error", "key": key, "path": path,
+                    "reason": f"write: {e}"}
 
         entry = {
             "key": kstr, "month": month, "cache_kind": ckind,
@@ -3930,7 +3952,8 @@ class MomentDB:
             with open(mapping_path, "w", encoding="utf-8") as fp:
                 json.dump(mapping, fp, ensure_ascii=False, indent=2)
         except OSError as e:
-            return {"status": "error", "reason": f"mapping write: {e}"}
+            return {"status": "error", "key": key, "path": path,
+                    "reason": f"mapping write: {e}"}
         return {"status": "ok", "exported": True, "sha256": sha,
                 "path": out_path, "group": group}
 
