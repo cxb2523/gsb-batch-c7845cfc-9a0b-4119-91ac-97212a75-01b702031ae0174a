@@ -6,15 +6,32 @@ from datetime import date
 from pathlib import Path
 
 import pytest
+import wreq
 from freezegun import freeze_time
 
-from allocine import Allocine
+from allocine import Allocine, ShowtimeList
 from allocine.client import _initial_theatrical_release_date
 
 
 @pytest.fixture(scope="session")
 def allocine() -> Allocine:
     return Allocine(cache=False)
+
+
+def fail_requests_matching(monkeypatch, allocine: Allocine, predicate, error: Exception) -> None:
+    """Make the HTTP transport raise ``error`` for URLs matching ``predicate``.
+
+    Only the transport is patched: the responses still come from the recorded cassette,
+    so the successful pages keep the real upstream payloads.
+    """
+    playback = allocine._client._fetch
+
+    def fetch(url, expected_status, *args, **kwargs):
+        if predicate(url):
+            raise error
+        return playback(url, expected_status, *args, **kwargs)
+
+    monkeypatch.setattr(allocine._client, "_fetch", fetch)
 
 
 def test_get_theater(allocine: Allocine, json_snapshot, allocine_vcr):
@@ -97,7 +114,10 @@ def test_get_showtimes_fetches_inclusive_date_range(allocine: Allocine, json_sna
 
 @freeze_time("2026-09-28")
 def test_get_showtimes_treats_not_found_as_empty_without_retry(allocine: Allocine, allocine_vcr):
-    assert allocine.get_showtimes("C0125", from_date=date(2026, 9, 29)) == []
+    showtimes = allocine.get_showtimes("C0125", from_date=date(2026, 9, 29))
+
+    assert showtimes == []
+    assert showtimes.is_complete
 
 
 @freeze_time("2026-09-29")
@@ -105,6 +125,7 @@ def test_get_showtimes_stops_after_no_showtime_error(allocine: Allocine, json_sn
     showtimes = allocine.get_showtimes("W0746", to_date=date(2026, 10, 5))
 
     assert [asdict(showtime) for showtime in showtimes] == json_snapshot
+    assert showtimes.is_complete
 
 
 @freeze_time("2026-09-26")
@@ -112,6 +133,115 @@ def test_get_showtimes_skips_to_next_showtime_date(allocine: Allocine, json_snap
     showtimes = allocine.get_showtimes("W1021", to_date=date(2026, 10, 2))
 
     assert [asdict(showtime) for showtime in showtimes] == json_snapshot
+    assert showtimes.is_complete
+
+
+@freeze_time("2026-11-16")
+def test_get_showtimes_fetches_multi_page_days(allocine: Allocine, json_snapshot, allocine_vcr):
+    showtimes = allocine.get_showtimes(
+        "P0535",
+        from_date=date(2026, 11, 16),
+        to_date=date(2026, 11, 17),
+    )
+
+    assert [asdict(showtime) for showtime in showtimes] == json_snapshot
+    assert showtimes.is_complete
+    assert showtimes.incomplete_dates == ()
+    assert isinstance(showtimes, list)
+    assert showtimes == list(showtimes)
+    # Both days really span several pages of the recorded responses.
+    assert {showtime.date for showtime in showtimes} == {date(2026, 11, 16), date(2026, 11, 17)}
+
+
+@freeze_time("2026-11-16")
+@pytest.mark.parametrize("allocine_vcr", ["get_showtimes_fetches_multi_page_days.json"], indirect=True)
+def test_get_showtimes_keeps_fetched_pages_when_a_later_page_fails(allocine: Allocine, allocine_vcr, monkeypatch):
+    fail_requests_matching(monkeypatch, allocine, lambda url: "/d-2026-11-16/p-2/" in url, wreq.TimeoutError("boom"))
+
+    showtimes = allocine.get_showtimes(
+        "P0535",
+        from_date=date(2026, 11, 16),
+        to_date=date(2026, 11, 17),
+    )
+
+    # Page 1 of the first day was kept, and the following day was still processed.
+    assert {showtime.date for showtime in showtimes} == {date(2026, 11, 16), date(2026, 11, 17)}
+    first_day = [showtime for showtime in showtimes if showtime.date == date(2026, 11, 16)]
+    second_day = [showtime for showtime in showtimes if showtime.date == date(2026, 11, 17)]
+    # 39 showtimes on the first page of 2026-11-16, 3 more on the page that failed.
+    assert len(first_day) == 39
+    # The next day was fetched completely (39 + 3).
+    assert len(second_day) == 42
+    # The interrupted day is flagged, the other one is not.
+    assert showtimes.incomplete_dates == (date(2026, 11, 16),)
+    assert not showtimes.is_complete
+    assert not showtimes.is_date_complete(date(2026, 11, 16))
+    assert showtimes.is_date_complete(date(2026, 11, 17))
+    assert isinstance(showtimes.incomplete_errors[date(2026, 11, 16)], wreq.TimeoutError)
+    # Legacy callers still get a plain list they can iterate over.
+    assert isinstance(showtimes, list)
+    assert showtimes == list(showtimes)
+
+
+@freeze_time("2026-11-16")
+@pytest.mark.parametrize("allocine_vcr", ["get_showtimes_fetches_multi_page_days.json"], indirect=True)
+def test_get_showtimes_flags_each_incomplete_day_independently(allocine: Allocine, allocine_vcr, monkeypatch):
+    fail_requests_matching(monkeypatch, allocine, lambda url: "/p-2/" in url, wreq.ConnectionError("boom"))
+
+    showtimes = allocine.get_showtimes(
+        "P0535",
+        from_date=date(2026, 11, 16),
+        to_date=date(2026, 11, 17),
+    )
+
+    assert showtimes.incomplete_dates == (date(2026, 11, 16), date(2026, 11, 17))
+    assert all(showtime.date in {date(2026, 11, 16), date(2026, 11, 17)} for showtime in showtimes)
+    assert len(showtimes) > 0
+
+
+@freeze_time("2026-11-16")
+@pytest.mark.parametrize("allocine_vcr", ["get_showtimes_fetches_multi_page_days.json"], indirect=True)
+def test_get_showtimes_raises_when_the_first_page_fails(allocine: Allocine, allocine_vcr, monkeypatch):
+    fail_requests_matching(monkeypatch, allocine, lambda url: "/d-2026-11-16/" in url, wreq.TimeoutError("boom"))
+
+    with pytest.raises(wreq.TimeoutError):
+        allocine.get_showtimes("P0535", from_date=date(2026, 11, 16), to_date=date(2026, 11, 17))
+
+
+@freeze_time("2026-11-16")
+@pytest.mark.parametrize("allocine_vcr", ["get_showtimes_fetches_multi_page_days.json"], indirect=True)
+def test_get_showtimes_raises_when_a_later_day_first_page_fails(allocine: Allocine, allocine_vcr, monkeypatch):
+    fail_requests_matching(monkeypatch, allocine, lambda url: "/d-2026-11-17/" in url, wreq.TimeoutError("boom"))
+
+    with pytest.raises(wreq.TimeoutError):
+        allocine.get_showtimes("P0535", from_date=date(2026, 11, 16), to_date=date(2026, 11, 17))
+
+
+@freeze_time("2026-09-26")
+@pytest.mark.parametrize("allocine_vcr", ["get_showtimes_skips_to_next_showtime_date.json"], indirect=True)
+def test_get_showtimes_does_not_flag_next_showtime_on_as_incomplete(allocine: Allocine, allocine_vcr):
+    showtimes = allocine.get_showtimes("W1021", to_date=date(2026, 10, 2))
+
+    assert showtimes.is_complete
+    assert showtimes.incomplete_dates == ()
+
+
+@freeze_time("2026-11-16")
+def test_get_showtimes_does_not_flag_no_showtime_error_as_incomplete(allocine: Allocine, allocine_vcr):
+    showtimes = allocine.get_showtimes("W0746", from_date=date(2026, 11, 16), to_date=date(2026, 11, 18))
+
+    assert showtimes == []
+    assert showtimes.is_complete
+    assert showtimes.incomplete_dates == ()
+
+
+def test_showtime_list_behaves_like_a_list():
+    showtimes = ShowtimeList([], incomplete_errors={date(2026, 11, 16): TimeoutError("boom")})
+
+    assert showtimes == []
+    assert list(showtimes) == []
+    assert showtimes.incomplete_dates == (date(2026, 11, 16),)
+    assert not showtimes.is_complete
 
 
 def test_get_showtimes_rejects_inverted_date_range(

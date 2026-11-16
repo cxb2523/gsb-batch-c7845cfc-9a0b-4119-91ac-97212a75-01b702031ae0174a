@@ -1,0 +1,1852 @@
+[
+  {
+    "date_time": "2026-11-16T13:45:00.000000",
+    "movie": {
+      "actors": "Nicholas Hoult, Pete Davidson, Zoë Kravitz",
+      "countries": [
+        "U.S.A."
+      ],
+      "directors": "David Leitch",
+      "duration": "datetime.timedelta(seconds=7260)",
+      "genres": "Action, Thriller, Policier",
+      "img_url": "https://fr.web.img4.acsta.net/img/12/bb/12bb4f199e78e6b5d5d1bcbcbe702acb.jpg",
+      "language": "Français",
+      "movie_id": 1000020289,
+      "original_title": "How To Rob A Bank",
+      "rating": 3.13,
+      "release_date": "2026-11-11",
+      "screen_format": "Numérique",
+      "synopsis": "Une équipe de braqueurs filme ses hold-up en direct et devient viral. Mais leur célébrité grandissante attire l'attention d'un agent du FBI et d'une ingénieure informatique déterminés à les arrêter. Alors que cet improbable duo se rapproche dangereusement d’eux, le gang décide de tout miser sur le braquage le plus ambitieux de leur carrière.",
+      "title": "Comment braquer une banque",
+      "year": 2026
+    }
+  },
+  {
+    "date_time": "2026-11-16T16:30:00.000000",
+    "movie": {
+      "actors": "Nicholas Hoult, Pete Davidson, Zoë Kravitz",
+      "countries": [
+        "U.S.A."
+      ],
+      "directors": "David Leitch",
+      "duration": "datetime.timedelta(seconds=7260)",
+      "genres": "Action, Thriller, Policier",
+      "img_url": "https://fr.web.img4.acsta.net/img/12/bb/12bb4f199e78e6b5d5d1bcbcbe702acb.jpg",
+      "language": "Français",
+      "movie_id": 1000020289,
+      "original_title": "How To Rob A Bank",
+      "rating": 3.13,
+      "release_date": "2026-11-11",
+      "screen_format": "Numérique",
+      "synopsis": "Une équipe de braqueurs filme ses hold-up en direct et devient viral. Mais leur célébrité grandissante attire l'attention d'un agent du FBI et d'une ingénieure informatique déterminés à les arrêter. Alors que cet improbable duo se rapproche dangereusement d’eux, le gang décide de tout miser sur le braquage le plus ambitieux de leur carrière.",
+      "title": "Comment braquer une banque",
+      "year": 2026
+    }
+  },
+  {
+    "date_time": "2026-11-16T19:00:00.000000",
+    "movie": {
+      "actors": "Nicholas Hoult, Pete Davidson, Zoë Kravitz",
+      "countries": [
+        "U.S.A."
+      ],
+      "directors": "David Leitch",
+      "duration": "datetime.timedelta(seconds=7260)",
+      "genres": "Action, Thriller, Policier",
+      "img_url": "https://fr.web.img4.acsta.net/img/12/bb/12bb4f199e78e6b5d5d1bcbcbe702acb.jpg",
+      "language": "Français",
+      "movie_id": 1000020289,
+      "original_title": "How To Rob A Bank",
+      "rating": 3.13,
+      "release_date": "2026-11-11",
+      "screen_format": "Numérique",
+      "synopsis": "Une équipe de braqueurs filme ses hold-up en direct et devient viral. Mais leur célébrité grandissante attire l'attention d'un agent du FBI et d'une ingénieure informatique déterminés à les arrêter. Alors que cet improbable duo se rapproche dangereusement d’eux, le gang décide de tout miser sur le braquage le plus ambitieux de leur carrière.",
+      "title": "Comment braquer une banque",
+      "year": 2026
+    }
+  },
+  {
+    "date_time": "2026-11-16T21:30:00.000000",
+    "movie": {
+      "actors": "Nicholas Hoult, Pete Davidson, Zoë Kravitz",
+      "countries": [
+        "U.S.A."
+      ],
+      "directors": "David Leitch",
+      "duration": "datetime.timedelta(seconds=7260)",
+      "genres": "Action, Thriller, Policier",
+      "img_url": "https://fr.web.img4.acsta.net/img/12/bb/12bb4f199e78e6b5d5d1bcbcbe702acb.jpg",
+      "language": "Français",
+      "movie_id": 1000020289,
+      "original_title": "How To Rob A Bank",
+      "rating": 3.13,
+      "release_date": "2026-11-11",
+      "screen_format": "Numérique",
+      "synopsis": "Une équipe de braqueurs filme ses hold-up en direct et devient viral. Mais leur célébrité grandissante attire l'attention d'un agent du FBI et d'une ingénieure informatique déterminés à les arrêter. Alors que cet improbable duo se rapproche dangereusement d’eux, le gang décide de tout miser sur le braquage le plus ambitieux de leur carrière.",
+      "title": "Comment braquer une banque",
+      "year": 2026
+    }
+  },
+  {
+    "date_time": "2026-11-16T14:00:00.000000",
+    "movie": {
+      "actors": "Louise Coldefy, Julia Piaton, Artus",
+      "countries": [
+        "France"
+      ],
+      "directors": "Albert Dupontel",
+      "duration": "datetime.timedelta(seconds=4860)",
+      "genres": "Comédie",
+      "img_url": "https://fr.web.img6.acsta.net/img/b7/22/b722617d1263956a4b556c739a49afc3.jpg",
+      "language": "Français",
+      "movie_id": 1000039483,
+      "original_title": "Il faut brûler Maman",
+      "rating": 3.11,
+      "release_date": "2026-11-11",
+      "screen_format": "Numérique",
+      "synopsis": "Dans une famille de croque-morts, deux sœurs et un frère se retrouvent pour les funérailles de leur mère. Le personnel étant en grève, ils doivent accomplir le protocole funéraire par eux-mêmes. Comment s’accorder pour brûler Maman ?",
+      "title": "Il faut brûler Maman",
+      "year": 2026
+    }
+  },
+  {
+    "date_time": "2026-11-16T16:00:00.000000",
+    "movie": {
+      "actors": "Louise Coldefy, Julia Piaton, Artus",
+      "countries": [
+        "France"
+      ],
+      "directors": "Albert Dupontel",
+      "duration": "datetime.timedelta(seconds=4860)",
+      "genres": "Comédie",
+      "img_url": "https://fr.web.img6.acsta.net/img/b7/22/b722617d1263956a4b556c739a49afc3.jpg",
+      "language": "Français",
+      "movie_id": 1000039483,
+      "original_title": "Il faut brûler Maman",
+      "rating": 3.11,
+      "release_date": "2026-11-11",
+      "screen_format": "Numérique",
+      "synopsis": "Dans une famille de croque-morts, deux sœurs et un frère se retrouvent pour les funérailles de leur mère. Le personnel étant en grève, ils doivent accomplir le protocole funéraire par eux-mêmes. Comment s’accorder pour brûler Maman ?",
+      "title": "Il faut brûler Maman",
+      "year": 2026
+    }
+  },
+  {
+    "date_time": "2026-11-16T18:00:00.000000",
+    "movie": {
+      "actors": "Louise Coldefy, Julia Piaton, Artus",
+      "countries": [
+        "France"
+      ],
+      "directors": "Albert Dupontel",
+      "duration": "datetime.timedelta(seconds=4860)",
+      "genres": "Comédie",
+      "img_url": "https://fr.web.img6.acsta.net/img/b7/22/b722617d1263956a4b556c739a49afc3.jpg",
+      "language": "Français",
+      "movie_id": 1000039483,
+      "original_title": "Il faut brûler Maman",
+      "rating": 3.11,
+      "release_date": "2026-11-11",
+      "screen_format": "Numérique",
+      "synopsis": "Dans une famille de croque-morts, deux sœurs et un frère se retrouvent pour les funérailles de leur mère. Le personnel étant en grève, ils doivent accomplir le protocole funéraire par eux-mêmes. Comment s’accorder pour brûler Maman ?",
+      "title": "Il faut brûler Maman",
+      "year": 2026
+    }
+  },
+  {
+    "date_time": "2026-11-16T20:00:00.000000",
+    "movie": {
+      "actors": "Louise Coldefy, Julia Piaton, Artus",
+      "countries": [
+        "France"
+      ],
+      "directors": "Albert Dupontel",
+      "duration": "datetime.timedelta(seconds=4860)",
+      "genres": "Comédie",
+      "img_url": "https://fr.web.img6.acsta.net/img/b7/22/b722617d1263956a4b556c739a49afc3.jpg",
+      "language": "Français",
+      "movie_id": 1000039483,
+      "original_title": "Il faut brûler Maman",
+      "rating": 3.11,
+      "release_date": "2026-11-11",
+      "screen_format": "Numérique",
+      "synopsis": "Dans une famille de croque-morts, deux sœurs et un frère se retrouvent pour les funérailles de leur mère. Le personnel étant en grève, ils doivent accomplir le protocole funéraire par eux-mêmes. Comment s’accorder pour brûler Maman ?",
+      "title": "Il faut brûler Maman",
+      "year": 2026
+    }
+  },
+  {
+    "date_time": "2026-11-16T14:00:00.000000",
+    "movie": {
+      "actors": "Johnny Depp, Rupert Grint, Daisy Ridley",
+      "countries": [
+        "U.S.A."
+      ],
+      "directors": "Ti West",
+      "duration": "datetime.timedelta(seconds=6960)",
+      "genres": "Fantastique, Drame, Aventure",
+      "img_url": "https://fr.web.img4.acsta.net/img/ee/1d/ee1d9a9f275b9d7332cf8dff0c5dfd27.jpg",
+      "language": "Français",
+      "movie_id": 1000034007,
+      "original_title": "Ebenezer",
+      "rating": 3.91,
+      "release_date": "2026-11-11",
+      "screen_format": "Numérique",
+      "synopsis": "Pour changer son futur, Scrooge va revivre son passé.",
+      "title": "Scrooge",
+      "year": 2026
+    }
+  },
+  {
+    "date_time": "2026-11-16T16:30:00.000000",
+    "movie": {
+      "actors": "Johnny Depp, Rupert Grint, Daisy Ridley",
+      "countries": [
+        "U.S.A."
+      ],
+      "directors": "Ti West",
+      "duration": "datetime.timedelta(seconds=6960)",
+      "genres": "Fantastique, Drame, Aventure",
+      "img_url": "https://fr.web.img4.acsta.net/img/ee/1d/ee1d9a9f275b9d7332cf8dff0c5dfd27.jpg",
+      "language": "Français",
+      "movie_id": 1000034007,
+      "original_title": "Ebenezer",
+      "rating": 3.91,
+      "release_date": "2026-11-11",
+      "screen_format": "Numérique",
+      "synopsis": "Pour changer son futur, Scrooge va revivre son passé.",
+      "title": "Scrooge",
+      "year": 2026
+    }
+  },
+  {
+    "date_time": "2026-11-16T19:00:00.000000",
+    "movie": {
+      "actors": "Johnny Depp, Rupert Grint, Daisy Ridley",
+      "countries": [
+        "U.S.A."
+      ],
+      "directors": "Ti West",
+      "duration": "datetime.timedelta(seconds=6960)",
+      "genres": "Fantastique, Drame, Aventure",
+      "img_url": "https://fr.web.img4.acsta.net/img/ee/1d/ee1d9a9f275b9d7332cf8dff0c5dfd27.jpg",
+      "language": "Français",
+      "movie_id": 1000034007,
+      "original_title": "Ebenezer",
+      "rating": 3.91,
+      "release_date": "2026-11-11",
+      "screen_format": "Numérique",
+      "synopsis": "Pour changer son futur, Scrooge va revivre son passé.",
+      "title": "Scrooge",
+      "year": 2026
+    }
+  },
+  {
+    "date_time": "2026-11-16T21:45:00.000000",
+    "movie": {
+      "actors": "Johnny Depp, Rupert Grint, Daisy Ridley",
+      "countries": [
+        "U.S.A."
+      ],
+      "directors": "Ti West",
+      "duration": "datetime.timedelta(seconds=6960)",
+      "genres": "Fantastique, Drame, Aventure",
+      "img_url": "https://fr.web.img4.acsta.net/img/ee/1d/ee1d9a9f275b9d7332cf8dff0c5dfd27.jpg",
+      "language": "Français",
+      "movie_id": 1000034007,
+      "original_title": "Ebenezer",
+      "rating": 3.91,
+      "release_date": "2026-11-11",
+      "screen_format": "Numérique",
+      "synopsis": "Pour changer son futur, Scrooge va revivre son passé.",
+      "title": "Scrooge",
+      "year": 2026
+    }
+  },
+  {
+    "date_time": "2026-11-16T18:00:00.000000",
+    "movie": {
+      "actors": "Paul Syre, Mark Anthony Williams, Danielle Kennedy",
+      "countries": [
+        "U.S.A."
+      ],
+      "directors": "Nicholas Pineda",
+      "duration": "datetime.timedelta(seconds=5220)",
+      "genres": "Epouvante-horreur",
+      "img_url": "https://fr.web.img6.acsta.net/img/65/97/6597b4d07ce512c9eebe240fc67babd7.jpg",
+      "language": "Français",
+      "movie_id": 1000048020,
+      "original_title": "Infirmary",
+      "rating": 1.74,
+      "release_date": "2026-11-11",
+      "screen_format": "Numérique",
+      "synopsis": "Un gardien a disparu lors de sa première nuit dans un ancien hôpital psychiatrique. Les images de vidéosurveillance montrent des incidents inexplicables qui continuent de déconcerter les enquêteurs.",
+      "title": "Infirmary",
+      "year": 2026
+    }
+  },
+  {
+    "date_time": "2026-11-16T22:00:00.000000",
+    "movie": {
+      "actors": "Paul Syre, Mark Anthony Williams, Danielle Kennedy",
+      "countries": [
+        "U.S.A."
+      ],
+      "directors": "Nicholas Pineda",
+      "duration": "datetime.timedelta(seconds=5220)",
+      "genres": "Epouvante-horreur",
+      "img_url": "https://fr.web.img6.acsta.net/img/65/97/6597b4d07ce512c9eebe240fc67babd7.jpg",
+      "language": "Français",
+      "movie_id": 1000048020,
+      "original_title": "Infirmary",
+      "rating": 1.74,
+      "release_date": "2026-11-11",
+      "screen_format": "Numérique",
+      "synopsis": "Un gardien a disparu lors de sa première nuit dans un ancien hôpital psychiatrique. Les images de vidéosurveillance montrent des incidents inexplicables qui continuent de déconcerter les enquêteurs.",
+      "title": "Infirmary",
+      "year": 2026
+    }
+  },
+  {
+    "date_time": "2026-11-16T13:45:00.000000",
+    "movie": {
+      "actors": "Gilles Lellouche, Lars Eidinger, Louise Bourgoin",
+      "countries": [
+        "France"
+      ],
+      "directors": "László Nemes",
+      "duration": "datetime.timedelta(seconds=8040)",
+      "genres": "Drame, Historique",
+      "img_url": "https://fr.web.img6.acsta.net/img/0f/7f/0f7fb216155bf7bcf7bb69d9e2f65310.jpg",
+      "language": "Français",
+      "movie_id": 1000020311,
+      "original_title": "Moulin",
+      "rating": 3.54,
+      "release_date": "2026-10-28",
+      "screen_format": "Numérique",
+      "synopsis": "Juin 1943, Jean Moulin, chef de la Résistance, est arrêté alors qu'il tente de réunifier les forces de l’Armée Secrète. Interrogé par Klaus Barbie, le chef de la Gestapo de Lyon, Moulin est entraîné dans une confrontation implacable.",
+      "title": "Moulin",
+      "year": 2026
+    }
+  },
+  {
+    "date_time": "2026-11-16T16:20:00.000000",
+    "movie": {
+      "actors": "Gilles Lellouche, Lars Eidinger, Louise Bourgoin",
+      "countries": [
+        "France"
+      ],
+      "directors": "László Nemes",
+      "duration": "datetime.timedelta(seconds=8040)",
+      "genres": "Drame, Historique",
+      "img_url": "https://fr.web.img6.acsta.net/img/0f/7f/0f7fb216155bf7bcf7bb69d9e2f65310.jpg",
+      "language": "Français",
+      "movie_id": 1000020311,
+      "original_title": "Moulin",
+      "rating": 3.54,
+      "release_date": "2026-10-28",
+      "screen_format": "Numérique",
+      "synopsis": "Juin 1943, Jean Moulin, chef de la Résistance, est arrêté alors qu'il tente de réunifier les forces de l’Armée Secrète. Interrogé par Klaus Barbie, le chef de la Gestapo de Lyon, Moulin est entraîné dans une confrontation implacable.",
+      "title": "Moulin",
+      "year": 2026
+    }
+  },
+  {
+    "date_time": "2026-11-16T19:00:00.000000",
+    "movie": {
+      "actors": "Gilles Lellouche, Lars Eidinger, Louise Bourgoin",
+      "countries": [
+        "France"
+      ],
+      "directors": "László Nemes",
+      "duration": "datetime.timedelta(seconds=8040)",
+      "genres": "Drame, Historique",
+      "img_url": "https://fr.web.img6.acsta.net/img/0f/7f/0f7fb216155bf7bcf7bb69d9e2f65310.jpg",
+      "language": "Français",
+      "movie_id": 1000020311,
+      "original_title": "Moulin",
+      "rating": 3.54,
+      "release_date": "2026-10-28",
+      "screen_format": "Numérique",
+      "synopsis": "Juin 1943, Jean Moulin, chef de la Résistance, est arrêté alors qu'il tente de réunifier les forces de l’Armée Secrète. Interrogé par Klaus Barbie, le chef de la Gestapo de Lyon, Moulin est entraîné dans une confrontation implacable.",
+      "title": "Moulin",
+      "year": 2026
+    }
+  },
+  {
+    "date_time": "2026-11-16T21:15:00.000000",
+    "movie": {
+      "actors": "Gilles Lellouche, Lars Eidinger, Louise Bourgoin",
+      "countries": [
+        "France"
+      ],
+      "directors": "László Nemes",
+      "duration": "datetime.timedelta(seconds=8040)",
+      "genres": "Drame, Historique",
+      "img_url": "https://fr.web.img6.acsta.net/img/0f/7f/0f7fb216155bf7bcf7bb69d9e2f65310.jpg",
+      "language": "Français",
+      "movie_id": 1000020311,
+      "original_title": "Moulin",
+      "rating": 3.54,
+      "release_date": "2026-10-28",
+      "screen_format": "Numérique",
+      "synopsis": "Juin 1943, Jean Moulin, chef de la Résistance, est arrêté alors qu'il tente de réunifier les forces de l’Armée Secrète. Interrogé par Klaus Barbie, le chef de la Gestapo de Lyon, Moulin est entraîné dans une confrontation implacable.",
+      "title": "Moulin",
+      "year": 2026
+    }
+  },
+  {
+    "date_time": "2026-11-16T13:45:00.000000",
+    "movie": {
+      "actors": "Ryûnosuke Kamiki, Minami Hamabe, Yamada Yuki",
+      "countries": [
+        "Japon"
+      ],
+      "directors": "Takashi Yamazaki",
+      "duration": "datetime.timedelta(seconds=8100)",
+      "genres": "Science Fiction",
+      "img_url": "https://fr.web.img6.acsta.net/img/62/57/625799426a89e53445b5fb0b842cd241.jpg",
+      "language": "Français",
+      "movie_id": 1000014492,
+      "original_title": "Godzilla Minus Zero",
+      "rating": 3.77,
+      "release_date": "2026-11-04",
+      "screen_format": "Numérique",
+      "synopsis": "La guerre a détruit le Japon. Godzilla a réduit ses ultimes espoirs à zéro. Deux ans ont passé. Alors que l’humanité commence enfin à renouer avec une paix difficilement acquise, une nouvelle menace surgit et anéantit tout espoir en un instant.",
+      "title": "Godzilla Minus Zero",
+      "year": 2026
+    }
+  },
+  {
+    "date_time": "2026-11-16T21:30:00.000000",
+    "movie": {
+      "actors": "Ryûnosuke Kamiki, Minami Hamabe, Yamada Yuki",
+      "countries": [
+        "Japon"
+      ],
+      "directors": "Takashi Yamazaki",
+      "duration": "datetime.timedelta(seconds=8100)",
+      "genres": "Science Fiction",
+      "img_url": "https://fr.web.img6.acsta.net/img/62/57/625799426a89e53445b5fb0b842cd241.jpg",
+      "language": "Français",
+      "movie_id": 1000014492,
+      "original_title": "Godzilla Minus Zero",
+      "rating": 3.77,
+      "release_date": "2026-11-04",
+      "screen_format": "Numérique",
+      "synopsis": "La guerre a détruit le Japon. Godzilla a réduit ses ultimes espoirs à zéro. Deux ans ont passé. Alors que l’humanité commence enfin à renouer avec une paix difficilement acquise, une nouvelle menace surgit et anéantit tout espoir en un instant.",
+      "title": "Godzilla Minus Zero",
+      "year": 2026
+    }
+  },
+  {
+    "date_time": "2026-11-16T13:45:00.000000",
+    "movie": {
+      "actors": "Hafsia Herzi, Nour Salam, Ella Bedoucha",
+      "countries": [
+        "France"
+      ],
+      "directors": "Rudi Rosenberg",
+      "duration": "datetime.timedelta(seconds=5820)",
+      "genres": "Comédie dramatique",
+      "img_url": "https://fr.web.img4.acsta.net/img/d2/e4/d2e423fe953024eca9f0ebb7b2552db2.jpg",
+      "language": "Français",
+      "movie_id": 1000036515,
+      "original_title": "Quelques mots d'amour",
+      "rating": 4.01,
+      "release_date": "2026-10-28",
+      "screen_format": "Numérique",
+      "synopsis": "Sarcelles, 1995. Erika élève seule ses deux enfants. Sa fille Abigaëlle se persuade que son père, qu’elle n’a jamais connu, l’aime en silence quelque part. Lorsqu’elle se met en tête de le retrouver, Erika se sent obligée de l’aider, tout en cherchant à la protéger. En grandissant, la quête d’Abigaëlle se transforme en obsession, entraînant avec elle sa mère, sa meilleure amie, et tous ceux qui comptent.",
+      "title": "Quelques mots d'amour",
+      "year": 2026
+    }
+  },
+  {
+    "date_time": "2026-11-16T16:00:00.000000",
+    "movie": {
+      "actors": "Hafsia Herzi, Nour Salam, Ella Bedoucha",
+      "countries": [
+        "France"
+      ],
+      "directors": "Rudi Rosenberg",
+      "duration": "datetime.timedelta(seconds=5820)",
+      "genres": "Comédie dramatique",
+      "img_url": "https://fr.web.img4.acsta.net/img/d2/e4/d2e423fe953024eca9f0ebb7b2552db2.jpg",
+      "language": "Français",
+      "movie_id": 1000036515,
+      "original_title": "Quelques mots d'amour",
+      "rating": 4.01,
+      "release_date": "2026-10-28",
+      "screen_format": "Numérique",
+      "synopsis": "Sarcelles, 1995. Erika élève seule ses deux enfants. Sa fille Abigaëlle se persuade que son père, qu’elle n’a jamais connu, l’aime en silence quelque part. Lorsqu’elle se met en tête de le retrouver, Erika se sent obligée de l’aider, tout en cherchant à la protéger. En grandissant, la quête d’Abigaëlle se transforme en obsession, entraînant avec elle sa mère, sa meilleure amie, et tous ceux qui comptent.",
+      "title": "Quelques mots d'amour",
+      "year": 2026
+    }
+  },
+  {
+    "date_time": "2026-11-16T13:45:00.000000",
+    "movie": {
+      "actors": "Swann Arlaud, Sandrine Blancke, Harpo Guit",
+      "countries": [
+        "France",
+        "Belgique"
+      ],
+      "directors": "Emmanuel Marre",
+      "duration": "datetime.timedelta(seconds=9540)",
+      "genres": "Drame, Historique",
+      "img_url": "https://fr.web.img4.acsta.net/img/b7/ac/b7acc48dac20e8329866a199e0ff78e8.jpg",
+      "language": "Français",
+      "movie_id": 1000007388,
+      "original_title": "Notre salut",
+      "rating": 3.7,
+      "release_date": "2026-09-30",
+      "screen_format": "Numérique",
+      "synopsis": "Septembre 1940, le régime de Pétain se met en place. Henri Marre, 49 ans, débarque à Vichy sans le sou, sans contact, loin de sa femme et ses enfants. Il voit dans la nouvelle administration l’opportunité de trouver enfin la place qu’il mérite. Dans sa valise, son traité politique édité à compte d’auteur, Notre Salut, où il défend ses convictions patriotiques et ses méthodes d'ingénieur. Son credo : « gagner en efficacité » pour relever la France de la débâcle. Mais peut-être qu’Henri cherche avant tout à fuir sa propre débâcle...",
+      "title": "Notre salut",
+      "year": 2026
+    }
+  },
+  {
+    "date_time": "2026-11-16T14:00:00.000000",
+    "movie": {
+      "actors": "Marion Cotillard, Denis Ménochet, Leonardo Sbaraglia",
+      "countries": [
+        "France"
+      ],
+      "directors": "Guillaume Canet",
+      "duration": "datetime.timedelta(seconds=8400)",
+      "genres": "Thriller, Drame",
+      "img_url": "https://fr.web.img2.acsta.net/img/94/0a/940afff3ed3b09677bf94e2bc7c3009b.jpg",
+      "language": "Français",
+      "movie_id": 1000018384,
+      "original_title": "Karma",
+      "rating": 4.12,
+      "release_date": "2026-10-21",
+      "screen_format": "Numérique",
+      "synopsis": "Dans un village au nord de l’Espagne, Jeanne tente de reconstruire sa vie avec Daniel, qui ne connaît rien de son passé trouble. Un jour, Mateo, le filleul de Jeanne âgé de six ans, disparaît mystérieusement... Afin d’échapper à la police qui la soupçonne rapidement, Jeanne se réfugie en France dans la communauté où elle est née et qu’elle a fuie quelques années auparavant. Daniel ne croit pas à la culpabilité de la femme qu’il aime et va tout faire pour la retrouver avant la police.",
+      "title": "Karma",
+      "year": 2026
+    }
+  },
+  {
+    "date_time": "2026-11-16T18:00:00.000000",
+    "movie": {
+      "actors": "Marion Cotillard, Denis Ménochet, Leonardo Sbaraglia",
+      "countries": [
+        "France"
+      ],
+      "directors": "Guillaume Canet",
+      "duration": "datetime.timedelta(seconds=8400)",
+      "genres": "Thriller, Drame",
+      "img_url": "https://fr.web.img2.acsta.net/img/94/0a/940afff3ed3b09677bf94e2bc7c3009b.jpg",
+      "language": "Français",
+      "movie_id": 1000018384,
+      "original_title": "Karma",
+      "rating": 4.12,
+      "release_date": "2026-10-21",
+      "screen_format": "Numérique",
+      "synopsis": "Dans un village au nord de l’Espagne, Jeanne tente de reconstruire sa vie avec Daniel, qui ne connaît rien de son passé trouble. Un jour, Mateo, le filleul de Jeanne âgé de six ans, disparaît mystérieusement... Afin d’échapper à la police qui la soupçonne rapidement, Jeanne se réfugie en France dans la communauté où elle est née et qu’elle a fuie quelques années auparavant. Daniel ne croit pas à la culpabilité de la femme qu’il aime et va tout faire pour la retrouver avant la police.",
+      "title": "Karma",
+      "year": 2026
+    }
+  },
+  {
+    "date_time": "2026-11-16T20:45:00.000000",
+    "movie": {
+      "actors": "Marion Cotillard, Denis Ménochet, Leonardo Sbaraglia",
+      "countries": [
+        "France"
+      ],
+      "directors": "Guillaume Canet",
+      "duration": "datetime.timedelta(seconds=8400)",
+      "genres": "Thriller, Drame",
+      "img_url": "https://fr.web.img2.acsta.net/img/94/0a/940afff3ed3b09677bf94e2bc7c3009b.jpg",
+      "language": "Français",
+      "movie_id": 1000018384,
+      "original_title": "Karma",
+      "rating": 4.12,
+      "release_date": "2026-10-21",
+      "screen_format": "Numérique",
+      "synopsis": "Dans un village au nord de l’Espagne, Jeanne tente de reconstruire sa vie avec Daniel, qui ne connaît rien de son passé trouble. Un jour, Mateo, le filleul de Jeanne âgé de six ans, disparaît mystérieusement... Afin d’échapper à la police qui la soupçonne rapidement, Jeanne se réfugie en France dans la communauté où elle est née et qu’elle a fuie quelques années auparavant. Daniel ne croit pas à la culpabilité de la femme qu’il aime et va tout faire pour la retrouver avant la police.",
+      "title": "Karma",
+      "year": 2026
+    }
+  },
+  {
+    "date_time": "2026-11-16T14:00:00.000000",
+    "movie": {
+      "actors": "Charlotte Gainsbourg, Cécile de France, Grégory Gadebois",
+      "countries": [
+        "France"
+      ],
+      "directors": "Lauriane Escaffre, Yvo Muller",
+      "duration": "datetime.timedelta(seconds=6120)",
+      "genres": "Thriller, Judiciaire, Historique",
+      "img_url": "https://fr.web.img2.acsta.net/img/4a/3c/4a3cf95bb345d5d71bdc7acf3430323b.jpg",
+      "language": "Français",
+      "movie_id": 323550,
+      "original_title": "L'Affaire Marie-Claire",
+      "rating": 4.15,
+      "release_date": "2026-11-04",
+      "screen_format": "Numérique",
+      "synopsis": "Novembre 1972. Au tribunal de Bobigny, un procès hors norme secoue la France entière. Marie-Claire Chevalier, 16 ans, est accusée d’avoir avorté illégalement. À la barre, sa mère et toutes les femmes qui l’ont aidée. Leur avocate, Gisèle Halimi, fait un pari fou, insensé : elle leur demande de ne pas plaider coupable. Gisèle va faire ce qui n’a jamais été fait auparavant, elle va accuser et attaquer la loi, au risque de tout perdre.",
+      "title": "L'Affaire Marie-Claire",
+      "year": 2026
+    }
+  },
+  {
+    "date_time": "2026-11-16T16:00:00.000000",
+    "movie": {
+      "actors": "Charlotte Gainsbourg, Cécile de France, Grégory Gadebois",
+      "countries": [
+        "France"
+      ],
+      "directors": "Lauriane Escaffre, Yvo Muller",
+      "duration": "datetime.timedelta(seconds=6120)",
+      "genres": "Thriller, Judiciaire, Historique",
+      "img_url": "https://fr.web.img2.acsta.net/img/4a/3c/4a3cf95bb345d5d71bdc7acf3430323b.jpg",
+      "language": "Français",
+      "movie_id": 323550,
+      "original_title": "L'Affaire Marie-Claire",
+      "rating": 4.15,
+      "release_date": "2026-11-04",
+      "screen_format": "Numérique",
+      "synopsis": "Novembre 1972. Au tribunal de Bobigny, un procès hors norme secoue la France entière. Marie-Claire Chevalier, 16 ans, est accusée d’avoir avorté illégalement. À la barre, sa mère et toutes les femmes qui l’ont aidée. Leur avocate, Gisèle Halimi, fait un pari fou, insensé : elle leur demande de ne pas plaider coupable. Gisèle va faire ce qui n’a jamais été fait auparavant, elle va accuser et attaquer la loi, au risque de tout perdre.",
+      "title": "L'Affaire Marie-Claire",
+      "year": 2026
+    }
+  },
+  {
+    "date_time": "2026-11-16T18:00:00.000000",
+    "movie": {
+      "actors": "Charlotte Gainsbourg, Cécile de France, Grégory Gadebois",
+      "countries": [
+        "France"
+      ],
+      "directors": "Lauriane Escaffre, Yvo Muller",
+      "duration": "datetime.timedelta(seconds=6120)",
+      "genres": "Thriller, Judiciaire, Historique",
+      "img_url": "https://fr.web.img2.acsta.net/img/4a/3c/4a3cf95bb345d5d71bdc7acf3430323b.jpg",
+      "language": "Français",
+      "movie_id": 323550,
+      "original_title": "L'Affaire Marie-Claire",
+      "rating": 4.15,
+      "release_date": "2026-11-04",
+      "screen_format": "Numérique",
+      "synopsis": "Novembre 1972. Au tribunal de Bobigny, un procès hors norme secoue la France entière. Marie-Claire Chevalier, 16 ans, est accusée d’avoir avorté illégalement. À la barre, sa mère et toutes les femmes qui l’ont aidée. Leur avocate, Gisèle Halimi, fait un pari fou, insensé : elle leur demande de ne pas plaider coupable. Gisèle va faire ce qui n’a jamais été fait auparavant, elle va accuser et attaquer la loi, au risque de tout perdre.",
+      "title": "L'Affaire Marie-Claire",
+      "year": 2026
+    }
+  },
+  {
+    "date_time": "2026-11-16T14:00:00.000000",
+    "movie": {
+      "actors": "Didier Bourdon, Catherine Frot, Jean-François Cayrey",
+      "countries": [
+        "France"
+      ],
+      "directors": "Philippe de Chauveron",
+      "duration": "datetime.timedelta(seconds=5220)",
+      "genres": "Comédie",
+      "img_url": "https://fr.web.img5.acsta.net/img/e0/fa/e0fa1b691ed74bcdc54a9761aa33dbb4.jpg",
+      "language": "Français",
+      "movie_id": 1000031925,
+      "original_title": "Un bon patron",
+      "rating": 2.54,
+      "release_date": "2026-11-04",
+      "screen_format": "Numérique",
+      "synopsis": "En quelques jours seulement, tout semble virer à la catastrophe pour Antoine Blanchet, héritier de l’ancestrale fabrique familiale de balances.",
+      "title": "Un bon patron",
+      "year": 2026
+    }
+  },
+  {
+    "date_time": "2026-11-16T16:00:00.000000",
+    "movie": {
+      "actors": "Didier Bourdon, Catherine Frot, Jean-François Cayrey",
+      "countries": [
+        "France"
+      ],
+      "directors": "Philippe de Chauveron",
+      "duration": "datetime.timedelta(seconds=5220)",
+      "genres": "Comédie",
+      "img_url": "https://fr.web.img5.acsta.net/img/e0/fa/e0fa1b691ed74bcdc54a9761aa33dbb4.jpg",
+      "language": "Français",
+      "movie_id": 1000031925,
+      "original_title": "Un bon patron",
+      "rating": 2.54,
+      "release_date": "2026-11-04",
+      "screen_format": "Numérique",
+      "synopsis": "En quelques jours seulement, tout semble virer à la catastrophe pour Antoine Blanchet, héritier de l’ancestrale fabrique familiale de balances.",
+      "title": "Un bon patron",
+      "year": 2026
+    }
+  },
+  {
+    "date_time": "2026-11-16T20:00:00.000000",
+    "movie": {
+      "actors": "Didier Bourdon, Catherine Frot, Jean-François Cayrey",
+      "countries": [
+        "France"
+      ],
+      "directors": "Philippe de Chauveron",
+      "duration": "datetime.timedelta(seconds=5220)",
+      "genres": "Comédie",
+      "img_url": "https://fr.web.img5.acsta.net/img/e0/fa/e0fa1b691ed74bcdc54a9761aa33dbb4.jpg",
+      "language": "Français",
+      "movie_id": 1000031925,
+      "original_title": "Un bon patron",
+      "rating": 2.54,
+      "release_date": "2026-11-04",
+      "screen_format": "Numérique",
+      "synopsis": "En quelques jours seulement, tout semble virer à la catastrophe pour Antoine Blanchet, héritier de l’ancestrale fabrique familiale de balances.",
+      "title": "Un bon patron",
+      "year": 2026
+    }
+  },
+  {
+    "date_time": "2026-11-16T16:30:00.000000",
+    "movie": {
+      "actors": "Deva Cassel, Julien De Saint-Jean, Romain Duris",
+      "countries": [
+        "France"
+      ],
+      "directors": "Alexandre Castagnetti",
+      "duration": "datetime.timedelta(seconds=8040)",
+      "genres": "Drame, Romance, Fantastique",
+      "img_url": "https://fr.web.img6.acsta.net/img/9e/85/9e85825c32a9d2be8135074c9e45c870.jpg",
+      "language": "Français",
+      "movie_id": 1000019622,
+      "original_title": "Le Fantôme de l'Opéra",
+      "rating": 3.04,
+      "release_date": "2026-10-28",
+      "screen_format": "Numérique",
+      "synopsis": "Dans le Paris d'aujourd'hui, Anastasia, jeune danseuse, intègre le prestigieux Opéra de Paris. Alors qu’elle répète l'Orpheus, un opéra maudit qui aurait été composé par le Fantôme de l'Opéra, elle tombe amoureuse d'un mystérieux pianiste.",
+      "title": "Le Fantôme de l'Opéra",
+      "year": 2026
+    }
+  },
+  {
+    "date_time": "2026-11-16T19:00:00.000000",
+    "movie": {
+      "actors": "Deva Cassel, Julien De Saint-Jean, Romain Duris",
+      "countries": [
+        "France"
+      ],
+      "directors": "Alexandre Castagnetti",
+      "duration": "datetime.timedelta(seconds=8040)",
+      "genres": "Drame, Romance, Fantastique",
+      "img_url": "https://fr.web.img6.acsta.net/img/9e/85/9e85825c32a9d2be8135074c9e45c870.jpg",
+      "language": "Français",
+      "movie_id": 1000019622,
+      "original_title": "Le Fantôme de l'Opéra",
+      "rating": 3.04,
+      "release_date": "2026-10-28",
+      "screen_format": "Numérique",
+      "synopsis": "Dans le Paris d'aujourd'hui, Anastasia, jeune danseuse, intègre le prestigieux Opéra de Paris. Alors qu’elle répète l'Orpheus, un opéra maudit qui aurait été composé par le Fantôme de l'Opéra, elle tombe amoureuse d'un mystérieux pianiste.",
+      "title": "Le Fantôme de l'Opéra",
+      "year": 2026
+    }
+  },
+  {
+    "date_time": "2026-11-16T17:15:00.000000",
+    "movie": {
+      "actors": "Vincent Lindon, Tahar Rahim, Camille Cottin",
+      "countries": [
+        "France"
+      ],
+      "directors": "Fred Cavayé",
+      "duration": "datetime.timedelta(seconds=10560)",
+      "genres": "Drame, Historique",
+      "img_url": "https://fr.web.img4.acsta.net/img/5a/41/5a4186d62d534f2da65c2e9e8e822a34.jpg",
+      "language": "Français",
+      "movie_id": 326160,
+      "original_title": "Les Misérables",
+      "rating": 4.09,
+      "release_date": "2026-10-14",
+      "screen_format": "Numérique",
+      "synopsis": "Libéré après 19 ans de bagne pour le vol d’un pain, Jean Valjean décide de changer de vie et de faire le bien autour de lui. Sous une fausse identité, il devient avec le temps un notable respecté de tous. Mais son passé le rattrape...",
+      "title": "Les Misérables",
+      "year": 2026
+    }
+  },
+  {
+    "date_time": "2026-11-16T20:30:00.000000",
+    "movie": {
+      "actors": "Vincent Lindon, Tahar Rahim, Camille Cottin",
+      "countries": [
+        "France"
+      ],
+      "directors": "Fred Cavayé",
+      "duration": "datetime.timedelta(seconds=10560)",
+      "genres": "Drame, Historique",
+      "img_url": "https://fr.web.img4.acsta.net/img/5a/41/5a4186d62d534f2da65c2e9e8e822a34.jpg",
+      "language": "Français",
+      "movie_id": 326160,
+      "original_title": "Les Misérables",
+      "rating": 4.09,
+      "release_date": "2026-10-14",
+      "screen_format": "Numérique",
+      "synopsis": "Libéré après 19 ans de bagne pour le vol d’un pain, Jean Valjean décide de changer de vie et de faire le bien autour de lui. Sous une fausse identité, il devient avec le temps un notable respecté de tous. Mais son passé le rattrape...",
+      "title": "Les Misérables",
+      "year": 2026
+    }
+  },
+  {
+    "date_time": "2026-11-16T18:00:00.000000",
+    "movie": {
+      "actors": "Brad Pitt, Uber, J.K. Simmons",
+      "countries": [
+        "U.S.A."
+      ],
+      "directors": "David Ayer",
+      "duration": "datetime.timedelta(seconds=6060)",
+      "genres": "Action, Aventure",
+      "img_url": "https://fr.web.img2.acsta.net/img/6f/af/6faf7d9aa879bd9374e773f31db44956.jpg",
+      "language": "Français",
+      "movie_id": 1000000085,
+      "original_title": "Heart Of The Beast",
+      "rating": 3.74,
+      "release_date": "2026-09-23",
+      "screen_format": "Numérique",
+      "synopsis": "Après un terrible crash d’avion, James Belmont, ancien des forces spéciales, se retrouve perdu au cœur de l’Alaska avec son chien Odin, depuis toujours à ses côtés. Livrés à eux-mêmes dans une nature aussi magnifique qu’impitoyable, ils devront puiser dans leurs dernières forces pour survivre ensemble.",
+      "title": "Heart Of The Beast",
+      "year": 2026
+    }
+  },
+  {
+    "date_time": "2026-11-16T20:00:00.000000",
+    "movie": {
+      "actors": "Nicolas Trouvé",
+      "countries": [
+        "France"
+      ],
+      "directors": "Basile Monnot, Samy Bouyssié",
+      "duration": "datetime.timedelta(seconds=6060)",
+      "genres": "Documentaire",
+      "img_url": "https://fr.web.img2.acsta.net/img/2d/5b/2d5be7939e2b342391de951db5694ca7.jpg",
+      "language": "Français",
+      "movie_id": 1000051934,
+      "original_title": "Papa où t'es ?",
+      "rating": 4.31,
+      "release_date": "2026-10-28",
+      "screen_format": "Numérique",
+      "synopsis": "À 27 ans, Nicolas n’a presque aucun souvenir de son enfance et n’a jamais connu son père. Décidé à le retrouver, il récupère son dossier de l’Aide sociale à l’enfance et se lance sur sa trace.",
+      "title": "Papa où t'es ?",
+      "year": 2026
+    }
+  },
+  {
+    "date_time": "2026-11-16T22:00:00.000000",
+    "movie": {
+      "actors": "Nicolas Trouvé",
+      "countries": [
+        "France"
+      ],
+      "directors": "Basile Monnot, Samy Bouyssié",
+      "duration": "datetime.timedelta(seconds=6060)",
+      "genres": "Documentaire",
+      "img_url": "https://fr.web.img2.acsta.net/img/2d/5b/2d5be7939e2b342391de951db5694ca7.jpg",
+      "language": "Français",
+      "movie_id": 1000051934,
+      "original_title": "Papa où t'es ?",
+      "rating": 4.31,
+      "release_date": "2026-10-28",
+      "screen_format": "Numérique",
+      "synopsis": "À 27 ans, Nicolas n’a presque aucun souvenir de son enfance et n’a jamais connu son père. Décidé à le retrouver, il récupère son dossier de l’Aide sociale à l’enfance et se lance sur sa trace.",
+      "title": "Papa où t'es ?",
+      "year": 2026
+    }
+  },
+  {
+    "date_time": "2026-11-16T20:00:00.000000",
+    "movie": {
+      "actors": "Kev Adams, Chantal Ladesou, Camille Aguilar",
+      "countries": [
+        "France"
+      ],
+      "directors": "Claude Zidi Jr.",
+      "duration": "datetime.timedelta(seconds=5400)",
+      "genres": "Comédie",
+      "img_url": "https://fr.web.img3.acsta.net/img/7f/e6/7fe6fefcab6e4951dac81cebd7c5e202.jpg",
+      "language": "Français",
+      "movie_id": 1000031247,
+      "original_title": "La Maison de nos rêves",
+      "rating": 2.56,
+      "release_date": "2026-10-07",
+      "screen_format": "Numérique",
+      "synopsis": "Un jeune couple pense avoir enfin trouvé la solution miracle pour devenir propriétaire : Un Viager, une maison sublime au bord du lac, une dame mourante, bref, le plan parfait. Mais une fois le contrat signé la dame va beaucoup mieux et va transformer leur rêve immobilier en véritable cauchemar.",
+      "title": "La Maison de nos rêves",
+      "year": 2026
+    }
+  },
+  {
+    "date_time": "2026-11-16T21:45:00.000000",
+    "movie": {
+      "actors": "Tom Rhys Harries, Naomi Ackie, Eddie Marsan",
+      "countries": [
+        "U.S.A."
+      ],
+      "directors": "James Watkins",
+      "duration": "datetime.timedelta(seconds=6540)",
+      "genres": "Epouvante-horreur, Thriller, Drame",
+      "img_url": "https://fr.web.img6.acsta.net/img/98/f1/98f14da258dd56c0ff1bcb12a4929e85.jpg",
+      "language": "Français",
+      "movie_id": 1000016901,
+      "original_title": "Clayface",
+      "rating": 3.82,
+      "release_date": "2026-10-21",
+      "screen_format": "Numérique",
+      "synopsis": "Star hollywoodienne en pleine ascension, Matt Hagen se retrouve atrocement défiguré par un baron du crime. Il se tourne vers un traitement expérimental qui lui rend miraculeusement son apparence... mais altère profondément sa perception de la réalité.",
+      "title": "Clayface",
+      "year": 2026
+    }
+  },
+  {
+    "date_time": "2026-11-16T21:45:00.000000",
+    "movie": {
+      "actors": "Jessica Chastain, Jay Duplass, Arabella Olivia Clark",
+      "countries": [
+        "U.S.A."
+      ],
+      "directors": "Rob Savage",
+      "duration": "datetime.timedelta(seconds=5640)",
+      "genres": "Epouvante-horreur",
+      "img_url": "https://fr.web.img5.acsta.net/img/9e/c5/9ec5c971224bc443153c1a8da6c73e07.jpg",
+      "language": "Français",
+      "movie_id": 1000023068,
+      "original_title": "Other Mommy",
+      "rating": 1.89,
+      "release_date": "2026-10-14",
+      "screen_format": "Numérique",
+      "synopsis": "MALFAISANTE nous entraine dans l’univers de la très jeune Bela, dont le quotidien se détériore de jour en jour en raison de la relation qu’elle entretient, au cœur de sa propre maison, avec une entité malveillante qui ressemble étrangement à sa propre mère.",
+      "title": "Malfaisante",
+      "year": 2026
+    }
+  },
+  {
+    "date_time": "2026-11-17T13:45:00.000000",
+    "movie": {
+      "actors": "Nicholas Hoult, Pete Davidson, Zoë Kravitz",
+      "countries": [
+        "U.S.A."
+      ],
+      "directors": "David Leitch",
+      "duration": "datetime.timedelta(seconds=7260)",
+      "genres": "Action, Thriller, Policier",
+      "img_url": "https://fr.web.img4.acsta.net/img/12/bb/12bb4f199e78e6b5d5d1bcbcbe702acb.jpg",
+      "language": "Français",
+      "movie_id": 1000020289,
+      "original_title": "How To Rob A Bank",
+      "rating": 3.13,
+      "release_date": "2026-11-11",
+      "screen_format": "Numérique",
+      "synopsis": "Une équipe de braqueurs filme ses hold-up en direct et devient viral. Mais leur célébrité grandissante attire l'attention d'un agent du FBI et d'une ingénieure informatique déterminés à les arrêter. Alors que cet improbable duo se rapproche dangereusement d’eux, le gang décide de tout miser sur le braquage le plus ambitieux de leur carrière.",
+      "title": "Comment braquer une banque",
+      "year": 2026
+    }
+  },
+  {
+    "date_time": "2026-11-17T16:30:00.000000",
+    "movie": {
+      "actors": "Nicholas Hoult, Pete Davidson, Zoë Kravitz",
+      "countries": [
+        "U.S.A."
+      ],
+      "directors": "David Leitch",
+      "duration": "datetime.timedelta(seconds=7260)",
+      "genres": "Action, Thriller, Policier",
+      "img_url": "https://fr.web.img4.acsta.net/img/12/bb/12bb4f199e78e6b5d5d1bcbcbe702acb.jpg",
+      "language": "Français",
+      "movie_id": 1000020289,
+      "original_title": "How To Rob A Bank",
+      "rating": 3.13,
+      "release_date": "2026-11-11",
+      "screen_format": "Numérique",
+      "synopsis": "Une équipe de braqueurs filme ses hold-up en direct et devient viral. Mais leur célébrité grandissante attire l'attention d'un agent du FBI et d'une ingénieure informatique déterminés à les arrêter. Alors que cet improbable duo se rapproche dangereusement d’eux, le gang décide de tout miser sur le braquage le plus ambitieux de leur carrière.",
+      "title": "Comment braquer une banque",
+      "year": 2026
+    }
+  },
+  {
+    "date_time": "2026-11-17T19:00:00.000000",
+    "movie": {
+      "actors": "Nicholas Hoult, Pete Davidson, Zoë Kravitz",
+      "countries": [
+        "U.S.A."
+      ],
+      "directors": "David Leitch",
+      "duration": "datetime.timedelta(seconds=7260)",
+      "genres": "Action, Thriller, Policier",
+      "img_url": "https://fr.web.img4.acsta.net/img/12/bb/12bb4f199e78e6b5d5d1bcbcbe702acb.jpg",
+      "language": "Français",
+      "movie_id": 1000020289,
+      "original_title": "How To Rob A Bank",
+      "rating": 3.13,
+      "release_date": "2026-11-11",
+      "screen_format": "Numérique",
+      "synopsis": "Une équipe de braqueurs filme ses hold-up en direct et devient viral. Mais leur célébrité grandissante attire l'attention d'un agent du FBI et d'une ingénieure informatique déterminés à les arrêter. Alors que cet improbable duo se rapproche dangereusement d’eux, le gang décide de tout miser sur le braquage le plus ambitieux de leur carrière.",
+      "title": "Comment braquer une banque",
+      "year": 2026
+    }
+  },
+  {
+    "date_time": "2026-11-17T21:30:00.000000",
+    "movie": {
+      "actors": "Nicholas Hoult, Pete Davidson, Zoë Kravitz",
+      "countries": [
+        "U.S.A."
+      ],
+      "directors": "David Leitch",
+      "duration": "datetime.timedelta(seconds=7260)",
+      "genres": "Action, Thriller, Policier",
+      "img_url": "https://fr.web.img4.acsta.net/img/12/bb/12bb4f199e78e6b5d5d1bcbcbe702acb.jpg",
+      "language": "Français",
+      "movie_id": 1000020289,
+      "original_title": "How To Rob A Bank",
+      "rating": 3.13,
+      "release_date": "2026-11-11",
+      "screen_format": "Numérique",
+      "synopsis": "Une équipe de braqueurs filme ses hold-up en direct et devient viral. Mais leur célébrité grandissante attire l'attention d'un agent du FBI et d'une ingénieure informatique déterminés à les arrêter. Alors que cet improbable duo se rapproche dangereusement d’eux, le gang décide de tout miser sur le braquage le plus ambitieux de leur carrière.",
+      "title": "Comment braquer une banque",
+      "year": 2026
+    }
+  },
+  {
+    "date_time": "2026-11-17T14:00:00.000000",
+    "movie": {
+      "actors": "Louise Coldefy, Julia Piaton, Artus",
+      "countries": [
+        "France"
+      ],
+      "directors": "Albert Dupontel",
+      "duration": "datetime.timedelta(seconds=4860)",
+      "genres": "Comédie",
+      "img_url": "https://fr.web.img6.acsta.net/img/b7/22/b722617d1263956a4b556c739a49afc3.jpg",
+      "language": "Français",
+      "movie_id": 1000039483,
+      "original_title": "Il faut brûler Maman",
+      "rating": 3.11,
+      "release_date": "2026-11-11",
+      "screen_format": "Numérique",
+      "synopsis": "Dans une famille de croque-morts, deux sœurs et un frère se retrouvent pour les funérailles de leur mère. Le personnel étant en grève, ils doivent accomplir le protocole funéraire par eux-mêmes. Comment s’accorder pour brûler Maman ?",
+      "title": "Il faut brûler Maman",
+      "year": 2026
+    }
+  },
+  {
+    "date_time": "2026-11-17T16:00:00.000000",
+    "movie": {
+      "actors": "Louise Coldefy, Julia Piaton, Artus",
+      "countries": [
+        "France"
+      ],
+      "directors": "Albert Dupontel",
+      "duration": "datetime.timedelta(seconds=4860)",
+      "genres": "Comédie",
+      "img_url": "https://fr.web.img6.acsta.net/img/b7/22/b722617d1263956a4b556c739a49afc3.jpg",
+      "language": "Français",
+      "movie_id": 1000039483,
+      "original_title": "Il faut brûler Maman",
+      "rating": 3.11,
+      "release_date": "2026-11-11",
+      "screen_format": "Numérique",
+      "synopsis": "Dans une famille de croque-morts, deux sœurs et un frère se retrouvent pour les funérailles de leur mère. Le personnel étant en grève, ils doivent accomplir le protocole funéraire par eux-mêmes. Comment s’accorder pour brûler Maman ?",
+      "title": "Il faut brûler Maman",
+      "year": 2026
+    }
+  },
+  {
+    "date_time": "2026-11-17T18:00:00.000000",
+    "movie": {
+      "actors": "Louise Coldefy, Julia Piaton, Artus",
+      "countries": [
+        "France"
+      ],
+      "directors": "Albert Dupontel",
+      "duration": "datetime.timedelta(seconds=4860)",
+      "genres": "Comédie",
+      "img_url": "https://fr.web.img6.acsta.net/img/b7/22/b722617d1263956a4b556c739a49afc3.jpg",
+      "language": "Français",
+      "movie_id": 1000039483,
+      "original_title": "Il faut brûler Maman",
+      "rating": 3.11,
+      "release_date": "2026-11-11",
+      "screen_format": "Numérique",
+      "synopsis": "Dans une famille de croque-morts, deux sœurs et un frère se retrouvent pour les funérailles de leur mère. Le personnel étant en grève, ils doivent accomplir le protocole funéraire par eux-mêmes. Comment s’accorder pour brûler Maman ?",
+      "title": "Il faut brûler Maman",
+      "year": 2026
+    }
+  },
+  {
+    "date_time": "2026-11-17T20:00:00.000000",
+    "movie": {
+      "actors": "Louise Coldefy, Julia Piaton, Artus",
+      "countries": [
+        "France"
+      ],
+      "directors": "Albert Dupontel",
+      "duration": "datetime.timedelta(seconds=4860)",
+      "genres": "Comédie",
+      "img_url": "https://fr.web.img6.acsta.net/img/b7/22/b722617d1263956a4b556c739a49afc3.jpg",
+      "language": "Français",
+      "movie_id": 1000039483,
+      "original_title": "Il faut brûler Maman",
+      "rating": 3.11,
+      "release_date": "2026-11-11",
+      "screen_format": "Numérique",
+      "synopsis": "Dans une famille de croque-morts, deux sœurs et un frère se retrouvent pour les funérailles de leur mère. Le personnel étant en grève, ils doivent accomplir le protocole funéraire par eux-mêmes. Comment s’accorder pour brûler Maman ?",
+      "title": "Il faut brûler Maman",
+      "year": 2026
+    }
+  },
+  {
+    "date_time": "2026-11-17T14:00:00.000000",
+    "movie": {
+      "actors": "Johnny Depp, Rupert Grint, Daisy Ridley",
+      "countries": [
+        "U.S.A."
+      ],
+      "directors": "Ti West",
+      "duration": "datetime.timedelta(seconds=6960)",
+      "genres": "Fantastique, Drame, Aventure",
+      "img_url": "https://fr.web.img4.acsta.net/img/ee/1d/ee1d9a9f275b9d7332cf8dff0c5dfd27.jpg",
+      "language": "Français",
+      "movie_id": 1000034007,
+      "original_title": "Ebenezer",
+      "rating": 3.91,
+      "release_date": "2026-11-11",
+      "screen_format": "Numérique",
+      "synopsis": "Pour changer son futur, Scrooge va revivre son passé.",
+      "title": "Scrooge",
+      "year": 2026
+    }
+  },
+  {
+    "date_time": "2026-11-17T16:30:00.000000",
+    "movie": {
+      "actors": "Johnny Depp, Rupert Grint, Daisy Ridley",
+      "countries": [
+        "U.S.A."
+      ],
+      "directors": "Ti West",
+      "duration": "datetime.timedelta(seconds=6960)",
+      "genres": "Fantastique, Drame, Aventure",
+      "img_url": "https://fr.web.img4.acsta.net/img/ee/1d/ee1d9a9f275b9d7332cf8dff0c5dfd27.jpg",
+      "language": "Français",
+      "movie_id": 1000034007,
+      "original_title": "Ebenezer",
+      "rating": 3.91,
+      "release_date": "2026-11-11",
+      "screen_format": "Numérique",
+      "synopsis": "Pour changer son futur, Scrooge va revivre son passé.",
+      "title": "Scrooge",
+      "year": 2026
+    }
+  },
+  {
+    "date_time": "2026-11-17T19:00:00.000000",
+    "movie": {
+      "actors": "Johnny Depp, Rupert Grint, Daisy Ridley",
+      "countries": [
+        "U.S.A."
+      ],
+      "directors": "Ti West",
+      "duration": "datetime.timedelta(seconds=6960)",
+      "genres": "Fantastique, Drame, Aventure",
+      "img_url": "https://fr.web.img4.acsta.net/img/ee/1d/ee1d9a9f275b9d7332cf8dff0c5dfd27.jpg",
+      "language": "Français",
+      "movie_id": 1000034007,
+      "original_title": "Ebenezer",
+      "rating": 3.91,
+      "release_date": "2026-11-11",
+      "screen_format": "Numérique",
+      "synopsis": "Pour changer son futur, Scrooge va revivre son passé.",
+      "title": "Scrooge",
+      "year": 2026
+    }
+  },
+  {
+    "date_time": "2026-11-17T21:45:00.000000",
+    "movie": {
+      "actors": "Johnny Depp, Rupert Grint, Daisy Ridley",
+      "countries": [
+        "U.S.A."
+      ],
+      "directors": "Ti West",
+      "duration": "datetime.timedelta(seconds=6960)",
+      "genres": "Fantastique, Drame, Aventure",
+      "img_url": "https://fr.web.img4.acsta.net/img/ee/1d/ee1d9a9f275b9d7332cf8dff0c5dfd27.jpg",
+      "language": "Français",
+      "movie_id": 1000034007,
+      "original_title": "Ebenezer",
+      "rating": 3.91,
+      "release_date": "2026-11-11",
+      "screen_format": "Numérique",
+      "synopsis": "Pour changer son futur, Scrooge va revivre son passé.",
+      "title": "Scrooge",
+      "year": 2026
+    }
+  },
+  {
+    "date_time": "2026-11-17T18:00:00.000000",
+    "movie": {
+      "actors": "Paul Syre, Mark Anthony Williams, Danielle Kennedy",
+      "countries": [
+        "U.S.A."
+      ],
+      "directors": "Nicholas Pineda",
+      "duration": "datetime.timedelta(seconds=5220)",
+      "genres": "Epouvante-horreur",
+      "img_url": "https://fr.web.img6.acsta.net/img/65/97/6597b4d07ce512c9eebe240fc67babd7.jpg",
+      "language": "Français",
+      "movie_id": 1000048020,
+      "original_title": "Infirmary",
+      "rating": 1.74,
+      "release_date": "2026-11-11",
+      "screen_format": "Numérique",
+      "synopsis": "Un gardien a disparu lors de sa première nuit dans un ancien hôpital psychiatrique. Les images de vidéosurveillance montrent des incidents inexplicables qui continuent de déconcerter les enquêteurs.",
+      "title": "Infirmary",
+      "year": 2026
+    }
+  },
+  {
+    "date_time": "2026-11-17T22:00:00.000000",
+    "movie": {
+      "actors": "Paul Syre, Mark Anthony Williams, Danielle Kennedy",
+      "countries": [
+        "U.S.A."
+      ],
+      "directors": "Nicholas Pineda",
+      "duration": "datetime.timedelta(seconds=5220)",
+      "genres": "Epouvante-horreur",
+      "img_url": "https://fr.web.img6.acsta.net/img/65/97/6597b4d07ce512c9eebe240fc67babd7.jpg",
+      "language": "Français",
+      "movie_id": 1000048020,
+      "original_title": "Infirmary",
+      "rating": 1.74,
+      "release_date": "2026-11-11",
+      "screen_format": "Numérique",
+      "synopsis": "Un gardien a disparu lors de sa première nuit dans un ancien hôpital psychiatrique. Les images de vidéosurveillance montrent des incidents inexplicables qui continuent de déconcerter les enquêteurs.",
+      "title": "Infirmary",
+      "year": 2026
+    }
+  },
+  {
+    "date_time": "2026-11-17T13:45:00.000000",
+    "movie": {
+      "actors": "Gilles Lellouche, Lars Eidinger, Louise Bourgoin",
+      "countries": [
+        "France"
+      ],
+      "directors": "László Nemes",
+      "duration": "datetime.timedelta(seconds=8040)",
+      "genres": "Drame, Historique",
+      "img_url": "https://fr.web.img6.acsta.net/img/0f/7f/0f7fb216155bf7bcf7bb69d9e2f65310.jpg",
+      "language": "Français",
+      "movie_id": 1000020311,
+      "original_title": "Moulin",
+      "rating": 3.54,
+      "release_date": "2026-10-28",
+      "screen_format": "Numérique",
+      "synopsis": "Juin 1943, Jean Moulin, chef de la Résistance, est arrêté alors qu'il tente de réunifier les forces de l’Armée Secrète. Interrogé par Klaus Barbie, le chef de la Gestapo de Lyon, Moulin est entraîné dans une confrontation implacable.",
+      "title": "Moulin",
+      "year": 2026
+    }
+  },
+  {
+    "date_time": "2026-11-17T16:20:00.000000",
+    "movie": {
+      "actors": "Gilles Lellouche, Lars Eidinger, Louise Bourgoin",
+      "countries": [
+        "France"
+      ],
+      "directors": "László Nemes",
+      "duration": "datetime.timedelta(seconds=8040)",
+      "genres": "Drame, Historique",
+      "img_url": "https://fr.web.img6.acsta.net/img/0f/7f/0f7fb216155bf7bcf7bb69d9e2f65310.jpg",
+      "language": "Français",
+      "movie_id": 1000020311,
+      "original_title": "Moulin",
+      "rating": 3.54,
+      "release_date": "2026-10-28",
+      "screen_format": "Numérique",
+      "synopsis": "Juin 1943, Jean Moulin, chef de la Résistance, est arrêté alors qu'il tente de réunifier les forces de l’Armée Secrète. Interrogé par Klaus Barbie, le chef de la Gestapo de Lyon, Moulin est entraîné dans une confrontation implacable.",
+      "title": "Moulin",
+      "year": 2026
+    }
+  },
+  {
+    "date_time": "2026-11-17T19:00:00.000000",
+    "movie": {
+      "actors": "Gilles Lellouche, Lars Eidinger, Louise Bourgoin",
+      "countries": [
+        "France"
+      ],
+      "directors": "László Nemes",
+      "duration": "datetime.timedelta(seconds=8040)",
+      "genres": "Drame, Historique",
+      "img_url": "https://fr.web.img6.acsta.net/img/0f/7f/0f7fb216155bf7bcf7bb69d9e2f65310.jpg",
+      "language": "Français",
+      "movie_id": 1000020311,
+      "original_title": "Moulin",
+      "rating": 3.54,
+      "release_date": "2026-10-28",
+      "screen_format": "Numérique",
+      "synopsis": "Juin 1943, Jean Moulin, chef de la Résistance, est arrêté alors qu'il tente de réunifier les forces de l’Armée Secrète. Interrogé par Klaus Barbie, le chef de la Gestapo de Lyon, Moulin est entraîné dans une confrontation implacable.",
+      "title": "Moulin",
+      "year": 2026
+    }
+  },
+  {
+    "date_time": "2026-11-17T21:15:00.000000",
+    "movie": {
+      "actors": "Gilles Lellouche, Lars Eidinger, Louise Bourgoin",
+      "countries": [
+        "France"
+      ],
+      "directors": "László Nemes",
+      "duration": "datetime.timedelta(seconds=8040)",
+      "genres": "Drame, Historique",
+      "img_url": "https://fr.web.img6.acsta.net/img/0f/7f/0f7fb216155bf7bcf7bb69d9e2f65310.jpg",
+      "language": "Français",
+      "movie_id": 1000020311,
+      "original_title": "Moulin",
+      "rating": 3.54,
+      "release_date": "2026-10-28",
+      "screen_format": "Numérique",
+      "synopsis": "Juin 1943, Jean Moulin, chef de la Résistance, est arrêté alors qu'il tente de réunifier les forces de l’Armée Secrète. Interrogé par Klaus Barbie, le chef de la Gestapo de Lyon, Moulin est entraîné dans une confrontation implacable.",
+      "title": "Moulin",
+      "year": 2026
+    }
+  },
+  {
+    "date_time": "2026-11-17T13:45:00.000000",
+    "movie": {
+      "actors": "Ryûnosuke Kamiki, Minami Hamabe, Yamada Yuki",
+      "countries": [
+        "Japon"
+      ],
+      "directors": "Takashi Yamazaki",
+      "duration": "datetime.timedelta(seconds=8100)",
+      "genres": "Science Fiction",
+      "img_url": "https://fr.web.img6.acsta.net/img/62/57/625799426a89e53445b5fb0b842cd241.jpg",
+      "language": "Français",
+      "movie_id": 1000014492,
+      "original_title": "Godzilla Minus Zero",
+      "rating": 3.77,
+      "release_date": "2026-11-04",
+      "screen_format": "Numérique",
+      "synopsis": "La guerre a détruit le Japon. Godzilla a réduit ses ultimes espoirs à zéro. Deux ans ont passé. Alors que l’humanité commence enfin à renouer avec une paix difficilement acquise, une nouvelle menace surgit et anéantit tout espoir en un instant.",
+      "title": "Godzilla Minus Zero",
+      "year": 2026
+    }
+  },
+  {
+    "date_time": "2026-11-17T21:30:00.000000",
+    "movie": {
+      "actors": "Ryûnosuke Kamiki, Minami Hamabe, Yamada Yuki",
+      "countries": [
+        "Japon"
+      ],
+      "directors": "Takashi Yamazaki",
+      "duration": "datetime.timedelta(seconds=8100)",
+      "genres": "Science Fiction",
+      "img_url": "https://fr.web.img6.acsta.net/img/62/57/625799426a89e53445b5fb0b842cd241.jpg",
+      "language": "Français",
+      "movie_id": 1000014492,
+      "original_title": "Godzilla Minus Zero",
+      "rating": 3.77,
+      "release_date": "2026-11-04",
+      "screen_format": "Numérique",
+      "synopsis": "La guerre a détruit le Japon. Godzilla a réduit ses ultimes espoirs à zéro. Deux ans ont passé. Alors que l’humanité commence enfin à renouer avec une paix difficilement acquise, une nouvelle menace surgit et anéantit tout espoir en un instant.",
+      "title": "Godzilla Minus Zero",
+      "year": 2026
+    }
+  },
+  {
+    "date_time": "2026-11-17T13:45:00.000000",
+    "movie": {
+      "actors": "Hafsia Herzi, Nour Salam, Ella Bedoucha",
+      "countries": [
+        "France"
+      ],
+      "directors": "Rudi Rosenberg",
+      "duration": "datetime.timedelta(seconds=5820)",
+      "genres": "Comédie dramatique",
+      "img_url": "https://fr.web.img4.acsta.net/img/d2/e4/d2e423fe953024eca9f0ebb7b2552db2.jpg",
+      "language": "Français",
+      "movie_id": 1000036515,
+      "original_title": "Quelques mots d'amour",
+      "rating": 4.01,
+      "release_date": "2026-10-28",
+      "screen_format": "Numérique",
+      "synopsis": "Sarcelles, 1995. Erika élève seule ses deux enfants. Sa fille Abigaëlle se persuade que son père, qu’elle n’a jamais connu, l’aime en silence quelque part. Lorsqu’elle se met en tête de le retrouver, Erika se sent obligée de l’aider, tout en cherchant à la protéger. En grandissant, la quête d’Abigaëlle se transforme en obsession, entraînant avec elle sa mère, sa meilleure amie, et tous ceux qui comptent.",
+      "title": "Quelques mots d'amour",
+      "year": 2026
+    }
+  },
+  {
+    "date_time": "2026-11-17T16:00:00.000000",
+    "movie": {
+      "actors": "Hafsia Herzi, Nour Salam, Ella Bedoucha",
+      "countries": [
+        "France"
+      ],
+      "directors": "Rudi Rosenberg",
+      "duration": "datetime.timedelta(seconds=5820)",
+      "genres": "Comédie dramatique",
+      "img_url": "https://fr.web.img4.acsta.net/img/d2/e4/d2e423fe953024eca9f0ebb7b2552db2.jpg",
+      "language": "Français",
+      "movie_id": 1000036515,
+      "original_title": "Quelques mots d'amour",
+      "rating": 4.01,
+      "release_date": "2026-10-28",
+      "screen_format": "Numérique",
+      "synopsis": "Sarcelles, 1995. Erika élève seule ses deux enfants. Sa fille Abigaëlle se persuade que son père, qu’elle n’a jamais connu, l’aime en silence quelque part. Lorsqu’elle se met en tête de le retrouver, Erika se sent obligée de l’aider, tout en cherchant à la protéger. En grandissant, la quête d’Abigaëlle se transforme en obsession, entraînant avec elle sa mère, sa meilleure amie, et tous ceux qui comptent.",
+      "title": "Quelques mots d'amour",
+      "year": 2026
+    }
+  },
+  {
+    "date_time": "2026-11-17T13:45:00.000000",
+    "movie": {
+      "actors": "Swann Arlaud, Sandrine Blancke, Harpo Guit",
+      "countries": [
+        "France",
+        "Belgique"
+      ],
+      "directors": "Emmanuel Marre",
+      "duration": "datetime.timedelta(seconds=9540)",
+      "genres": "Drame, Historique",
+      "img_url": "https://fr.web.img4.acsta.net/img/b7/ac/b7acc48dac20e8329866a199e0ff78e8.jpg",
+      "language": "Français",
+      "movie_id": 1000007388,
+      "original_title": "Notre salut",
+      "rating": 3.7,
+      "release_date": "2026-09-30",
+      "screen_format": "Numérique",
+      "synopsis": "Septembre 1940, le régime de Pétain se met en place. Henri Marre, 49 ans, débarque à Vichy sans le sou, sans contact, loin de sa femme et ses enfants. Il voit dans la nouvelle administration l’opportunité de trouver enfin la place qu’il mérite. Dans sa valise, son traité politique édité à compte d’auteur, Notre Salut, où il défend ses convictions patriotiques et ses méthodes d'ingénieur. Son credo : « gagner en efficacité » pour relever la France de la débâcle. Mais peut-être qu’Henri cherche avant tout à fuir sa propre débâcle...",
+      "title": "Notre salut",
+      "year": 2026
+    }
+  },
+  {
+    "date_time": "2026-11-17T14:00:00.000000",
+    "movie": {
+      "actors": "Marion Cotillard, Denis Ménochet, Leonardo Sbaraglia",
+      "countries": [
+        "France"
+      ],
+      "directors": "Guillaume Canet",
+      "duration": "datetime.timedelta(seconds=8400)",
+      "genres": "Thriller, Drame",
+      "img_url": "https://fr.web.img2.acsta.net/img/94/0a/940afff3ed3b09677bf94e2bc7c3009b.jpg",
+      "language": "Français",
+      "movie_id": 1000018384,
+      "original_title": "Karma",
+      "rating": 4.12,
+      "release_date": "2026-10-21",
+      "screen_format": "Numérique",
+      "synopsis": "Dans un village au nord de l’Espagne, Jeanne tente de reconstruire sa vie avec Daniel, qui ne connaît rien de son passé trouble. Un jour, Mateo, le filleul de Jeanne âgé de six ans, disparaît mystérieusement... Afin d’échapper à la police qui la soupçonne rapidement, Jeanne se réfugie en France dans la communauté où elle est née et qu’elle a fuie quelques années auparavant. Daniel ne croit pas à la culpabilité de la femme qu’il aime et va tout faire pour la retrouver avant la police.",
+      "title": "Karma",
+      "year": 2026
+    }
+  },
+  {
+    "date_time": "2026-11-17T18:00:00.000000",
+    "movie": {
+      "actors": "Marion Cotillard, Denis Ménochet, Leonardo Sbaraglia",
+      "countries": [
+        "France"
+      ],
+      "directors": "Guillaume Canet",
+      "duration": "datetime.timedelta(seconds=8400)",
+      "genres": "Thriller, Drame",
+      "img_url": "https://fr.web.img2.acsta.net/img/94/0a/940afff3ed3b09677bf94e2bc7c3009b.jpg",
+      "language": "Français",
+      "movie_id": 1000018384,
+      "original_title": "Karma",
+      "rating": 4.12,
+      "release_date": "2026-10-21",
+      "screen_format": "Numérique",
+      "synopsis": "Dans un village au nord de l’Espagne, Jeanne tente de reconstruire sa vie avec Daniel, qui ne connaît rien de son passé trouble. Un jour, Mateo, le filleul de Jeanne âgé de six ans, disparaît mystérieusement... Afin d’échapper à la police qui la soupçonne rapidement, Jeanne se réfugie en France dans la communauté où elle est née et qu’elle a fuie quelques années auparavant. Daniel ne croit pas à la culpabilité de la femme qu’il aime et va tout faire pour la retrouver avant la police.",
+      "title": "Karma",
+      "year": 2026
+    }
+  },
+  {
+    "date_time": "2026-11-17T20:45:00.000000",
+    "movie": {
+      "actors": "Marion Cotillard, Denis Ménochet, Leonardo Sbaraglia",
+      "countries": [
+        "France"
+      ],
+      "directors": "Guillaume Canet",
+      "duration": "datetime.timedelta(seconds=8400)",
+      "genres": "Thriller, Drame",
+      "img_url": "https://fr.web.img2.acsta.net/img/94/0a/940afff3ed3b09677bf94e2bc7c3009b.jpg",
+      "language": "Français",
+      "movie_id": 1000018384,
+      "original_title": "Karma",
+      "rating": 4.12,
+      "release_date": "2026-10-21",
+      "screen_format": "Numérique",
+      "synopsis": "Dans un village au nord de l’Espagne, Jeanne tente de reconstruire sa vie avec Daniel, qui ne connaît rien de son passé trouble. Un jour, Mateo, le filleul de Jeanne âgé de six ans, disparaît mystérieusement... Afin d’échapper à la police qui la soupçonne rapidement, Jeanne se réfugie en France dans la communauté où elle est née et qu’elle a fuie quelques années auparavant. Daniel ne croit pas à la culpabilité de la femme qu’il aime et va tout faire pour la retrouver avant la police.",
+      "title": "Karma",
+      "year": 2026
+    }
+  },
+  {
+    "date_time": "2026-11-17T14:00:00.000000",
+    "movie": {
+      "actors": "Charlotte Gainsbourg, Cécile de France, Grégory Gadebois",
+      "countries": [
+        "France"
+      ],
+      "directors": "Lauriane Escaffre, Yvo Muller",
+      "duration": "datetime.timedelta(seconds=6120)",
+      "genres": "Thriller, Judiciaire, Historique",
+      "img_url": "https://fr.web.img2.acsta.net/img/4a/3c/4a3cf95bb345d5d71bdc7acf3430323b.jpg",
+      "language": "Français",
+      "movie_id": 323550,
+      "original_title": "L'Affaire Marie-Claire",
+      "rating": 4.15,
+      "release_date": "2026-11-04",
+      "screen_format": "Numérique",
+      "synopsis": "Novembre 1972. Au tribunal de Bobigny, un procès hors norme secoue la France entière. Marie-Claire Chevalier, 16 ans, est accusée d’avoir avorté illégalement. À la barre, sa mère et toutes les femmes qui l’ont aidée. Leur avocate, Gisèle Halimi, fait un pari fou, insensé : elle leur demande de ne pas plaider coupable. Gisèle va faire ce qui n’a jamais été fait auparavant, elle va accuser et attaquer la loi, au risque de tout perdre.",
+      "title": "L'Affaire Marie-Claire",
+      "year": 2026
+    }
+  },
+  {
+    "date_time": "2026-11-17T16:00:00.000000",
+    "movie": {
+      "actors": "Charlotte Gainsbourg, Cécile de France, Grégory Gadebois",
+      "countries": [
+        "France"
+      ],
+      "directors": "Lauriane Escaffre, Yvo Muller",
+      "duration": "datetime.timedelta(seconds=6120)",
+      "genres": "Thriller, Judiciaire, Historique",
+      "img_url": "https://fr.web.img2.acsta.net/img/4a/3c/4a3cf95bb345d5d71bdc7acf3430323b.jpg",
+      "language": "Français",
+      "movie_id": 323550,
+      "original_title": "L'Affaire Marie-Claire",
+      "rating": 4.15,
+      "release_date": "2026-11-04",
+      "screen_format": "Numérique",
+      "synopsis": "Novembre 1972. Au tribunal de Bobigny, un procès hors norme secoue la France entière. Marie-Claire Chevalier, 16 ans, est accusée d’avoir avorté illégalement. À la barre, sa mère et toutes les femmes qui l’ont aidée. Leur avocate, Gisèle Halimi, fait un pari fou, insensé : elle leur demande de ne pas plaider coupable. Gisèle va faire ce qui n’a jamais été fait auparavant, elle va accuser et attaquer la loi, au risque de tout perdre.",
+      "title": "L'Affaire Marie-Claire",
+      "year": 2026
+    }
+  },
+  {
+    "date_time": "2026-11-17T18:00:00.000000",
+    "movie": {
+      "actors": "Charlotte Gainsbourg, Cécile de France, Grégory Gadebois",
+      "countries": [
+        "France"
+      ],
+      "directors": "Lauriane Escaffre, Yvo Muller",
+      "duration": "datetime.timedelta(seconds=6120)",
+      "genres": "Thriller, Judiciaire, Historique",
+      "img_url": "https://fr.web.img2.acsta.net/img/4a/3c/4a3cf95bb345d5d71bdc7acf3430323b.jpg",
+      "language": "Français",
+      "movie_id": 323550,
+      "original_title": "L'Affaire Marie-Claire",
+      "rating": 4.15,
+      "release_date": "2026-11-04",
+      "screen_format": "Numérique",
+      "synopsis": "Novembre 1972. Au tribunal de Bobigny, un procès hors norme secoue la France entière. Marie-Claire Chevalier, 16 ans, est accusée d’avoir avorté illégalement. À la barre, sa mère et toutes les femmes qui l’ont aidée. Leur avocate, Gisèle Halimi, fait un pari fou, insensé : elle leur demande de ne pas plaider coupable. Gisèle va faire ce qui n’a jamais été fait auparavant, elle va accuser et attaquer la loi, au risque de tout perdre.",
+      "title": "L'Affaire Marie-Claire",
+      "year": 2026
+    }
+  },
+  {
+    "date_time": "2026-11-17T14:00:00.000000",
+    "movie": {
+      "actors": "Didier Bourdon, Catherine Frot, Jean-François Cayrey",
+      "countries": [
+        "France"
+      ],
+      "directors": "Philippe de Chauveron",
+      "duration": "datetime.timedelta(seconds=5220)",
+      "genres": "Comédie",
+      "img_url": "https://fr.web.img5.acsta.net/img/e0/fa/e0fa1b691ed74bcdc54a9761aa33dbb4.jpg",
+      "language": "Français",
+      "movie_id": 1000031925,
+      "original_title": "Un bon patron",
+      "rating": 2.54,
+      "release_date": "2026-11-04",
+      "screen_format": "Numérique",
+      "synopsis": "En quelques jours seulement, tout semble virer à la catastrophe pour Antoine Blanchet, héritier de l’ancestrale fabrique familiale de balances.",
+      "title": "Un bon patron",
+      "year": 2026
+    }
+  },
+  {
+    "date_time": "2026-11-17T16:00:00.000000",
+    "movie": {
+      "actors": "Didier Bourdon, Catherine Frot, Jean-François Cayrey",
+      "countries": [
+        "France"
+      ],
+      "directors": "Philippe de Chauveron",
+      "duration": "datetime.timedelta(seconds=5220)",
+      "genres": "Comédie",
+      "img_url": "https://fr.web.img5.acsta.net/img/e0/fa/e0fa1b691ed74bcdc54a9761aa33dbb4.jpg",
+      "language": "Français",
+      "movie_id": 1000031925,
+      "original_title": "Un bon patron",
+      "rating": 2.54,
+      "release_date": "2026-11-04",
+      "screen_format": "Numérique",
+      "synopsis": "En quelques jours seulement, tout semble virer à la catastrophe pour Antoine Blanchet, héritier de l’ancestrale fabrique familiale de balances.",
+      "title": "Un bon patron",
+      "year": 2026
+    }
+  },
+  {
+    "date_time": "2026-11-17T20:00:00.000000",
+    "movie": {
+      "actors": "Didier Bourdon, Catherine Frot, Jean-François Cayrey",
+      "countries": [
+        "France"
+      ],
+      "directors": "Philippe de Chauveron",
+      "duration": "datetime.timedelta(seconds=5220)",
+      "genres": "Comédie",
+      "img_url": "https://fr.web.img5.acsta.net/img/e0/fa/e0fa1b691ed74bcdc54a9761aa33dbb4.jpg",
+      "language": "Français",
+      "movie_id": 1000031925,
+      "original_title": "Un bon patron",
+      "rating": 2.54,
+      "release_date": "2026-11-04",
+      "screen_format": "Numérique",
+      "synopsis": "En quelques jours seulement, tout semble virer à la catastrophe pour Antoine Blanchet, héritier de l’ancestrale fabrique familiale de balances.",
+      "title": "Un bon patron",
+      "year": 2026
+    }
+  },
+  {
+    "date_time": "2026-11-17T16:30:00.000000",
+    "movie": {
+      "actors": "Deva Cassel, Julien De Saint-Jean, Romain Duris",
+      "countries": [
+        "France"
+      ],
+      "directors": "Alexandre Castagnetti",
+      "duration": "datetime.timedelta(seconds=8040)",
+      "genres": "Drame, Romance, Fantastique",
+      "img_url": "https://fr.web.img6.acsta.net/img/9e/85/9e85825c32a9d2be8135074c9e45c870.jpg",
+      "language": "Français",
+      "movie_id": 1000019622,
+      "original_title": "Le Fantôme de l'Opéra",
+      "rating": 3.04,
+      "release_date": "2026-10-28",
+      "screen_format": "Numérique",
+      "synopsis": "Dans le Paris d'aujourd'hui, Anastasia, jeune danseuse, intègre le prestigieux Opéra de Paris. Alors qu’elle répète l'Orpheus, un opéra maudit qui aurait été composé par le Fantôme de l'Opéra, elle tombe amoureuse d'un mystérieux pianiste.",
+      "title": "Le Fantôme de l'Opéra",
+      "year": 2026
+    }
+  },
+  {
+    "date_time": "2026-11-17T19:00:00.000000",
+    "movie": {
+      "actors": "Deva Cassel, Julien De Saint-Jean, Romain Duris",
+      "countries": [
+        "France"
+      ],
+      "directors": "Alexandre Castagnetti",
+      "duration": "datetime.timedelta(seconds=8040)",
+      "genres": "Drame, Romance, Fantastique",
+      "img_url": "https://fr.web.img6.acsta.net/img/9e/85/9e85825c32a9d2be8135074c9e45c870.jpg",
+      "language": "Français",
+      "movie_id": 1000019622,
+      "original_title": "Le Fantôme de l'Opéra",
+      "rating": 3.04,
+      "release_date": "2026-10-28",
+      "screen_format": "Numérique",
+      "synopsis": "Dans le Paris d'aujourd'hui, Anastasia, jeune danseuse, intègre le prestigieux Opéra de Paris. Alors qu’elle répète l'Orpheus, un opéra maudit qui aurait été composé par le Fantôme de l'Opéra, elle tombe amoureuse d'un mystérieux pianiste.",
+      "title": "Le Fantôme de l'Opéra",
+      "year": 2026
+    }
+  },
+  {
+    "date_time": "2026-11-17T17:15:00.000000",
+    "movie": {
+      "actors": "Vincent Lindon, Tahar Rahim, Camille Cottin",
+      "countries": [
+        "France"
+      ],
+      "directors": "Fred Cavayé",
+      "duration": "datetime.timedelta(seconds=10560)",
+      "genres": "Drame, Historique",
+      "img_url": "https://fr.web.img4.acsta.net/img/5a/41/5a4186d62d534f2da65c2e9e8e822a34.jpg",
+      "language": "Français",
+      "movie_id": 326160,
+      "original_title": "Les Misérables",
+      "rating": 4.09,
+      "release_date": "2026-10-14",
+      "screen_format": "Numérique",
+      "synopsis": "Libéré après 19 ans de bagne pour le vol d’un pain, Jean Valjean décide de changer de vie et de faire le bien autour de lui. Sous une fausse identité, il devient avec le temps un notable respecté de tous. Mais son passé le rattrape...",
+      "title": "Les Misérables",
+      "year": 2026
+    }
+  },
+  {
+    "date_time": "2026-11-17T20:30:00.000000",
+    "movie": {
+      "actors": "Vincent Lindon, Tahar Rahim, Camille Cottin",
+      "countries": [
+        "France"
+      ],
+      "directors": "Fred Cavayé",
+      "duration": "datetime.timedelta(seconds=10560)",
+      "genres": "Drame, Historique",
+      "img_url": "https://fr.web.img4.acsta.net/img/5a/41/5a4186d62d534f2da65c2e9e8e822a34.jpg",
+      "language": "Français",
+      "movie_id": 326160,
+      "original_title": "Les Misérables",
+      "rating": 4.09,
+      "release_date": "2026-10-14",
+      "screen_format": "Numérique",
+      "synopsis": "Libéré après 19 ans de bagne pour le vol d’un pain, Jean Valjean décide de changer de vie et de faire le bien autour de lui. Sous une fausse identité, il devient avec le temps un notable respecté de tous. Mais son passé le rattrape...",
+      "title": "Les Misérables",
+      "year": 2026
+    }
+  },
+  {
+    "date_time": "2026-11-17T18:00:00.000000",
+    "movie": {
+      "actors": "Brad Pitt, Uber, J.K. Simmons",
+      "countries": [
+        "U.S.A."
+      ],
+      "directors": "David Ayer",
+      "duration": "datetime.timedelta(seconds=6060)",
+      "genres": "Action, Aventure",
+      "img_url": "https://fr.web.img2.acsta.net/img/6f/af/6faf7d9aa879bd9374e773f31db44956.jpg",
+      "language": "Français",
+      "movie_id": 1000000085,
+      "original_title": "Heart Of The Beast",
+      "rating": 3.74,
+      "release_date": "2026-09-23",
+      "screen_format": "Numérique",
+      "synopsis": "Après un terrible crash d’avion, James Belmont, ancien des forces spéciales, se retrouve perdu au cœur de l’Alaska avec son chien Odin, depuis toujours à ses côtés. Livrés à eux-mêmes dans une nature aussi magnifique qu’impitoyable, ils devront puiser dans leurs dernières forces pour survivre ensemble.",
+      "title": "Heart Of The Beast",
+      "year": 2026
+    }
+  },
+  {
+    "date_time": "2026-11-17T20:00:00.000000",
+    "movie": {
+      "actors": "Nicolas Trouvé",
+      "countries": [
+        "France"
+      ],
+      "directors": "Basile Monnot, Samy Bouyssié",
+      "duration": "datetime.timedelta(seconds=6060)",
+      "genres": "Documentaire",
+      "img_url": "https://fr.web.img2.acsta.net/img/2d/5b/2d5be7939e2b342391de951db5694ca7.jpg",
+      "language": "Français",
+      "movie_id": 1000051934,
+      "original_title": "Papa où t'es ?",
+      "rating": 4.31,
+      "release_date": "2026-10-28",
+      "screen_format": "Numérique",
+      "synopsis": "À 27 ans, Nicolas n’a presque aucun souvenir de son enfance et n’a jamais connu son père. Décidé à le retrouver, il récupère son dossier de l’Aide sociale à l’enfance et se lance sur sa trace.",
+      "title": "Papa où t'es ?",
+      "year": 2026
+    }
+  },
+  {
+    "date_time": "2026-11-17T22:00:00.000000",
+    "movie": {
+      "actors": "Nicolas Trouvé",
+      "countries": [
+        "France"
+      ],
+      "directors": "Basile Monnot, Samy Bouyssié",
+      "duration": "datetime.timedelta(seconds=6060)",
+      "genres": "Documentaire",
+      "img_url": "https://fr.web.img2.acsta.net/img/2d/5b/2d5be7939e2b342391de951db5694ca7.jpg",
+      "language": "Français",
+      "movie_id": 1000051934,
+      "original_title": "Papa où t'es ?",
+      "rating": 4.31,
+      "release_date": "2026-10-28",
+      "screen_format": "Numérique",
+      "synopsis": "À 27 ans, Nicolas n’a presque aucun souvenir de son enfance et n’a jamais connu son père. Décidé à le retrouver, il récupère son dossier de l’Aide sociale à l’enfance et se lance sur sa trace.",
+      "title": "Papa où t'es ?",
+      "year": 2026
+    }
+  },
+  {
+    "date_time": "2026-11-17T20:00:00.000000",
+    "movie": {
+      "actors": "Kev Adams, Chantal Ladesou, Camille Aguilar",
+      "countries": [
+        "France"
+      ],
+      "directors": "Claude Zidi Jr.",
+      "duration": "datetime.timedelta(seconds=5400)",
+      "genres": "Comédie",
+      "img_url": "https://fr.web.img3.acsta.net/img/7f/e6/7fe6fefcab6e4951dac81cebd7c5e202.jpg",
+      "language": "Français",
+      "movie_id": 1000031247,
+      "original_title": "La Maison de nos rêves",
+      "rating": 2.56,
+      "release_date": "2026-10-07",
+      "screen_format": "Numérique",
+      "synopsis": "Un jeune couple pense avoir enfin trouvé la solution miracle pour devenir propriétaire : Un Viager, une maison sublime au bord du lac, une dame mourante, bref, le plan parfait. Mais une fois le contrat signé la dame va beaucoup mieux et va transformer leur rêve immobilier en véritable cauchemar.",
+      "title": "La Maison de nos rêves",
+      "year": 2026
+    }
+  },
+  {
+    "date_time": "2026-11-17T21:45:00.000000",
+    "movie": {
+      "actors": "Tom Rhys Harries, Naomi Ackie, Eddie Marsan",
+      "countries": [
+        "U.S.A."
+      ],
+      "directors": "James Watkins",
+      "duration": "datetime.timedelta(seconds=6540)",
+      "genres": "Epouvante-horreur, Thriller, Drame",
+      "img_url": "https://fr.web.img6.acsta.net/img/98/f1/98f14da258dd56c0ff1bcb12a4929e85.jpg",
+      "language": "Français",
+      "movie_id": 1000016901,
+      "original_title": "Clayface",
+      "rating": 3.82,
+      "release_date": "2026-10-21",
+      "screen_format": "Numérique",
+      "synopsis": "Star hollywoodienne en pleine ascension, Matt Hagen se retrouve atrocement défiguré par un baron du crime. Il se tourne vers un traitement expérimental qui lui rend miraculeusement son apparence... mais altère profondément sa perception de la réalité.",
+      "title": "Clayface",
+      "year": 2026
+    }
+  },
+  {
+    "date_time": "2026-11-17T21:45:00.000000",
+    "movie": {
+      "actors": "Jessica Chastain, Jay Duplass, Arabella Olivia Clark",
+      "countries": [
+        "U.S.A."
+      ],
+      "directors": "Rob Savage",
+      "duration": "datetime.timedelta(seconds=5640)",
+      "genres": "Epouvante-horreur",
+      "img_url": "https://fr.web.img5.acsta.net/img/9e/c5/9ec5c971224bc443153c1a8da6c73e07.jpg",
+      "language": "Français",
+      "movie_id": 1000023068,
+      "original_title": "Other Mommy",
+      "rating": 1.89,
+      "release_date": "2026-10-14",
+      "screen_format": "Numérique",
+      "synopsis": "MALFAISANTE nous entraine dans l’univers de la très jeune Bela, dont le quotidien se détériore de jour en jour en raison de la relation qu’elle entretient, au cœur de sa propre maison, avec une entité malveillante qui ressemble étrangement à sa propre mère.",
+      "title": "Malfaisante",
+      "year": 2026
+    }
+  }
+]

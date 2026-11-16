@@ -1,5 +1,6 @@
 import base64
 import json
+import logging
 import re
 import unicodedata
 from collections import Counter
@@ -10,9 +11,11 @@ from os import PathLike
 import jmespath
 from parsel import Selector
 
-from allocine.api import AllocineApi
+from allocine.api import REQUEST_ERRORS, AllocineApi
 from allocine.cache import CacheOption
-from allocine.models import Location, MovieVersion, Showtime, Theater
+from allocine.models import Location, MovieVersion, Showtime, ShowtimeList, Theater
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_DATE_FORMAT = "%Y-%m-%dT%H:%M:%S"
 
@@ -147,16 +150,34 @@ class Allocine:
         theater_id: str,
         from_date: Date | None = None,
         to_date: Date | None = None,
-    ) -> list[Showtime]:
+    ) -> ShowtimeList:
+        """Return the showtimes of a theater for an inclusive date range.
+
+        The returned value behaves like the plain ``list[Showtime]`` it used to be (it
+        is a ``list`` subclass), so existing callers keep iterating over it as before.
+        Extra attributes describe the fetch quality:
+
+        * ``incomplete_dates``: days whose pagination stopped early, sorted;
+        * ``is_complete``: ``False`` as soon as one day is incomplete;
+        * ``is_date_complete(date)``: ``True`` when that day was fully fetched;
+        * ``incomplete_errors``: the error that interrupted each incomplete day.
+
+        When a page after the first one fails, the showtimes already parsed for that day
+        are kept, the following days are still processed, and the day is flagged as
+        incomplete. The first page of a day is never optional: its errors keep bubbling
+        up, so a failed fetch is never disguised as an empty list.
+        """
         today = Date.today()
         from_date = max(from_date or today, today)
         to_date = to_date or from_date
         if from_date > to_date:
             raise ValueError("from_date must be before or equal to to_date")
 
-        showtimes = []
+        showtimes: list[Showtime] = []
+        incomplete_errors: dict[Date, Exception] = {}
         requested_date = from_date
         while requested_date <= to_date:
+            # The first page of a day is not optional: let its errors bubble up.
             response = self._client.get_showtimelist_by_theater_id(
                 theater_id=theater_id,
                 date=requested_date,
@@ -169,18 +190,32 @@ class Allocine:
                     requested_date = next_date
                     continue
             day_showtimes = self._parse_showtimes(response.get("results") or [])
-            for page in range(2, (jmespath.search("pagination.totalPages", response) or 1) + 1):
-                response = self._client.get_showtimelist_by_theater_id(
-                    theater_id=theater_id,
-                    date=requested_date,
-                    page=page,
-                )
-                day_showtimes.extend(self._parse_showtimes(response.get("results") or []))
+            total_pages = jmespath.search("pagination.totalPages", response) or 1
+            for page in range(2, total_pages + 1):
+                try:
+                    page_response = self._client.get_showtimelist_by_theater_id(
+                        theater_id=theater_id,
+                        date=requested_date,
+                        page=page,
+                    )
+                except REQUEST_ERRORS as error:  # keep the pages already parsed for that day
+                    logger.warning(
+                        "Stopping pagination for theater %s on %s: page %s failed, keeping the %s showtime(s) "
+                        "already fetched for that day: %s",
+                        theater_id,
+                        requested_date.isoformat(),
+                        page,
+                        len(day_showtimes),
+                        error,
+                    )
+                    incomplete_errors[requested_date] = error
+                    break
+                day_showtimes.extend(self._parse_showtimes(page_response.get("results") or []))
 
             showtimes.extend(showtime for showtime in day_showtimes if showtime.date == requested_date)
             requested_date += timedelta(days=1)
 
-        return showtimes
+        return ShowtimeList(showtimes, incomplete_errors=incomplete_errors)
 
     def get_geocodes(self, dept: str | int | None = None) -> list[Location]:
         if dept is None:

@@ -59,7 +59,9 @@ def allocine_vcr(request, monkeypatch):
     recorder.register_serializer("json_body", JsonBodySerializer)
     recorder.serializer = "json_body"
 
-    cassette_name = f"{request.node.name.removeprefix('test_')}.json"
+    # Tests can reuse an existing recorded cassette with
+    # @pytest.mark.parametrize("allocine_vcr", ["<cassette name>"], indirect=True).
+    cassette_name = getattr(request, "param", None) or f"{request.node.name.removeprefix('test_')}.json"
     allocine = request.getfixturevalue("allocine")
     original_fetch = allocine._client._fetch
 

@@ -1,5 +1,6 @@
 import logging
 import unicodedata
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import date as Date
 from datetime import datetime, timedelta
@@ -164,6 +165,46 @@ class Showtime(Schedule):
 
     def __str__(self):
         return f"{self.date_str} : {self.movie}"
+
+
+class ShowtimeList(list):
+    """List of showtimes that also knows whether every requested day was fully fetched.
+
+    It behaves exactly like a plain ``list[Showtime]``, so existing callers can keep
+    iterating, indexing, comparing to a list, etc. When the pagination of a day stops
+    early (for example because a page request failed), the showtimes already parsed for
+    that day are kept and the day is listed in :attr:`incomplete_dates`, so callers can
+    tell it apart from a day that genuinely has no showtime. A fully fetched result
+    (including a day the API reports as empty) leaves :attr:`incomplete_dates` empty.
+    """
+
+    def __init__(
+        self,
+        showtimes: Iterable[Showtime] = (),
+        *,
+        incomplete_errors: Mapping[Date, BaseException] | None = None,
+    ):
+        super().__init__(showtimes)
+        self._incomplete_errors: dict[Date, BaseException] = dict(incomplete_errors or {})
+
+    @property
+    def incomplete_dates(self) -> tuple[Date, ...]:
+        """Days whose fetch stopped before their last page, sorted chronologically."""
+        return tuple(sorted(self._incomplete_errors))
+
+    @property
+    def incomplete_errors(self) -> dict[Date, BaseException]:
+        """Copy of the error that interrupted the pagination of each incomplete day."""
+        return dict(self._incomplete_errors)
+
+    @property
+    def is_complete(self) -> bool:
+        """``True`` when no requested day was interrupted by a fetch error."""
+        return not self._incomplete_errors
+
+    def is_date_complete(self, date: Date) -> bool:
+        """``True`` when ``date`` was fetched without any pagination error."""
+        return date not in self._incomplete_errors
 
 
 def day_str(date: Date) -> str:

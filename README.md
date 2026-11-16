@@ -123,6 +123,24 @@ Les ressorties, la VOD et les supports physiques sont exclus. Si aucune sortie i
 n’est disponible, la valeur est `None`. Cette information provient des réponses des séances, sans requête supplémentaire,
 et est conservée par `showtime.movie.get_movie()`. L’attribut `year` reste l’année de production.
 
+`get_showtimes()` renvoie une liste de séances (sous-classe de `list`, donc le parcours, l’indexation
+et la comparaison avec une liste restent inchangés). Si, pour un jour donné, une page de résultats
+suivante (à partir de la page 2) échoue, les séances déjà récupérées ce jour-là sont conservées, les
+jours suivants sont quand même traités, et le jour concerné est signalé comme incomplet :
+
+```python
+showtimes = allocine.get_showtimes("P2235", from_date=..., to_date=...)
+
+showtimes.is_complete               # False si au moins un jour est incomplet
+showtimes.incomplete_dates          # tuple des jours dont le chargement s’est arrêté avant la fin
+showtimes.is_date_complete(une_date)  # False pour un jour incomplet
+showtimes.incomplete_errors          # {date: exception} à l’origine de l’interruption
+```
+
+Une erreur sur la première page d’un jour reste levée comme avant : un échec de récupération n’est
+jamais transformé en « aucune séance ». Les réponses `no.showtime.error` et `next.showtime.on` gardent
+leur comportement d’origine et ne marquent jamais un jour comme incomplet.
+
 Le cache est activé par défaut. Les réponses sont enregistrées dans le répertoire de cache utilisateur du système :
 
 - macOS: `~/Library/Caches/allocine`

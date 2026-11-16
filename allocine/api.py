@@ -19,6 +19,23 @@ class _RateLimitError(Exception):
     pass
 
 
+# Errors raised when a request cannot be completed: transport failures, exhausted retries
+# on rate limiting, unexpected HTTP status and undecodable bodies. Callers that can degrade
+# gracefully (e.g. showtime pagination) need to catch exactly this set.
+REQUEST_ERRORS: tuple[type[Exception], ...] = (
+    _RateLimitError,
+    ValueError,
+    wreq.BodyError,
+    wreq.ConnectionError,
+    wreq.ConnectionResetError,
+    wreq.DecodingError,
+    wreq.RedirectError,
+    wreq.RequestError,
+    wreq.TimeoutError,
+    wreq.TlsError,
+)
+
+
 class AllocineApi:
     """Client to process requests with the Allocine APIs."""
 
@@ -129,18 +146,7 @@ class AllocineApi:
 
         try:
             response = self._fetch(url, expected_status, *args, not_found_ok=not_found_ok, **kwargs)
-        except (
-            _RateLimitError,
-            ValueError,
-            wreq.BodyError,
-            wreq.ConnectionError,
-            wreq.ConnectionResetError,
-            wreq.DecodingError,
-            wreq.RedirectError,
-            wreq.RequestError,
-            wreq.TimeoutError,
-            wreq.TlsError,
-        ):
+        except REQUEST_ERRORS:
             if cached is not CACHE_MISS and cached.can_serve_on_error():
                 return cached.to_response()
             raise
