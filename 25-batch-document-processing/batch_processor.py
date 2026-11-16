@@ -19,8 +19,10 @@ Cost: batch OCR billed per page (~$1.50 / 1,000 pages), same as sync OCR.
       Supports up to 500 pages per file and thousands of files per batch.
 """
 
+import concurrent.futures
 import json
 import os
+from dataclasses import dataclass, field
 
 import requests
 from google.api_core import exceptions as gax
@@ -36,6 +38,29 @@ OUTPUT_PREFIX = "docai/output/"
 SAMPLE_PDF_URL = (
     "https://storage.googleapis.com/cloud-samples-data/documentai/loan_form.pdf"
 )
+
+
+@dataclass
+class BatchSettlement:
+    """
+    Per-file settlement of one batch collection run.
+
+    records : successfully settled files, each with the stable downstream
+              schema: blob_name, pages, text_length, preview.
+    failures: files that could not be settled, each with blob_name and error
+              so the caller knows exactly what to retry.
+    """
+
+    records: list[dict] = field(default_factory=list)
+    failures: list[dict] = field(default_factory=list)
+
+    @property
+    def succeeded(self) -> int:
+        return len(self.records)
+
+    @property
+    def failed(self) -> int:
+        return len(self.failures)
 
 
 def stage_input_pdf(bucket_name: str, pdf_path: str | None = None) -> str:
@@ -64,12 +89,16 @@ def stage_input_pdf(bucket_name: str, pdf_path: str | None = None) -> str:
     return blob_name
 
 
-def run_batch_process(processor_id: str, bucket_name: str) -> bool:
+def run_batch_process(
+    processor_id: str, bucket_name: str, poll_timeout: int = 600
+) -> bool:
     """
     Submit a Document AI batch_process_documents request and poll until complete.
     Input: all PDFs under gs://<bucket>/<INPUT_PREFIX>
     Output: JSON files written to gs://<bucket>/<OUTPUT_PREFIX>
-    Returns True on success, False on error.
+    Returns True only if the LRO completed successfully; any submission
+    failure, API error, or polling timeout returns False — a failed batch
+    is never reported as success.
     """
     client = documentai.DocumentProcessorServiceClient(
         client_options={"api_endpoint": f"{LOCATION}-documentai.googleapis.com"}
@@ -94,40 +123,67 @@ def run_batch_process(processor_id: str, bucket_name: str) -> bool:
         operation = client.batch_process_documents(request=request)
         print(f"[Batch] Operation: {operation.operation.name}")
         print("[Batch] Polling until done (can take 1-5 minutes for small batches) ...")
-        operation.result(timeout=600)
+        operation.result(timeout=poll_timeout)
         print("[Batch] Batch operation complete.")
         return True
+    except concurrent.futures.TimeoutError:
+        print(f"\n[Batch] ERROR: polling timed out after {poll_timeout}s; "
+              "the batch operation did not complete.")
+        return False
     except (gax.PermissionDenied, gax.FailedPrecondition) as e:
         print("\n[Batch] ERROR: Document AI API call failed.")
         print(f"  gcloud services enable documentai.googleapis.com --project={PROJECT_ID}")
         print(f"\nDetails: {e.message if hasattr(e, 'message') else e}")
         return False
+    except Exception as e:
+        print(f"\n[Batch] ERROR: batch submission/polling failed: {type(e).__name__}: {e}")
+        return False
 
 
-def read_batch_output(bucket_name: str) -> list[dict]:
+def summarize_document_json(blob_name: str, payload: bytes) -> dict:
     """
-    Read all JSON output files from the GCS output prefix.
-    Returns a list of dicts with keys: blob_name, pages, text_length, preview.
+    Parse one Document AI JSON output blob into the stable downstream record
+    schema: blob_name, pages, text_length, preview.
+    Raises on invalid JSON or non-bytes payloads — callers settle per file.
     """
-    gcs = storage.Client(project=PROJECT_ID)
-    results = []
+    doc_json = json.loads(payload)
+    text = doc_json.get("text", "")
+    pages = doc_json.get("pages", [])
+    return {
+        "blob_name": blob_name,
+        "pages": len(pages),
+        "text_length": len(text),
+        "preview": text[:200],
+    }
+
+
+def read_batch_output(bucket_name: str, gcs_client=None) -> BatchSettlement:
+    """
+    Read all JSON output files from the GCS output prefix and settle per file.
+
+    A single blob that fails to download or parse only marks that file as
+    failed (recorded in settlement.failures with blob_name and error); every
+    other file still produces a record. Returns a BatchSettlement.
+    """
+    gcs = gcs_client if gcs_client is not None else storage.Client(project=PROJECT_ID)
+    settlement = BatchSettlement()
 
     print(f"\n[Batch] Reading results from gs://{bucket_name}/{OUTPUT_PREFIX}")
     for blob in gcs.list_blobs(bucket_name, prefix=OUTPUT_PREFIX):
         if not blob.name.endswith(".json"):
             continue
-        doc_json = json.loads(blob.download_as_bytes())
-        text = doc_json.get("text", "")
-        pages = doc_json.get("pages", [])
-        result = {
-            "blob_name": blob.name,
-            "pages": len(pages),
-            "text_length": len(text),
-            "preview": text[:200],
-        }
-        results.append(result)
+        try:
+            result = summarize_document_json(blob.name, blob.download_as_bytes())
+        except Exception as e:
+            failure = {"blob_name": blob.name, "error": f"{type(e).__name__}: {e}"}
+            settlement.failures.append(failure)
+            print(f"\n  {blob.name}\n    FAILED: {failure['error']}")
+            continue
+        settlement.records.append(result)
         print(f"\n  {blob.name}")
-        print(f"    pages: {len(pages)}, text: {len(text):,} chars")
-        print(f"    preview: {text[:200]!r}")
+        print(f"    pages: {result['pages']}, text: {result['text_length']:,} chars")
+        print(f"    preview: {result['preview']!r}")
 
-    return results
+    print(f"\n[Batch] Settlement: {settlement.succeeded} succeeded, "
+          f"{settlement.failed} failed.")
+    return settlement

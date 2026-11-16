@@ -76,15 +76,32 @@ def run_batch_demo(processor_id: str, bucket: str, pdf_path: str | None = None):
     batch_processor.BUCKET = bucket
     batch_processor.stage_input_pdf(bucket, pdf_path)
 
-    # Run the batch job and poll
+    # Run the batch job and poll — a failed/timed-out job is never
+    # treated as success.
     success = batch_processor.run_batch_process(processor_id, bucket)
     if not success:
+        print("\n[Main] ERROR: batch job failed or timed out; "
+              "no results were collected.")
         return None
 
-    # Read and display results
-    results = batch_processor.read_batch_output(bucket)
-    print(f"\n[Main] Batch processing complete: {len(results)} output files read.")
-    return results
+    # Read results and settle per file
+    settlement = batch_processor.read_batch_output(bucket)
+
+    for failure in settlement.failures:
+        print(f"[Main] FAILED file: {failure['blob_name']} — {failure['error']}")
+
+    if not settlement.records:
+        print("\n[Main] ERROR: batch produced no usable results "
+              f"({settlement.failed} file(s) failed). Failing explicitly.")
+        return None
+
+    print(f"\n[Main] Batch settlement: {settlement.succeeded} succeeded, "
+          f"{settlement.failed} failed.")
+    if settlement.failed:
+        print("[Main] Partial success — continuing with the successful records; "
+              "re-run to retry the failed files.")
+    print(f"[Main] Batch processing complete: {settlement.succeeded} output files read.")
+    return settlement.records
 
 
 def run_layout_demo(processor_id: str, pdf_path: str | None = None):
@@ -126,15 +143,21 @@ def main():
     print("Project 25: Batch Document Processing + Layout-Aware RAG Chunking")
     print("=" * 70)
 
+    exit_code = 0
+
     if args.mode in ("batch", "both"):
-        run_batch_demo(args.processor_id, args.bucket, args.pdf)
+        if run_batch_demo(args.processor_id, args.bucket, args.pdf) is None:
+            # Batch demo failed explicitly (job failure, timeout, or no
+            # usable results) — reflect that in the process exit code.
+            exit_code = 1
 
     if args.mode in ("layout", "both"):
         run_layout_demo(args.processor_id, args.pdf)
 
     print("\n" + "=" * 70)
-    print("Done.")
+    print("Done." if exit_code == 0 else "Done (with failures — see above).")
     print("=" * 70)
+    sys.exit(exit_code)
 
 
 if __name__ == "__main__":
