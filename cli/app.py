@@ -9,8 +9,9 @@ import typer
 
 from config import get_config, save_config
 from scraper import MangaScraper
-from downloader import DownloadManager
+from downloader import DownloadManager, RETRY_MANIFEST_FILENAME
 from downloader.manager import parse_chapter_selection
+from models import summarize_results
 
 from .display import (
     console,
@@ -115,20 +116,21 @@ def download_manga(url: str) -> None:
     # Start download with progress
     successful = 0
     failed = 0
-    
+    partial = 0
+
     with create_download_progress() as progress:
         # Main task for chapters
         chapter_task = progress.add_task(
             "[cyan]Downloading chapters concurrently...",
             total=len(indices)
         )
-        
+
         with DownloadManager() as manager:
             # We need to map filtered indices back to original indices IF download_chapters expects manga.chapters indices.
             # However, looking at the code, it's safer to just provide a list of chapters sometimes, but let's see.
             # Actually, manager.download_chapters(manga, indices) uses manga.chapters[idx].
             # So we SHOULD handle the mapping.
-            
+
             original_indices = []
             for idx in indices:
                 chapter = filtered_chapters[idx]
@@ -137,23 +139,29 @@ def download_manga(url: str) -> None:
                     if c.id == chapter.id:
                         original_indices.append(i)
                         break
-            
+
             # Use concurrent download
             results = manager.download_chapters(manga, original_indices)
 
-            
+            summary = summarize_results(results)
+            successful = summary.successful
+            partial = summary.partial
+            failed = summary.failed
+
             for result in results:
-                if result.success:
-                    successful += 1
-                else:
-                    failed += 1
                 progress.advance(chapter_task)
-        
+
         progress.update(chapter_task, description="[green]Download complete!")
-    
+
     # Display results
     output_path = str(Path(config.download_path) / manga.title)
-    display_download_results(successful, failed, output_path)
+    manifest_path = None
+    manifest_file = Path(config.download_path) / RETRY_MANIFEST_FILENAME
+    if (partial > 0 or failed > 0) and manifest_file.exists():
+        manifest_path = str(manifest_file)
+    display_download_results(
+        successful, failed, output_path, partial, manifest_path
+    )
 
 
 def interactive_mode() -> None:
@@ -266,25 +274,35 @@ def main(
                 raise typer.Exit(1)
             
             display_info(f"Downloading {len(indices)} chapter(s)...")
-            
+
             successful = 0
             failed = 0
-            
+            partial = 0
+
             with create_download_progress() as progress:
                 task = progress.add_task("Downloading...", total=len(indices))
-                
+
                 with DownloadManager() as manager:
                     results = manager.download_chapters(manga, indices)
-                    
+
+                    summary = summarize_results(results)
+                    successful = summary.successful
+                    partial = summary.partial
+                    failed = summary.failed
+
                     for result in results:
-                        if result.success:
-                            successful += 1
-                        else:
-                            failed += 1
                         progress.advance(task)
-            
+
             output_path = str(Path(config.download_path) / manga.title)
-            display_download_results(successful, failed, output_path)
+            manifest_file = Path(config.download_path) / RETRY_MANIFEST_FILENAME
+            manifest_path = (
+                str(manifest_file)
+                if (partial > 0 or failed > 0) and manifest_file.exists()
+                else None
+            )
+            display_download_results(
+                successful, failed, output_path, partial, manifest_path
+            )
         else:
             # URL provided but no chapters - show info and prompt
             download_manga(url)

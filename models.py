@@ -1,7 +1,80 @@
 """Data models for the Atsu Downloader."""
 
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import List, Optional
+
+
+class DownloadStatus(str, Enum):
+    """Outcome of a single chapter download.
+
+    ``SUCCESS`` means every image was downloaded and converted.
+    ``PARTIAL`` means the chapter exists but at least one image failed, so the
+    saved chapter is incomplete.
+    ``FAILED`` means the chapter had pages but no image could be downloaded.
+    ``NO_PAGES`` means the API returned no pages at all (nothing to download),
+    which is intentionally distinct from ``FAILED``.
+    """
+
+    SUCCESS = "success"
+    PARTIAL = "partial"
+    FAILED = "failed"
+    NO_PAGES = "no_pages"
+
+
+class FailedPage(int):
+    """A page number that failed to download, with optional file details.
+
+    Subclasses ``int`` so it can be used directly as a page number (and
+    compared with plain integers) while still carrying the generated filename
+    and the underlying error for display and manifest output.
+    """
+
+    def __new__(
+        cls,
+        page_number: int,
+        filename: str = "",
+        error: str = "",
+    ) -> "FailedPage":
+        obj = super().__new__(cls, int(page_number))
+        obj.page_number = int(page_number)
+        obj.filename = filename
+        obj.error = error
+        return obj
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return (
+            f"FailedPage(page_number={self.page_number}, "
+            f"filename={self.filename!r})"
+        )
+
+
+@dataclass
+class DownloadSummary:
+    """Aggregated chapter outcome counts for a batch download."""
+
+    total: int = 0
+    successful: int = 0
+    partial: int = 0
+    failed: int = 0
+
+    @property
+    def not_fully_successful(self) -> int:
+        """Chapters that need attention (partial or completely failed)."""
+        return self.partial + self.failed
+
+
+def summarize_results(results: List["DownloadResult"]) -> DownloadSummary:
+    """Summarize a list of chapter results into success/partial/failed counts."""
+    summary = DownloadSummary(total=len(results))
+    for result in results:
+        if result.status == DownloadStatus.PARTIAL.value:
+            summary.partial += 1
+        elif result.status == DownloadStatus.SUCCESS.value:
+            summary.successful += 1
+        else:
+            summary.failed += 1
+    return summary
 
 
 @dataclass
@@ -142,9 +215,83 @@ class MangaInfo:
 
 @dataclass
 class DownloadResult:
-    """Result of a download operation."""
+    """Result of a download operation.
+
+    ``success`` is only ``True`` when the chapter is fully complete. A chapter
+    with some failed images is reported with ``status == PARTIAL`` and
+    ``success == False``; ``failed_pages`` additionally identifies which page
+    numbers (and generated filenames) are missing so the chapter can be
+    redownloaded.
+    """
+
     success: bool
     chapter: Chapter
     output_path: str
     error: Optional[str] = None
     images_downloaded: int = 0
+    images_failed: int = 0
+    failed_pages: List[FailedPage] = field(default_factory=list)
+    total_images: int = 0
+    status: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        normalized: List[FailedPage] = []
+        for page in self.failed_pages:
+            if isinstance(page, FailedPage):
+                normalized.append(page)
+            else:
+                normalized.append(FailedPage(int(page)))
+        self.failed_pages = normalized
+        if self.images_failed == 0 and normalized:
+            self.images_failed = len(normalized)
+        if self.status is None:
+            self.status = (
+                DownloadStatus.SUCCESS.value
+                if self.success
+                else DownloadStatus.FAILED.value
+            )
+
+    @property
+    def is_partial(self) -> bool:
+        """True when the chapter was saved but some images are missing."""
+        return self.status == DownloadStatus.PARTIAL.value
+
+    @property
+    def is_complete(self) -> bool:
+        """True only when the chapter downloaded in full."""
+        return self.status == DownloadStatus.SUCCESS.value
+
+    @property
+    def failed_page_numbers(self) -> List[int]:
+        """Failed page numbers as plain integers, sorted ascending."""
+        return sorted(int(p) for p in self.failed_pages)
+
+    def describe_status(self) -> str:
+        """Human-readable one-line status for logs and summaries."""
+        chapter_label = f"Chapter {format_chapter_number(self.chapter.number)}"
+        if self.status == DownloadStatus.PARTIAL.value:
+            pages = ", ".join(str(n) for n in self.failed_page_numbers)
+            return (
+                f"⚠ {chapter_label} partially downloaded: "
+                f"{self.images_downloaded}/{self.total_images} images, "
+                f"missing page(s) {pages}"
+            )
+        if self.status == DownloadStatus.NO_PAGES.value:
+            return f"✗ {chapter_label} has no pages to download"
+        if self.status == DownloadStatus.SUCCESS.value:
+            return (
+                f"✓ {chapter_label} downloaded "
+                f"({self.images_downloaded} images)"
+            )
+        detail = f": {self.error}" if self.error else ""
+        return f"✗ {chapter_label} failed{detail}"
+
+
+def format_chapter_number(number: float) -> str:
+    """Format a chapter number without a trailing ``.0``."""
+    try:
+        if number == int(number):
+            return str(int(number))
+    except (TypeError, ValueError):
+        pass
+    return str(number)

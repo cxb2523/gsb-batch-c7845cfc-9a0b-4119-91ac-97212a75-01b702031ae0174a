@@ -21,6 +21,11 @@ Initial GUI view:
 - Concurrent downloads for chapters and images.
 - Multiple output formats: `images`, `pdf`, `cbz`.
 - Retry with exponential backoff for API/image requests.
+- Per-chapter integrity reporting: full success, partial (some images missing),
+  failed (no images), and no-pages are reported distinctly.
+- Retry manifest: a batch run that leaves incomplete chapters writes
+  `retry_manifest.json` to the download directory, listing each affected
+  chapter number and its missing page numbers.
 - Persistent configuration in `config.json`.
 - Interactive chapter selection:
   - `all` or `a`
@@ -123,6 +128,59 @@ Install with:
 ```bash
 pip install -r requirements.txt
 ```
+
+## Partial Failures and the Retry Manifest
+
+After a batch download, every chapter reports one of four statuses:
+
+- `success` — all images downloaded and converted.
+- `partial` — the chapter was saved but one or more images failed and are
+  missing. It is *not* reported as a full success.
+- `failed` — images were requested but none could be downloaded.
+- `no_pages` — the API returned no pages for the chapter (nothing to download).
+
+If any chapter has failed images, `retry_manifest.json` is written to the
+download directory (by default `./downloads`):
+
+```json
+{
+  "manga_id": "OaKBx",
+  "manga_title": "Example Manga",
+  "generated_at": "2026-11-16T09:00:00",
+  "total_chapters": 5,
+  "retry_chapters": [
+    {
+      "chapter_id": "abc",
+      "chapter_number": "3",
+      "chapter_title": "Chapter 3",
+      "status": "partial",
+      "output_path": "./downloads/Example Manga/chapter 3",
+      "images_downloaded": 18,
+      "images_failed": 2,
+      "total_images": 20,
+      "failed_pages": [7, 12],
+      "failed_files": ["0007.webp", "0012.webp"]
+    }
+  ],
+  "retry_chapter_numbers": ["3"]
+}
+```
+
+Only chapters with missing images appear in the list, so a later run can
+re-download just those chapters (e.g. `-c "3"`). A manifest write failure is
+logged and never discards already-downloaded results. When a subsequent run
+completes every chapter for the same manga, the stale manifest is removed.
+
+## Tests
+
+```bash
+pip install pytest
+pytest
+```
+
+The suite uses a local fake download client and never accesses the real
+site.
+
 
 ## Project Layout
 

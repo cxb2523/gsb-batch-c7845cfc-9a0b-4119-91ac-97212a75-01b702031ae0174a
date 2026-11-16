@@ -7,28 +7,29 @@ from pathlib import Path
 from PyQt6.QtCore import QThread, pyqtSignal
 
 from config import get_config
-from downloader import DownloadManager
+from downloader import DownloadManager, write_retry_manifest
 from models import MangaInfo, DownloadResult, Chapter
 
 
 class DownloadWorker(QThread):
     """Worker thread for concurrent chapter downloading without blocking UI."""
-    
+
     progress = pyqtSignal(int, int, str)  # current, total, status
     chapter_complete = pyqtSignal(object)  # DownloadResult
     finished = pyqtSignal(list)  # List[DownloadResult]
     error = pyqtSignal(str)
-    
+
     def __init__(self, manga: MangaInfo, chapters: List[Chapter], parent=None):
         super().__init__(parent)
         self.manga = manga
         self.chapters = chapters
         self._cancelled = False
-    
+        self.retry_manifest_path = None
+
     def cancel(self):
         """Request cancellation of download."""
         self._cancelled = True
-    
+
     def run(self):
         """Download chapters concurrently in background thread."""
         try:
@@ -36,11 +37,11 @@ class DownloadWorker(QThread):
             results: List[DownloadResult] = []
             total = len(self.chapters)
             completed = 0
-            
+
             chapters = self.chapters
-            
+
             self.progress.emit(0, total, "Starting concurrent downloads...")
-            
+
             with DownloadManager() as manager:
                 # Use ThreadPoolExecutor for concurrent chapter downloads
                 with ThreadPoolExecutor(max_workers=config.concurrent_chapters) as executor:
@@ -51,10 +52,10 @@ class DownloadWorker(QThread):
                             self.manga,
                             chapter,
                             Path(config.download_path)
-                        ): chapter 
+                        ): chapter
                         for chapter in chapters
                     }
-                    
+
                     # Process completed downloads as they finish
                     for future in as_completed(future_to_chapter):
                         if self._cancelled:
@@ -62,7 +63,7 @@ class DownloadWorker(QThread):
                             for f in future_to_chapter:
                                 f.cancel()
                             break
-                        
+
                         chapter = future_to_chapter[future]
                         try:
                             result = future.result()
@@ -78,15 +79,22 @@ class DownloadWorker(QThread):
                             )
                             results.append(result)
                             self.chapter_complete.emit(result)
-                        
+
                         completed += 1
                         self.progress.emit(
-                            completed, 
-                            total, 
+                            completed,
+                            total,
                             f"Downloaded {completed}/{total} chapters"
                         )
-            
+
+            # Write a retry manifest for chapters with missing images. Failures
+            # here are logged inside the helper and never discard results.
+            base_dir = Path(config.download_path)
+            self.retry_manifest_path = write_retry_manifest(
+                self.manga, results, base_dir
+            )
+
             self.finished.emit(results)
-            
+
         except Exception as e:
             self.error.emit(str(e))

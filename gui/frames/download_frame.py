@@ -12,7 +12,13 @@ from PyQt6.QtCore import Qt, QSize
 from PyQt6.QtGui import QFont
 
 from downloader.manager import parse_chapter_selection
-from models import MangaInfo, Chapter
+from models import (
+    DownloadStatus,
+    MangaInfo,
+    Chapter,
+    format_chapter_number,
+    summarize_results,
+)
 from gui.workers import ScraperWorker, DownloadWorker
 from gui.theme import COLORS
 
@@ -563,27 +569,74 @@ class DownloadFrame(QWidget):
     
     def on_chapter_complete(self, result):
         """Handle chapter download complete."""
-        if result.success:
+        if result.status == DownloadStatus.PARTIAL.value:
+            pages = ", ".join(str(p) for p in result.failed_page_numbers)
+            self.log(
+                f"⚠ {result.chapter.title}: partially downloaded "
+                f"({result.images_downloaded}/{result.total_images} images, "
+                f"missing page(s) {pages})",
+                "warning"
+            )
+        elif result.success:
             self.log(f"✓ {result.chapter.title}", "success")
+        elif result.status == DownloadStatus.NO_PAGES.value:
+            self.log(f"⊘ {result.chapter.title}: no pages to download", "warning")
         else:
             self.log(f"✗ {result.chapter.title}: {result.error}", "error")
-    
+
     def on_download_finished(self, results):
         """Handle all downloads complete."""
         self.download_btn.setEnabled(True)
         self.cancel_btn.setVisible(False)
-        
-        successful = sum(1 for r in results if r.success)
-        failed = len(results) - successful
-        
+
+        summary = summarize_results(results)
+        successful = summary.successful
+        partial = summary.partial
+        failed = summary.failed
+
         self.progress_bar.setValue(self.progress_bar.maximum())
-        self.status_label.setText(f"✓ Complete: {successful} downloaded, {failed} failed")
-        self.log(f"Download finished: {successful}/{len(results)} successful", 
-                 "success" if failed == 0 else "warning")
-        
-        if failed == 0:
-            QMessageBox.information(self, "Download Complete", 
-                f"Successfully downloaded {successful} chapters!")
+        self.status_label.setText(
+            f"Complete: {successful} downloaded, "
+            f"{partial} partial, {failed} failed"
+        )
+        self.log(
+            f"Download finished: {successful}/{len(results)} complete, "
+            f"{partial} partial, {failed} failed",
+            "success" if summary.not_fully_successful == 0 else "warning"
+        )
+
+        manifest_path = getattr(self.download_worker, "retry_manifest_path", None)
+        if manifest_path:
+            self.log(f"Retry manifest written to: {manifest_path}", "warning")
+
+        if summary.not_fully_successful == 0:
+            QMessageBox.information(
+                self, "Download Complete",
+                f"Successfully downloaded {successful} chapters!"
+            )
+        else:
+            details = []
+            for result in results:
+                if result.status == DownloadStatus.PARTIAL.value:
+                    pages = ", ".join(str(p) for p in result.failed_page_numbers)
+                    details.append(
+                        f"Chapter {format_chapter_number(result.chapter.number)}: "
+                        f"missing page(s) {pages}"
+                    )
+                elif not result.success:
+                    details.append(
+                        f"Chapter {format_chapter_number(result.chapter.number)}: "
+                        f"{result.error}"
+                    )
+            message = (
+                f"{successful} complete, {partial} partial, {failed} failed.\n\n"
+                + "\n".join(details[:10])
+            )
+            if len(details) > 10:
+                message += f"\n... and {len(details) - 10} more"
+            if manifest_path:
+                message += f"\n\nRetry list: {manifest_path}"
+            QMessageBox.warning(self, "Download Incomplete", message)
     
     def on_download_error(self, error: str):
         """Handle download error."""

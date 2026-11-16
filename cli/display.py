@@ -19,7 +19,6 @@ from rich.progress import (
 
 from config import Config
 from models import MangaInfo, Chapter
-
 # Custom theme with vibrant colors
 CUSTOM_THEME = Theme({
     "title": "bold magenta",
@@ -210,20 +209,41 @@ def create_download_progress() -> Progress:
 def display_download_results(
     successful: int,
     failed: int,
-    output_path: str
+    output_path: str,
+    partial: int = 0,
+    retry_manifest_path: Optional[str] = None
 ) -> None:
-    """Display download completion summary."""
+    """Display download completion summary.
+
+    Args:
+        successful: Chapters downloaded completely.
+        failed: Chapters that failed entirely (or had no pages).
+        output_path: Directory the manga was saved to.
+        partial: Chapters saved with missing images.
+        retry_manifest_path: Path to the generated retry manifest, if any.
+    """
     result_text = Text()
     result_text.append("\n📊 Download Summary\n", style="bold magenta")
     result_text.append("─" * 40 + "\n", style="dim")
     result_text.append("✓ Successful: ", style="success")
     result_text.append(f"{successful}\n", style="value")
-    
+
+    if partial > 0:
+        result_text.append("⚠ Partial (missing images): ", style="warning")
+        result_text.append(f"{partial}\n", style="value")
+
     if failed > 0:
         result_text.append("✗ Failed: ", style="error")
         result_text.append(f"{failed}\n", style="value")
-    
+
     result_text.append("📁 Saved to: ", style="info")
-    result_text.append(f"{output_path}", style="value")
-    
-    console.print(Panel(result_text, border_style="green" if failed == 0 else "yellow"))
+    result_text.append(f"{output_path}\n", style="value")
+
+    if retry_manifest_path:
+        result_text.append("🔁 Retry manifest: ", style="warning")
+        result_text.append(f"{retry_manifest_path}", style="value")
+
+    console.print(Panel(
+        result_text,
+        border_style="green" if failed == 0 and partial == 0 else "yellow"
+    ))
