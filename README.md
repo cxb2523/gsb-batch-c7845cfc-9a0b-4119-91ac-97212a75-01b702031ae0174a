@@ -195,6 +195,14 @@ if response['status_code'] == 200:
     print(response['headers']['screenshot_url'])
 ```
 
+If the request fails (any status other than `200`), no file is written and an existing
+file at `save_to_path` is left untouched — `response['file']` is not set. The response
+still contains `status_code` and the usual `headers` (`success`, `url`,
+`remaining_requests`, `screenshot_url`), plus `headers['failure_reason']` describing why
+the screenshot was not saved. Screenshots are written to a temporary file in the target
+directory and atomically moved into place, so concurrent saves to the same path never
+leave a truncated image behind.
+
 Note that `screenshots_api.get(url, options)` method accepts an [options](https://crawlbase.com/docs/screenshots-api/parameters)
 
 ## Smart AI Proxy usage
