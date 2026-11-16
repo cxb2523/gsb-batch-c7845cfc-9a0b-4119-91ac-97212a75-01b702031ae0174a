@@ -791,7 +791,13 @@ class CrawlKit:
     ) -> list[CrawlResult]:
         """
         Scrape multiple URLs with rate limiting.
-        
+
+        Each URL is scraped independently: if one raises during fetching or
+        parsing, the exception is captured as a CrawlResult with ``error`` set
+        instead of aborting the whole batch. Results are returned in the same
+        order as the input URLs, so ``results[i]`` always corresponds to
+        ``urls[i]`` and ``len(results) == len(urls)``.
+
         Args:
             urls: List of URLs
             parser: Force parser for all
@@ -801,13 +807,61 @@ class CrawlKit:
         import asyncio
         results = []
         for i, url in enumerate(urls):
-            result = await self.scrape(url, parser=parser, **kwargs)
+            item_start = time.time()
+            try:
+                result = await self.scrape(url, parser=parser, **kwargs)
+            except Exception as e:
+                # Keep going with the remaining URLs; record the failure in place.
+                message = str(e).strip()
+                error = f"Scrape failed: {type(e).__name__}"
+                if message:
+                    error += f": {message}"
+                result = CrawlResult(
+                    url=url,
+                    error=error,
+                    crawl_time_ms=int((time.time() - item_start) * 1000),
+                )
             results.append(result)
-            
+
             if i < len(urls) - 1 and delay > 0:
                 await asyncio.sleep(delay)
-        
+
         return results
+
+    def summarize_batch(self, results: list[CrawlResult]) -> dict:
+        """
+        Summarize the outcome of a batch_scrape call.
+
+        Args:
+            results: List returned by batch_scrape()
+
+        Returns:
+            dict with:
+                success_count: number of successful results
+                failure_count: number of failed results
+                failures: list of {"url": ..., "error": ...} for each failure
+        """
+        failures = []
+        success_count = 0
+
+        for result in results:
+            if result.success:
+                success_count += 1
+                continue
+
+            error = result.error
+            if not error:
+                if result.status_code:
+                    error = f"HTTP status {result.status_code}"
+                else:
+                    error = "Unknown failure"
+            failures.append({"url": result.url, "error": error})
+
+        return {
+            "success_count": success_count,
+            "failure_count": len(failures),
+            "failures": failures,
+        }
     
     def _assess_quality(self, result: dict) -> float:
         """

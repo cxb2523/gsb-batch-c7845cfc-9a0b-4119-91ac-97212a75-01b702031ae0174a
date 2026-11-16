@@ -72,6 +72,7 @@ def scrape(url, parser, output_format, chunk, chunk_size, force_js, force_static
 @click.option("--format", "-f", "output_format", default="json", type=click.Choice(["json", "jsonl"]))
 def batch(file, parser, output, delay, output_format):
     """Batch scrape URLs from a file."""
+    import asyncio
     import os
     
     with open(file) as f:
@@ -82,7 +83,7 @@ def batch(file, parser, output, delay, output_format):
     os.makedirs(output, exist_ok=True)
     crawler = CrawlKit()
     
-    results = crawler.batch_scrape(urls, parser=parser, delay=delay)
+    results = asyncio.run(crawler.batch_scrape(urls, parser=parser, delay=delay))
     
     success = sum(1 for r in results if r.success)
     click.echo(f"✅ Done: {success}/{len(results)} successful", err=True)
