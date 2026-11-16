@@ -357,48 +357,179 @@ def _case_insensitive_match(path: str, pattern: str) -> bool:
     return PurePath(path.lower()).match(pattern.lower())
 
 
+VEDA_MARKER = "SysSettings.*"
+
+# File name patterns recognised by Veda, relative to the model directory.
+VEDA_FILENAME_PATTERNS = (
+    "BY_Trans.*",
+    "LMA*.*",
+    "Set*.*",
+    "SysSettings.*",
+    "VT_*.*",
+    "SubRES_TMPL/SubRES_*.*",
+    "SuppXLS/Demands/Dem_Alloc+Series.*",
+    "SuppXLS/Demands/ScenDem_*.*",
+    "SuppXLS/ParScenFiles/Scen_Par-*.*",
+    "SuppXLS/Scen_*.*",
+    "SuppXLS/Trades/ScenTrade_*.*",
+)
+
+# File extensions that xl2times can read.
+EXCEL_FILE_SUFFIXES = (".xlsx", ".xlsm")
+
+# Reasons recorded in the file inventory for excluded files.
+REASON_TEMPORARY_FILE = "temporary file (name starts with '~')"
+REASON_VEDA_PATTERN_MISMATCH = "does not match any Veda file name pattern"
+
+
 def is_veda_based(files: list[str]) -> bool:
     """Determine whether the model follows Veda file structure.
     This function does not verify file extensions.
     """
-    marker = "SysSettings.*"
-
-    matches = [file for file in files if _case_insensitive_match(file, marker)]
+    matches = [file for file in files if _case_insensitive_match(file, VEDA_MARKER)]
 
     if len(matches) == 1:
         return True
     elif len(matches) > 1:
-        raise ValueError(f"Only one {marker} expected. Multiple detected: {matches}")
+        conflicting = ", ".join(sorted(matches))
+        raise ValueError(
+            f"Only one {VEDA_MARKER} file expected, but {len(matches)} were found:"
+            f" {conflicting}"
+        )
     else:
         return False
+
+
+def matches_veda_filename_patterns(path: str) -> bool:
+    """Check whether a file matches one of the Veda file name patterns.
+    This function does not verify file extensions.
+    """
+    return any(
+        _case_insensitive_match(path, pattern) for pattern in VEDA_FILENAME_PATTERNS
+    )
 
 
 def filter_veda_filename_patterns(files: list[str]) -> list[str]:
     """Filter files by patterns recognised by Veda.
     This function does not verify file extensions.
+
+    The input order is preserved and duplicates are removed.
     """
-    legal_paths = (
-        "BY_Trans.*",
-        "LMA*.*",
-        "Set*.*",
-        "SysSettings.*",
-        "VT_*.*",
-        "SubRES_TMPL/SubRES_*.*",
-        "SuppXLS/Demands/Dem_Alloc+Series.*",
-        "SuppXLS/Demands/ScenDem_*.*",
-        "SuppXLS/ParScenFiles/Scen_Par-*.*",
-        "SuppXLS/Scen_*.*",
-        "SuppXLS/Trades/ScenTrade_*.*",
+    filtered: list[str] = []
+    seen: set[str] = set()
+    for file in files:
+        if file not in seen and matches_veda_filename_patterns(file):
+            seen.add(file)
+            filtered.append(file)
+    return filtered
+
+
+def scan_input_directory(input_dir: str) -> datatypes.FileInventory:
+    """Scan a model directory and produce a deterministic file inventory.
+
+    Every file found under `input_dir` is recorded as a candidate together with
+    whether it will be read and, if not, the reason for excluding it. The order
+    of the inventory entries is sorted by the relative path of each file, so it
+    is stable across runs and independent of the order returned by the file
+    system. The included files are listed in the same order, which is also the
+    order in which they are read.
+
+    If the directory follows the Veda file structure (indicated by a single
+    SysSettings file), only files matching the Veda file name patterns are
+    included. Otherwise, every file with a legal Excel suffix is included.
+
+    Parameters
+    ----------
+    input_dir
+        Directory containing the model files.
+
+    Returns
+    -------
+    datatypes.FileInventory
+        Inventory of all scanned files, in deterministic order.
+
+    Raises
+    ------
+    ValueError
+        If more than one SysSettings file is found; the message lists the
+        conflicting files.
+    """
+    root = Path(input_dir)
+    candidates = sorted(
+        (file_path for file_path in root.rglob("*") if file_path.is_file()),
+        key=lambda file_path: _path_sort_key(root, file_path),
     )
-    # Generate a set of fiels that match the patterns
-    filtered = {
-        file
-        for file in files
-        for legal_path in legal_paths
-        if _case_insensitive_match(file, legal_path)
-    }
-    # Return as a list
-    return list(filtered)
+
+    # First split candidates into potential input files and files that can be
+    # excluded without knowing whether the model is Veda-based.
+    valid_files: list[Path] = []
+    for file_path in candidates:
+        if file_path.name.startswith("~"):
+            continue
+        if file_path.suffix not in EXCEL_FILE_SUFFIXES:
+            continue
+        valid_files.append(file_path)
+
+    # Veda structure detection must consider the same files as before: legal
+    # Excel files that are not temporary files.
+    veda_based = is_veda_based([str(file_path) for file_path in valid_files])
+
+    entries: list[datatypes.ScannedFile] = []
+    for file_path in candidates:
+        relative_path = _relative_posix_path(root, file_path)
+        if file_path.name.startswith("~"):
+            entries.append(
+                datatypes.ScannedFile(
+                    path=str(file_path),
+                    relative_path=relative_path,
+                    included=False,
+                    reason=REASON_TEMPORARY_FILE,
+                )
+            )
+        elif file_path.suffix not in EXCEL_FILE_SUFFIXES:
+            suffix = file_path.suffix or "none"
+            entries.append(
+                datatypes.ScannedFile(
+                    path=str(file_path),
+                    relative_path=relative_path,
+                    included=False,
+                    reason=f"unsupported file extension ('{suffix}')",
+                )
+            )
+        elif veda_based and not matches_veda_filename_patterns(str(file_path)):
+            entries.append(
+                datatypes.ScannedFile(
+                    path=str(file_path),
+                    relative_path=relative_path,
+                    included=False,
+                    reason=REASON_VEDA_PATTERN_MISMATCH,
+                )
+            )
+        else:
+            entries.append(
+                datatypes.ScannedFile(
+                    path=str(file_path),
+                    relative_path=relative_path,
+                    included=True,
+                )
+            )
+
+    return datatypes.FileInventory(
+        input_dir=str(root),
+        veda_based=veda_based,
+        entries=entries,
+    )
+
+
+def _relative_posix_path(root: Path, file_path: Path) -> str:
+    """Return `file_path` relative to `root`, independent of the OS separator."""
+    return Path(os.path.relpath(file_path, root)).as_posix()
+
+
+def _path_sort_key(root: Path, file_path: Path) -> tuple[str, str]:
+    """Sort key that gives a stable, case-insensitive file order."""
+    relative_path = _relative_posix_path(root, file_path)
+    return (relative_path.casefold(), relative_path)
 
 
 def set_log_level(level: int | None) -> str:

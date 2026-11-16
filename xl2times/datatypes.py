@@ -239,6 +239,79 @@ class TimesXlMap:
 
 
 @dataclass
+class ScannedFile:
+    """A file discovered while scanning an input directory.
+
+    Attributes
+    ----------
+    path
+        Absolute or as-given path to the file.
+    relative_path
+        Path to the file relative to the scanned directory, using forward
+        slashes, so that inventories are comparable across machines.
+    included
+        Whether the file is read as part of the model.
+    reason
+        Human-readable reason for excluding the file; `None` if included.
+    """
+
+    path: str
+    relative_path: str
+    included: bool
+    reason: str | None = None
+
+
+@dataclass
+class FileInventory:
+    """A deterministic, checkable list of files found while scanning a directory.
+
+    Attributes
+    ----------
+    input_dir
+        The directory that was scanned.
+    veda_based
+        Whether the directory was detected as following the Veda structure.
+    entries
+        One entry per scanned file, sorted by relative path. Entries are listed
+        in the same order as the included files are read.
+    """
+
+    input_dir: str
+    veda_based: bool
+    entries: list[ScannedFile] = field(default_factory=list)
+
+    @property
+    def included(self) -> list[ScannedFile]:
+        return [entry for entry in self.entries if entry.included]
+
+    @property
+    def excluded(self) -> list[ScannedFile]:
+        return [entry for entry in self.entries if not entry.included]
+
+    @property
+    def input_files(self) -> list[str]:
+        """Paths of the included files, in read order."""
+        return [entry.path for entry in self.included]
+
+    def to_text(self) -> str:
+        """Render the inventory as a human-readable, line-oriented text report."""
+        lines = [
+            f"input_directory: {self.input_dir}",
+            f"veda_based: {'yes' if self.veda_based else 'no'}",
+            f"scanned: {len(self.entries)}"
+            f" (included: {len(self.included)}, excluded: {len(self.excluded)})",
+            "",
+        ]
+        for entry in self.entries:
+            status = "included" if entry.included else "excluded"
+            line = f"[{status}] {entry.relative_path}"
+            if entry.reason:
+                line += f"  # {entry.reason}"
+            lines.append(line)
+        return "\n".join(lines) + "\n"
+
+
+@dataclass
 class TimesModel:
     """A class containing all the information about the processed TIMES model."""
 
@@ -259,6 +332,8 @@ class TimesModel:
     units: DataFrame = field(default_factory=DataFrame)
     start_year: int = field(default_factory=int)
     files: list[str] = field(default_factory=list)
+    # Inventory of the input directory, if the input was a scanned directory
+    inventory: FileInventory | None = None
     data_modules: list[str] = field(default_factory=list)
     custom_psets: DataFrame = field(default_factory=DataFrame)
     user_psets: DataFrame = field(default_factory=DataFrame)

@@ -33,6 +33,8 @@ xl2times benchmarks/xlsx/DemoS_001/
 ```
 Note that by default, the tool puts the produced output DD files into a directory called `output/` in the current working directory. This behavior can be changed using the `--output_dir /path/to/desired/output/` argument.
 
+When the input is a directory (rather than a list of files), the tool scans it and writes a checkable inventory of the scan to `file_inventory.txt` in the output directory. The inventory lists every scanned file, whether it was read, and the reason it was excluded (temporary file, unsupported extension, or not matching any Veda file name pattern). The scan order is deterministic: files are sorted by their path relative to the input directory, and they are read in that same order. A directory is treated as a Veda model when it contains exactly one `SysSettings` workbook; in that case only files matching Veda's file name patterns are read. If more than one `SysSettings` file is found, the tool fails with an error listing the conflicting files.
+
 > **Note**: If you are running a huge model, and it looks like nothing is happening, try adding a `-v` or `--verbose` argument to see more detailed logs, inlcuding a message when each intermediate transform is completed.
 
 If the tool is installed on Windows, the above commands should be prefixed by `python -m`.

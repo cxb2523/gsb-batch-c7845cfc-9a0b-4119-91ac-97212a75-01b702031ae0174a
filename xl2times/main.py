@@ -16,7 +16,13 @@ from loguru import logger
 from pandas.core.frame import DataFrame
 
 from . import excel, transforms, utils
-from .datatypes import Config, DataModule, EmbeddedXlTable, TimesModel
+from .datatypes import (
+    Config,
+    DataModule,
+    EmbeddedXlTable,
+    FileInventory,
+    TimesModel,
+)
 
 _log_sep = "=" * 80 + "\n"
 
@@ -71,6 +77,29 @@ def _read_xlsx_cached(filename: str | Path) -> list[EmbeddedXlTable]:
     return tables
 
 
+def write_file_inventory(inventory: FileInventory, output_dir: str) -> str:
+    """Write the input file inventory to `{output_dir}/file_inventory.txt`.
+
+    Parameters
+    ----------
+    inventory
+        Inventory of the files found while scanning the input directory.
+    output_dir
+        Directory to write the inventory file to. It is created if needed.
+
+    Returns
+    -------
+    str
+        Path to the written inventory file.
+    """
+    os.makedirs(output_dir, exist_ok=True)
+    inventory_file = os.path.join(output_dir, "file_inventory.txt")
+    with open(inventory_file, "w", encoding="utf-8") as f:
+        f.write(inventory.to_text())
+    logger.info(f"Wrote input file inventory to {inventory_file}")
+    return inventory_file
+
+
 def read_xl(
     inputs: list[str],
     regions: str,
@@ -96,14 +125,20 @@ def read_xl(
 
     if len(inputs) == 1:
         assert os.path.isdir(inputs[0])
-        input_files = [
-            str(path)
-            for path in Path(inputs[0]).rglob("*")
-            if path.suffix in [".xlsx", ".xlsm"] and not path.name.startswith("~")
-        ]
-        if utils.is_veda_based(input_files):
-            input_files = utils.filter_veda_filename_patterns(input_files)
-        logger.info(f"Loading {len(input_files)} files from {inputs[0]}")
+        # Scan the directory deterministically so that the inventory and the order
+        # in which files are read do not depend on the file system.
+        inventory = utils.scan_input_directory(inputs[0])
+        model.inventory = inventory
+        input_files = inventory.input_files
+        logger.info(
+            f"Loading {len(inventory.included)} files from {inputs[0]}"
+            f" ({len(inventory.included)} included, {len(inventory.excluded)} excluded,"
+            f" {len(inventory.entries)} scanned)"
+        )
+        for entry in inventory.excluded:
+            logger.debug(f"Excluded input file {entry.relative_path}: {entry.reason}")
+        if output_dir:
+            write_file_inventory(inventory, output_dir)
     else:
         input_files = inputs
 
