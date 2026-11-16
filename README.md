@@ -1,0 +1,188 @@
+# Flashscore Scraper
+
+A command-line tool for scraping sports data from [Flashscore](https://www.flashscore.com).
+
+## Description
+
+This project provides a scraper to extract sports event information, odds, and other data from Flashscore website.
+
+## Library Usage
+
+
+```python
+from flashscorescraper import scrape_odds, scrape_event, scrape_event_info
+from models.odds_filter import OddsFilter
+
+# Scrape odds — sport auto-detected from URL
+result = scrape_odds("https://www.flashscore.com/match/football/abc123/")
+
+# Filter by odds type and bookmakers
+result = scrape_odds(
+    "https://www.flashscore.com/match/football/abc123/",
+    sport="football",
+    odds_filter=OddsFilter(odds=["1x2-odds", "over-under"], bookmakers=["2", "16"]),
+)
+
+# Scrape main event data
+event = scrape_event("https://www.flashscore.com/match/football/abc123/")
+
+# Scrape main event data with match statistics in the "stats" field (raises ValueError if unavailable)
+event = scrape_event("https://www.flashscore.com/match/football/abc123/", with_stats=True)
+
+# Scrape extended event info (standings, h2h, draw, …)
+info = scrape_event_info("https://www.flashscore.com/match/football/abc123/")
+```
+
+Sport is auto-detected from the URL when `sport` is omitted. Pass it explicitly for non-standard URLs or unsupported sports.
+
+---
+
+## Installation
+
+1. Ensure you have Python 3.13 or higher installed.
+2. Clone the repository.
+3. Install dependencies:
+   ```
+   uv sync
+   uv run playwright install chromium
+   ```
+   
+## Usage
+
+All commands print JSON to stdout and accept the common options described below
+
+### Scrape Odds
+```
+uv run main.py odds <url> [--odds <type> ...] [--bookmakers <id> ...] [--sport <sport>] [--engine <engine>] [--timeout <seconds>]
+```
+
+### Scrape Event Information
+```
+uv run main.py event <url> [--with-stats] [--sport <sport>] [--engine <engine>] [--timeout <seconds>]
+```
+
+### Scrape Event Context Information
+```
+uv run main.py event-info <url> [--sport <sport>] [--engine <engine>] [--timeout <seconds>]
+```
+
+### Options
+
+| Option | Description | Default |
+|---|---|---|
+| `url` | Flashscore event URL | *(required)* |
+| `--sport` | Sport type (e.g. `football`). Auto-detected from URL if not provided. | `None` |
+| `--engine` | Scraping engine: `playwright` or `curl` | `playwright` |
+| `--timeout` | Request timeout in seconds | `10` |
+| `-v`, `--verbose` | Enable debug logging | off |
+
+### `odds`-only Options
+
+| Option | Description | Default |
+|---|---|---|
+| `--odds` | One or more odds types to scrape. Scrapes all types when omitted. | all |
+| `--bookmakers` | Bookmaker IDs to include (e.g. `2 16 17`). Includes all bookmakers when omitted. | all |
+
+### `event`-only Options
+
+| Option | Description | Default |
+|---|---|---|
+| `--with-stats` | Include match statistics in the `stats` field, grouped by section (e.g. `Top stats`, `Shots`). Supported sports: `football`. Returns an error for unsupported sports or events without stats (e.g. not started yet). | off |
+
+### Examples
+
+```bash
+# Scrape all odds for a football match
+uv run main.py odds https://www.flashscore.com/match/football/...
+
+# Scrape only 1X2 and over/under odds, filtered to two bookmakers
+uv run main.py odds https://www.flashscore.com/match/football/... --odds 1x2-odds over-under --bookmakers 2 16
+
+# Scrape event summary
+uv run main.py event https://www.flashscore.com/match/football/...
+
+# Scrape event summary with match statistics
+uv run main.py event https://www.flashscore.com/match/football/... --with-stats
+
+# Scrape extended event info with verbose logging
+uv run main.py event-info https://www.flashscore.com/match/football/... -v
+```
+
+## Supported Sports
+
+### Football
+
+| Odds Type | `--odds` value |
+|---|---|
+| 1X2 | `1x2-odds` |
+| Over/Under | `over-under` |
+| Asian Handicap | `asian-handicap` |
+| Both Teams to Score | `both-teams-to-score` |
+| Double Chance | `double-chance` |
+| European Handicap | `european-handicap` |
+| Draw No Bet | `draw-no-bet` |
+| Correct Score | `correct-score` |
+| Half Time / Full Time | `ht-ft` |
+| Odd/Even | `odd-even` |
+
+### Any other sport (universal/generic parsing)
+
+Any sport added to the `Sports` enum in `models/sports.py` — even without a dedicated parser — is handled by **universal parsers** that auto-detect the page structure. Currently registered: `volleyball`.
+
+To add a new sport (e.g. `basketball`), extend `models/sports.py`:
+```python
+class Sports(Enum):
+    FOOTBALL = "football"
+    VOLLEYBALL = "volleyball"
+    BASKETBALL = "basketball"  # add new sport here
+```
+
+Once registered, the following works automatically:
+
+- **Event**: Date, participants, score, status, and league.
+- **Odds**: Column headers from the odds table (e.g. `1`, `2`, `Over`, `Under`) are extracted and used as `type`/`value` in each `OddsParserRowData`. Handicap or total values (`wcl-oddsValue` spans) are used when present. Bookmaker names and IDs are always detected. Rows with no odds are skipped.
+- **Event info** (`event-info` command): Available info types (`draw`, `h2h`, `standings`) are auto-detected from the page tabs. Each type is parsed independently — for example, requesting `draw` never accidentally returns `h2h` data. CSS wait selectors (`.draw__cover`, `.h2h__section`, `.ui-table`) prevent fetch timeouts on slow pages.
+
+When using a non-football sport, pass `--sport` explicitly:
+```bash
+uv run main.py event-info <url> --sport volleyball
+uv run main.py odds <url> --sport basketball
+```
+
+### Creating dedicated parsers (advanced)
+
+The universal parser may not always return correct or complete data — odds columns may be misaligned, event info may miss details, or the page structure may differ from expectations. In such cases, create dedicated parsers for the sport.
+
+Use the **football parsers** in `parsers/football/` as a reference:
+
+| File | Purpose |
+|---|---|
+| `football_parser.py` | Top-level parser (registers with `@BaseParser, sport_type="football"`) |
+| `football_event_parser.py` | Event data (date, participants, score, status, league) |
+| `football_event_info_parser.py` | Event info handlers (standings, draw, h2h) — uses `@_handler(InfoType)` decorator |
+| `odds/*.py` | Per-odds-type parsers (e.g. `one_x_two.py`, `over_under.py`) — each extends `BaseOddsParser` with `sport_type` and `odds_type` |
+
+Key registration patterns (all auto-discovered, no manual imports needed):
+
+- **Sport parser**: `class MySportParser(BaseParser, sport_type="mysport")`
+- **Odds parser**: `class MyOddsParser(BaseOddsParser)` with `sport_type` and `odds_type` class attributes
+- **Odds enum**: `@register_odds("mysport")` on an odds enum class in `models/odds/`
+- **Event info enum**: `@register_event_info("mysport")` on an event info enum class in `models/event_info/`
+
+```python
+# Example: registering a new sport parser
+class MySportParser(BaseParser, sport_type="mysport"):
+    def _parse_event(self, url, data): ...
+    def _parse_odds(self, url, data, odds_type, odds_filter): ...
+    def _parse_event_info(self, url, data, info_type): ...
+```
+
+### Match statistics (`--with-stats`)
+
+Stats parsers live in the independent `stats/` package and are registered **manually** in `_STATS_PARSERS` in `stats/__init__.py` (no auto-discovery). To support a new sport, add `stats/<sport>_stats_parser.py` extending `BaseStatsParser` (`url_path`, `wait_for_selector`, `parse`) and add one entry to `_STATS_PARSERS`.
+
+## Running Tests
+
+```bash
+uv run pytest
+```

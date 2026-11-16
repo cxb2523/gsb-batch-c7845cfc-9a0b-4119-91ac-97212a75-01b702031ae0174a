@@ -1,0 +1,106 @@
+import argparse
+import logging
+
+from models.odds_filter import OddsFilter
+from scraper.scraper_factory import ScraperFactory
+from utils.detect_sport import detect_sport_from_url
+from utils.json_formatter import JsonFormatter
+
+
+def scrape_cmd(event_url: str, sport: str | None, engine: str, timeout: int, fetch_func) -> None:
+    """Common function for scraping commands with error handling"""
+    if sport is None:
+        try:
+            sport = detect_sport_from_url(event_url)
+        except ValueError as e:
+            print(JsonFormatter.to_json({"error": str(e), "url": event_url}))
+            return
+
+    with ScraperFactory.create_scraper(engine_type=engine, sport_type=sport, timeout=timeout) as scraper:
+        scraper.event_url = event_url
+        data = fetch_func(scraper)
+        print(JsonFormatter.to_json(data))
+
+
+def scrape_odds_cmd(event_url: str, sport: str | None = None, engine: str = "curl", timeout: int = 10, odds_filter: OddsFilter | None = None) -> None:
+    """CLI interface for scraping odds"""
+    scrape_cmd(event_url, sport, engine, timeout, lambda scraper: scraper.fetch_and_parse_odds(odds_filter=odds_filter))
+
+
+def scrape_event_cmd(event_url: str, sport: str | None = None, engine: str = "curl", timeout: int = 10, with_stats: bool = False) -> None:
+    """CLI interface for scraping event information"""
+    fetch_func = (lambda scraper: scraper.fetch_and_parse_event_with_stats()) if with_stats else (lambda scraper: scraper.fetch_and_parse_event())
+    try:
+        scrape_cmd(event_url, sport, engine, timeout, fetch_func)
+    except ValueError as e:
+        print(JsonFormatter.to_json({"error": str(e), "url": event_url}))
+
+
+def scrape_event_info_cmd(event_url: str, sport: str | None = None, engine: str = "curl", timeout: int = 10) -> None:
+    """CLI interface for scraping context information"""
+    scrape_cmd(event_url, sport, engine, timeout, lambda scraper: scraper.fetch_and_parse_event_info())
+
+
+def scrape_league_cmd(league_url: str, sport: str | None = None, engine: str = "curl", timeout: int = 10) -> None:
+    """CLI interface for scraping finished and upcoming matches of a league"""
+    try:
+        scrape_cmd(league_url, sport, engine, timeout, lambda scraper: scraper.fetch_and_parse_league(league_url))
+    except ValueError as e:
+        print(JsonFormatter.to_json({"error": str(e), "url": league_url}))
+
+
+def add_common_arguments(parser: argparse.ArgumentParser) -> None:
+    """Add common arguments to a subparser"""
+    parser.add_argument("url", help="URL Flashscore")
+    parser.add_argument("--sport", default=None, help="Sport type (football, tennis). If not provided, detected from URL")
+    parser.add_argument("--engine", default="playwright", help="Engine type (default: playwright)")
+    parser.add_argument("--timeout", type=int, default=10, help="Timeout in seconds")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Flashscore Scraper")
+    parser.add_argument("-v", "--verbose", action="store_true", help="Enable debug logging")
+    subparsers = parser.add_subparsers(dest="command", help="Available commands")
+
+    odds_parser = subparsers.add_parser("odds", help="Scrap odds")
+    odds_parser.add_argument(
+        "--odds",
+        nargs="*",
+        default=[],
+        help="Specific odds types to scrape (e.g. '1x2-odds', 'over-under'). If not provided, all available odds types will be scraped",
+    )
+    odds_parser.add_argument(
+        "--bookmakers", nargs="*", default=[], help="Bookmaker IDs to include (e.g. '2 16 17'). If not provided, all bookmakers are included"
+    )
+    add_common_arguments(odds_parser)
+
+    event_parser = subparsers.add_parser("event", help="Scrap event information")
+    event_parser.add_argument("--with-stats", action="store_true", help="Include match statistics in the 'stats' field (supported sports only)")
+    add_common_arguments(event_parser)
+
+    event_info_parser = subparsers.add_parser("event-info", help="Scrap context information")
+    add_common_arguments(event_info_parser)
+
+    league_parser = subparsers.add_parser("league", help="List finished and upcoming matches of a league")
+    add_common_arguments(league_parser)
+
+    args = parser.parse_args()
+
+    log_level = logging.DEBUG if args.verbose else logging.INFO
+    logging.basicConfig(level=log_level, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", handlers=[logging.StreamHandler()])
+
+    command_dispatch = {
+        "odds": lambda: scrape_odds_cmd(args.url, args.sport, args.engine, args.timeout, OddsFilter(odds=args.odds, bookmakers=args.bookmakers)),
+        "event": lambda: scrape_event_cmd(args.url, args.sport, args.engine, args.timeout, args.with_stats),
+        "event-info": lambda: scrape_event_info_cmd(args.url, args.sport, args.engine, args.timeout),
+        "league": lambda: scrape_league_cmd(args.url, args.sport, args.engine, args.timeout),
+    }
+
+    if args.command in command_dispatch:
+        command_dispatch[args.command]()
+    else:
+        parser.print_help()
+
+
+if __name__ == "__main__":
+    main()

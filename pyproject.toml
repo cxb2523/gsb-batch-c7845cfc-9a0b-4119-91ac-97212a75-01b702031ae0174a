@@ -1,0 +1,26 @@
+[project]
+name = "flashscorescraper"
+version = "0.1.1"
+description = "Flashscore Scraper"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "beautifulsoup4>=4.14.3",
+    "curl-cffi>=0.14.0",
+    "playwright>=1.58.0",
+]
+
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["flashscorescraper", "engines", "models", "parsers", "scraper", "stats", "league", "utils", "tests", "tests.fixtures", "tests.parsers", "tests.parsers.football"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
