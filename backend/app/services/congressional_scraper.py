@@ -45,7 +45,20 @@ class CongressionalScraperService:
             days_back: Days to look back
 
         Returns:
-            Summary of scraping results
+            Summary of scraping results. Keys:
+                success: False only when the API fetch itself failed.
+                trades_processed: Records handled without an error (created +
+                    skipped).
+                trades_created: Newly inserted trades.
+                trades_skipped: Records skipped by existing logic
+                    (duplicates, or an unresolvable congressperson).
+                    Not counted as failures.
+                trades_failed: Number of records that raised while writing.
+                failed_trades: List of per-record failure details, each with
+                    index, name, ticker, transaction_date and reason for
+                    locating the offending row.
+                errors: Failure reason strings (kept for backward
+                    compatibility).
         """
         logger.info(
             f"Starting congressional trade scrape: ticker={ticker}, chamber={chamber}, days_back={days_back}"
@@ -66,6 +79,9 @@ class CongressionalScraperService:
                 "error": str(e),
                 "trades_processed": 0,
                 "trades_created": 0,
+                "trades_skipped": 0,
+                "trades_failed": 0,
+                "failed_trades": [],
             }
 
         if not trades_data:
@@ -74,6 +90,9 @@ class CongressionalScraperService:
                 "success": True,
                 "trades_processed": 0,
                 "trades_created": 0,
+                "trades_skipped": 0,
+                "trades_failed": 0,
+                "failed_trades": [],
                 "message": "No trades found",
             }
 
@@ -83,35 +102,72 @@ class CongressionalScraperService:
                 t for t in trades_data if t.get("chamber") == chamber.upper()
             ]
 
-        # Process each trade
+        # Process each trade. Every trade is committed independently so that a
+        # bad record only rolls back itself and never discards trades that were
+        # already persisted earlier in the batch.
         trades_created = 0
+        trades_skipped = 0
         trades_processed = 0
         errors = []
+        failed_trades = []
 
-        for trade_data in trades_data:
+        for index, trade_data in enumerate(trades_data):
             try:
                 created = await self._process_trade(db, trade_data)
-                if created:
-                    trades_created += 1
-                trades_processed += 1
-
+                # Independent commit per trade: once this returns, the trade is
+                # durable and cannot be lost by a later record's failure.
+                await db.commit()
             except Exception as e:
-                logger.error(f"Failed to process trade: {e}, data: {trade_data}")
-                errors.append(str(e))
+                reason = str(e)
+                logger.error(
+                    "Failed to process congressional trade "
+                    f"(index={index}, name={trade_data.get('name')!r}, "
+                    f"ticker={trade_data.get('ticker')!r}): {e}",
+                    exc_info=True,
+                )
+                try:
+                    # Roll back only this trade's uncommitted changes; earlier
+                    # trades were already committed and remain intact.
+                    await db.rollback()
+                except Exception as rollback_error:  # pragma: no cover - defensive
+                    logger.error(
+                        "Failed to roll back congressional trade "
+                        f"(index={index}): {rollback_error}"
+                    )
+
+                errors.append(reason)
+                failed_trades.append(
+                    {
+                        # Identifiers let callers locate the offending row.
+                        "index": index,
+                        "name": trade_data.get("name"),
+                        "ticker": trade_data.get("ticker"),
+                        "transaction_date": trade_data.get("transaction_date"),
+                        "reason": reason,
+                    }
+                )
                 continue
 
-        await db.commit()
+            trades_processed += 1
+            if created:
+                trades_created += 1
+            else:
+                trades_skipped += 1
 
         logger.info(
-            f"Congressional scrape complete: {trades_processed} processed, "
-            f"{trades_created} created"
+            f"Congressional scrape complete: {trades_processed} processed "
+            f"({trades_created} created, {trades_skipped} skipped), "
+            f"{len(failed_trades)} failed"
         )
 
         return {
             "success": True,
             "trades_processed": trades_processed,
             "trades_created": trades_created,
-            "trades_updated": trades_processed - trades_created,
+            "trades_skipped": trades_skipped,
+            "trades_failed": len(failed_trades),
+            "trades_updated": trades_skipped,
+            "failed_trades": failed_trades,
             "errors": errors if errors else None,
         }
 

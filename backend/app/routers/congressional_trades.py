@@ -176,9 +176,19 @@ async def trigger_congressional_scrape(
             db=db, ticker=ticker, chamber=chamber, days_back=days_back
         )
 
+        failed_count = result.get("trades_failed", 0)
+        message = (
+            f"Scrape complete: {result.get('trades_created', 0)} trades created"
+        )
+        if failed_count:
+            message += (
+                f", {failed_count} failed "
+                f"(see details.failed_trades for per-record reasons)"
+            )
+
         return {
             "success": result.get("success", False),
-            "message": f"Scrape complete: {result.get('trades_created', 0)} trades created",
+            "message": message,
             "details": result,
         }
 

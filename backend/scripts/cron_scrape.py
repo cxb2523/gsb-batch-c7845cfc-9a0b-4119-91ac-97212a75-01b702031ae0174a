@@ -171,7 +171,13 @@ async def scrape_insider_trades(days_back: int = 30, max_filings: int = 5):
 
 
 async def scrape_congressional_trades(days_back: int = 60):
-    """Scrape congressional trades from data sources."""
+    """Scrape congressional trades from data sources.
+
+    Per-record outcomes are settled independently by the scraper: a single bad
+    record does not abort the batch. A batch with failed records is reported as
+    a partial success (``success: True`` plus a ``failed_trades`` list) rather
+    than raising, so the cron job can finish the remaining scrape types.
+    """
     from app.database import db_manager
     from app.services.congressional_scraper import CongressionalScraperService
 
@@ -191,17 +197,55 @@ async def scrape_congressional_trades(days_back: int = 60):
 
             trades_created = result.get("trades_created", 0)
             trades_processed = result.get("trades_processed", 0)
+            trades_skipped = result.get("trades_skipped", 0)
+            trades_failed = result.get("trades_failed", 0)
+            failed_trades = result.get("failed_trades") or []
 
             logger.info("=" * 80)
             logger.info("Congressional Trades Scrape Complete")
-            logger.info(f"Trades processed: {trades_processed}, Trades created: {trades_created}")
+            logger.info(
+                f"Trades processed: {trades_processed} "
+                f"(created: {trades_created}, skipped: {trades_skipped}), "
+                f"failed: {trades_failed}"
+            )
+
+            if trades_failed:
+                logger.warning(
+                    f"Congressional scrape partially succeeded: "
+                    f"{trades_failed} record(s) failed and were skipped"
+                )
+                for entry in failed_trades:
+                    logger.warning(
+                        "  FAILED: name=%r ticker=%r transaction_date=%r reason=%s",
+                        entry.get("name"),
+                        entry.get("ticker"),
+                        entry.get("transaction_date"),
+                        entry.get("reason"),
+                    )
             logger.info("=" * 80)
 
-            return {"success": True, **result}
+            return {
+                "success": result.get("success", True),
+                "status": (
+                    "failed"
+                    if result.get("success") is False
+                    else ("partial_success" if trades_failed else "success")
+                ),
+                **result,
+            }
 
         except Exception as e:
             logger.error(f"Congressional scrape failed: {e}")
-            return {"success": False, "error": str(e)}
+            return {
+                "success": False,
+                "status": "failed",
+                "error": str(e),
+                "trades_processed": 0,
+                "trades_created": 0,
+                "trades_skipped": 0,
+                "trades_failed": 0,
+                "failed_trades": [],
+            }
 
 
 async def fetch_market_news():

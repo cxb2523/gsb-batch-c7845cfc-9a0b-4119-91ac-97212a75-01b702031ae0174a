@@ -388,8 +388,19 @@ class SchedulerService:
                 logger.info(
                     f"Congressional scrape complete: "
                     f"{result.get('trades_created', 0)} trades created, "
+                    f"{result.get('trades_skipped', 0)} skipped, "
+                    f"{result.get('trades_failed', 0)} failed, "
                     f"{result.get('trades_processed', 0)} processed"
                 )
+
+                for entry in result.get("failed_trades") or []:
+                    logger.warning(
+                        "Congressional trade failed: "
+                        f"name={entry.get('name')!r}, "
+                        f"ticker={entry.get('ticker')!r}, "
+                        f"transaction_date={entry.get('transaction_date')!r}, "
+                        f"reason={entry.get('reason')}"
+                    )
 
             except Exception as e:
                 logger.error(f"Error during scheduled congressional scrape: {e}")
