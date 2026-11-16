@@ -13,7 +13,9 @@ from core.constants.common import (
 from core.constants.locales import (
     MESSAGE_INFO_CHANNEL_UPDATE_SKIPPED,
     MESSAGE_WARNING_NO_CHANNELS_TO_UPDATE,
+    TEMPLATE_ERROR_CHANNEL_UPDATE_FAILED,
     TEMPLATE_INFO_CHANNELS_UPDATE_COMPLETED,
+    TEMPLATE_INFO_CHANNELS_UPDATE_COMPLETED_WITH_FAILURES,
     TEMPLATE_INFO_CHANNELS_UPDATE_STARTED,
 )
 from core.constants.templates.debug.channel import (
@@ -50,8 +52,11 @@ from core.utils import (
     batched,
 )
 from domain.channel import (
+    ChannelUpdateFailure,
     ChannelUpdateResult,
+    ChannelUpdateSummary,
     get_normalized_current_id,
+    restore_channel_info,
     update_last_id_and_state,
 )
 from domain.predicates import (
@@ -74,6 +79,7 @@ async def _update_channel_info(
             channel_name=channel_name,
         ),
     )
+
 
     last_post_id = await get_last_post_id(
         ctx=ctx,
@@ -140,23 +146,64 @@ async def _update_channel_info(
     return result
 
 
+async def _update_channel_info_safe(
+    ctx: HttpContext,
+    *,
+    channel_name: ChannelName,
+    channel_info: ChannelInfo,
+) -> ChannelUpdateResult | ChannelUpdateFailure:
+    snapshot = channel_info.copy()
+
+    try:
+        return await _update_channel_info(
+            ctx=ctx,
+            channel_name=channel_name,
+            channel_info=channel_info,
+        )
+    except Exception as e:
+        restore_channel_info(
+            channel_info=channel_info,
+            snapshot=snapshot,
+        )
+
+        logger.error(
+            msg=TEMPLATE_ERROR_CHANNEL_UPDATE_FAILED.format(
+                channel_name=channel_name,
+                exc_type=type(e).__name__,
+                exc_msg=str(e),
+            ),
+        )
+
+        return ChannelUpdateFailure(
+            channel_name=channel_name,
+            exc_type=type(e).__name__,
+            exc_msg=str(e),
+        )
+
+
 async def update_channels_info(
     ctx: RuntimeContext,
     *,
     channels: ChannelsDict,
     skip_update: bool = False,
-) -> None:
+) -> ChannelUpdateSummary:
     if not (channels_count := len(channels)):
         logger.warning(
             msg=MESSAGE_WARNING_NO_CHANNELS_TO_UPDATE,
         )
-        return
+        return ChannelUpdateSummary(
+            channels_count=0,
+            changed_count=0,
+        )
 
     if skip_update:
         logger.info(
             msg=MESSAGE_INFO_CHANNEL_UPDATE_SKIPPED,
         )
-        return
+        return ChannelUpdateSummary(
+            channels_count=channels_count,
+            changed_count=0,
+        )
 
     logger.info(
         msg=TEMPLATE_INFO_CHANNELS_UPDATE_STARTED.format(
@@ -172,6 +219,7 @@ async def update_channels_info(
     )
 
     changed_count = 0
+    failures: list[ChannelUpdateFailure] = []
 
     with render_channel_update(
         console=console,
@@ -189,7 +237,7 @@ async def update_channels_info(
 
             tasks = [
                 create_task(
-                    _update_channel_info(
+                    _update_channel_info_safe(
                         ctx=ctx.http,
                         channel_name=name,
                         channel_info=channels[name],
@@ -201,8 +249,16 @@ async def update_channels_info(
             batch_changed = 0
 
             for task in as_completed(tasks):
-                result = await task
-                batch_changed += add_update(result)
+                outcome = await task
+
+                if isinstance(
+                    outcome,
+                    ChannelUpdateFailure,
+                ):
+                    failures.append(outcome)
+                    continue
+
+                batch_changed += add_update(outcome)
 
             changed_count += batch_changed
 
@@ -220,9 +276,24 @@ async def update_channels_info(
         ),
     )
 
-    logger.info(
-        msg=TEMPLATE_INFO_CHANNELS_UPDATE_COMPLETED.format(
-            checked=channels_count,
-            changed=changed_count,
-        ),
+    if failures:
+        logger.info(
+            msg=TEMPLATE_INFO_CHANNELS_UPDATE_COMPLETED_WITH_FAILURES.format(
+                checked=channels_count,
+                changed=changed_count,
+                failed=len(failures),
+            ),
+        )
+    else:
+        logger.info(
+            msg=TEMPLATE_INFO_CHANNELS_UPDATE_COMPLETED.format(
+                checked=channels_count,
+                changed=changed_count,
+            ),
+        )
+
+    return ChannelUpdateSummary(
+        channels_count=channels_count,
+        changed_count=changed_count,
+        failures=tuple(failures),
     )

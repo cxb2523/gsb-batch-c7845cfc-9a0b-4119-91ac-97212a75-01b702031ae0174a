@@ -8,6 +8,7 @@ __all__ = [
     "TEMPLATE_INFO_CONFIG_EXPORT_COMPLETED",
     "TEMPLATE_INFO_CONFIG_EXPORT_STARTED",
     "TEMPLATE_INFO_CONFIG_EXTRACT_COMPLETED",
+    "TEMPLATE_INFO_CONFIG_EXTRACT_COMPLETED_WITH_FAILURES",
     "TEMPLATE_INFO_CONFIG_EXTRACT_STARTED",
     "TEMPLATE_INFO_CONFIG_FILTER_COMPLETED",
     "TEMPLATE_INFO_CONFIG_FILTER_STARTED",
@@ -40,6 +41,10 @@ TEMPLATE_INFO_CONFIG_EXPORT_STARTED: TemplateStr = (
 TEMPLATE_INFO_CONFIG_EXTRACT_COMPLETED: TemplateStr = (
     "Successfully extracted {configs_count:,} configurations "
     "from {channels_count:,} channels."
+)
+TEMPLATE_INFO_CONFIG_EXTRACT_COMPLETED_WITH_FAILURES: TemplateStr = (
+    "Extracted {configs_count:,} configurations from "
+    "{channels_count:,} channels, with {failed:,} channel(s) failed."
 )
 TEMPLATE_INFO_CONFIG_EXTRACT_STARTED: TemplateStr = (
     "Starting to extract configurations from {count:,} channels..."

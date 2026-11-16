@@ -74,7 +74,9 @@ from domain.predicates import (
 
 __all__ = [
     "ChannelStatus",
+    "ChannelUpdateFailure",
     "ChannelUpdateResult",
+    "ChannelUpdateSummary",
     "apply_channel_changes",
     "delete_channels",
     "diff_channel_id",
@@ -90,6 +92,7 @@ __all__ = [
     "normalize_channel_names",
     "normalize_channels",
     "process_channels",
+    "restore_channel_info",
     "sort_channel_names",
     "update_last_id_and_state",
     "update_with_new_channels",
@@ -110,6 +113,24 @@ class ChannelUpdateResult:
     old_last_id: int
     new_last_id: int
     changed: bool
+
+
+@dataclass(slots=True, frozen=True)
+class ChannelUpdateFailure:
+    channel_name: str
+    exc_type: str
+    exc_msg: str
+
+
+@dataclass(slots=True, frozen=True)
+class ChannelUpdateSummary:
+    channels_count: int
+    changed_count: int
+    failures: tuple[ChannelUpdateFailure, ...] = ()
+
+    @property
+    def failed_count(self) -> int:
+        return len(self.failures)
 
 
 def apply_channel_changes(
@@ -563,6 +584,18 @@ def process_channels(
         )
 
     return channels
+
+
+def restore_channel_info(
+    channel_info: ChannelInfo,
+    *,
+    snapshot: ChannelInfo,
+) -> None:
+    for key in tuple(channel_info):
+        if key not in snapshot:
+            del channel_info[key]
+
+    channel_info.update(snapshot)
 
 
 def sort_channel_names(

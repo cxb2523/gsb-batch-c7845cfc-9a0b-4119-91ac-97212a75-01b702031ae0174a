@@ -6,6 +6,7 @@ __all__ = [
     "TEMPLATE_INFO_CHANNELS_STATUS_COMPLETED",
     "TEMPLATE_INFO_CHANNELS_STATUS_STARTED",
     "TEMPLATE_INFO_CHANNELS_UPDATE_COMPLETED",
+    "TEMPLATE_INFO_CHANNELS_UPDATE_COMPLETED_WITH_FAILURES",
     "TEMPLATE_INFO_CHANNELS_UPDATE_STARTED",
     "TEMPLATE_INFO_CHANNEL_CHANGES_SKIPPED",
     "TEMPLATE_INFO_CHANNEL_CHANGES_TOTAL",
@@ -34,6 +35,10 @@ TEMPLATE_INFO_CHANNELS_STATUS_STARTED: TemplateStr = (
 )
 TEMPLATE_INFO_CHANNELS_UPDATE_COMPLETED: TemplateStr = (
     "Finished updating {checked:,} channels, with {changed:,} changed."
+)
+TEMPLATE_INFO_CHANNELS_UPDATE_COMPLETED_WITH_FAILURES: TemplateStr = (
+    "Finished updating {checked:,} channels, with {changed:,} changed "
+    "and {failed:,} failed; failed channels keep their previous state."
 )
 TEMPLATE_INFO_CHANNELS_UPDATE_STARTED: TemplateStr = (
     "Starting to update information for {count:,} channels..."

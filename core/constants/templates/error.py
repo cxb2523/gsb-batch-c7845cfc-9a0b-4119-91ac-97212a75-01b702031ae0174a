@@ -3,6 +3,8 @@ from core.typing import (
 )
 
 __all__ = [
+    "TEMPLATE_ERROR_CHANNEL_UPDATE_FAILED",
+    "TEMPLATE_ERROR_CONFIG_EXTRACT_FAILED",
     "TEMPLATE_ERROR_CONFIG_IMPORT_FAILED",
     "TEMPLATE_ERROR_CONFIG_MISSING_REQUIRED_FIELDS",
     "TEMPLATE_ERROR_CONFIG_NAME_INVALID_FORMAT",
@@ -25,11 +27,24 @@ __all__ = [
     "TEMPLATE_ERROR_PROXY_INVALID_FORMAT",
     "TEMPLATE_ERROR_PROXY_INVALID_PORT",
     "TEMPLATE_ERROR_PROXY_NETWORK",
+    "TEMPLATE_ERROR_SCRAPER_FAILURES_SUMMARY",
+    "TEMPLATE_ERROR_SCRAPER_FAILURES_SUMMARY_ABORTED",
+    "TEMPLATE_ERROR_SCRAPER_FETCH_ABORTED",
     "TEMPLATE_ERROR_UNKNOWN_SCRIPT_NAMES",
     "TEMPLATE_ERROR_VMESS_JSON_DECODE_FAILED",
     "TEMPLATE_ERROR_VMESS_JSON_PARSE_FAILED",
 ]
 
+TEMPLATE_ERROR_CHANNEL_UPDATE_FAILED: TemplateStr = (
+    "Failed to refresh channel {channel_name!r} "
+    "due to {exc_type!r}: {exc_msg!r}. "
+    "Keeping its previous state."
+)
+TEMPLATE_ERROR_CONFIG_EXTRACT_FAILED: TemplateStr = (
+    "Configuration extraction failed for channel {channel_name!r} "
+    "due to {exc_type!r}: {exc_msg!r}. "
+    "Keeping its previous state."
+)
 TEMPLATE_ERROR_CONFIG_IMPORT_FAILED: TemplateStr = (
     "Failed to import configurations from {path!r} "
     "due to {exc_type!r}: {exc_msg!r}."
@@ -108,6 +123,22 @@ TEMPLATE_ERROR_PROXY_INVALID_PORT: TemplateStr = (
 )
 TEMPLATE_ERROR_PROXY_NETWORK: TemplateStr = (
     "Connection to {url!r} failed due to {exc_type!r}: {exc_msg!r}."
+)
+TEMPLATE_ERROR_SCRAPER_FAILURES_SUMMARY: TemplateStr = (
+    "Scraping finished with {failed:,} failed channel(s): "
+    "{refresh_failed:,} failed during channel refresh "
+    "and {fetch_failed:,} failed during config extraction."
+)
+TEMPLATE_ERROR_SCRAPER_FAILURES_SUMMARY_ABORTED: TemplateStr = (
+    "Scraping finished with {failed:,} failed channel(s): "
+    "{refresh_failed:,} failed during channel refresh, "
+    "{fetch_failed:,} reported failed during config extraction, "
+    "and the remaining channels were not processed because "
+    "extraction was aborted."
+)
+TEMPLATE_ERROR_SCRAPER_FETCH_ABORTED: TemplateStr = (
+    "Configuration extraction aborted by an unhandled error "
+    "({exc_type!r}: {exc_msg!r}). Channel state will still be saved."
 )
 TEMPLATE_ERROR_VMESS_JSON_DECODE_FAILED: TemplateStr = (
     "Failed to decode VMESS JSON payload: {payload!r}."

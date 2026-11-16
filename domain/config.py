@@ -84,7 +84,9 @@ from domain.predicates import (
 )
 
 __all__ = [
+    "ConfigExtractionFailure",
     "ConfigExtractionResult",
+    "ConfigExtractionSummary",
     "filter_by_condition",
     "format_config_name",
     "iter_formatted_config_urls",
@@ -106,6 +108,25 @@ class ConfigExtractionResult:
     channel_name: str
     total_found: int
     new_found: int
+
+
+@dataclass(slots=True, frozen=True)
+class ConfigExtractionFailure:
+    channel_name: str
+    exc_type: str
+    exc_msg: str
+
+
+@dataclass(slots=True, frozen=True)
+class ConfigExtractionSummary:
+    channels_count: int
+    configs_count: int
+    results: tuple[ConfigExtractionResult, ...] = ()
+    failures: tuple[ConfigExtractionFailure, ...] = ()
+
+    @property
+    def failed_count(self) -> int:
+        return len(self.failures)
 
 
 def _dumps_config(

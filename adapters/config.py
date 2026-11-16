@@ -39,11 +39,13 @@ from core.constants.formats import (
 from core.constants.locales import (
     MESSAGE_INFO_CONFIG_NORMALIZATION_SKIPPED,
     MESSAGE_WARNING_NO_CHANNELS_TO_EXTRACT,
+    TEMPLATE_ERROR_CONFIG_EXTRACT_FAILED,
     TEMPLATE_ERROR_CONFIG_IMPORT_FAILED,
     TEMPLATE_ERROR_FAILED_FETCH_ID,
     TEMPLATE_INFO_CONFIG_EXPORT_COMPLETED,
     TEMPLATE_INFO_CONFIG_EXPORT_STARTED,
     TEMPLATE_INFO_CONFIG_EXTRACT_COMPLETED,
+    TEMPLATE_INFO_CONFIG_EXTRACT_COMPLETED_WITH_FAILURES,
     TEMPLATE_INFO_CONFIG_EXTRACT_STARTED,
     TEMPLATE_INFO_CONFIG_IMPORT_COMPLETED,
     TEMPLATE_INFO_CONFIG_IMPORT_STARTED,
@@ -132,9 +134,12 @@ from core.utils import (
 )
 from domain.channel import (
     get_sorted_keys,
+    restore_channel_info,
 )
 from domain.config import (
+    ConfigExtractionFailure,
     ConfigExtractionResult,
+    ConfigExtractionSummary,
     iter_formatted_config_urls,
     line_to_configs,
     normalize_configs,
@@ -418,13 +423,56 @@ async def _process_channel_configs_batch(
     return configs_count
 
 
+async def _extract_channel_configs_safe(
+    ctx: RuntimeContext,
+    *,
+    channel_name: ChannelName,
+    channel_info: ChannelInfo,
+    progress: Progress,
+    overall_task: TaskID,
+    batch_size: BatchSize,
+) -> ConfigExtractionResult | ConfigExtractionFailure:
+    snapshot = channel_info.copy()
+
+    try:
+        return await _process_channel_configs(
+            ctx=ctx.http,
+            channel_name=channel_name,
+            channel_info=channel_info,
+            progress=progress,
+            overall_task=overall_task,
+            batch_size=batch_size,
+            configs_path=ctx.io.configs_raw_path,
+        )
+    except Exception as e:
+        restore_channel_info(
+            channel_info=channel_info,
+            snapshot=snapshot,
+        )
+
+        logger.error(
+            msg=TEMPLATE_ERROR_CONFIG_EXTRACT_FAILED.format(
+                channel_name=channel_name,
+                exc_type=type(e).__name__,
+                exc_msg=str(e),
+            ),
+        )
+
+        return ConfigExtractionFailure(
+            channel_name=channel_name,
+            exc_type=type(e).__name__,
+            exc_msg=str(e),
+        )
+
+
 async def _run_channel_extraction(
     ctx: RuntimeContext,
     *,
     channel_names: ChannelNames,
     channels: ChannelsDict,
-) -> list[ConfigExtractionResult]:
+) -> ConfigExtractionSummary:
     channel_extract_results: list[ConfigExtractionResult] = []
+    failures: list[ConfigExtractionFailure] = []
 
     ids_per_batch = ctx.pipeline.config_extraction.batch_size
     max_concurrent = ctx.pipeline.config_extraction.max_concurrent_channels
@@ -457,42 +505,67 @@ async def _run_channel_extraction(
                 ),
             )
 
-            results: list[ConfigExtractionResult] = await gather(*(
-                _process_channel_configs(
-                    ctx=ctx.http,
+            outcomes: list[
+                ConfigExtractionResult | ConfigExtractionFailure
+            ] = await gather(*(
+                _extract_channel_configs_safe(
+                    ctx=ctx,
                     channel_name=name,
                     channel_info=channels[name],
                     progress=progress,
                     overall_task=overall_task,
                     batch_size=ids_per_batch,
-                    configs_path=ctx.io.configs_raw_path,
                 )
                 for name in channel_name_batch
             ))
+
+            batch_results = [
+                outcome
+                for outcome in outcomes
+                if isinstance(
+                    outcome,
+                    ConfigExtractionResult,
+                )
+            ]
+            failures.extend(
+                outcome
+                for outcome in outcomes
+                if isinstance(
+                    outcome,
+                    ConfigExtractionFailure,
+                )
+            )
 
             logger.debug(
                 msg=TEMPLATE_DEBUG_CONFIG_EXTRACT_BATCH_COMPLETED.format(
                     channels_in_batch=len(channel_name_batch),
                     total_collected=sum(
                         result.new_found
-                        for result in results
+                        for result in batch_results
                     ),
                 ),
             )
 
-            channel_extract_results.extend(results)
+            channel_extract_results.extend(batch_results)
+
+    total_collected = sum(
+        result.new_found
+        for result in channel_extract_results
+    )
 
     logger.debug(
         msg=TEMPLATE_DEBUG_CONFIG_EXTRACT_COMPLETED.format(
             channels_processed=len(channel_extract_results),
-            total_collected=sum(
-                result.new_found
-                for result in channel_extract_results
-            ),
+            total_collected=total_collected,
         ),
     )
 
-    return channel_extract_results
+    return ConfigExtractionSummary(
+        channels_count=len(channel_names),
+        configs_count=total_collected,
+        results=tuple(channel_extract_results),
+        failures=tuple(failures),
+    )
 
 
 async def _try_import_configs(
@@ -596,7 +669,7 @@ async def fetch_and_write_configs(
     ctx: RuntimeContext,
     *,
     channels: ChannelsDict,
-) -> None:
+) -> ConfigExtractionSummary:
     channels_to_extract = get_sorted_keys(
         channels=channels,
         apply_filter=True,
@@ -614,7 +687,10 @@ async def fetch_and_write_configs(
         logger.warning(
             msg=MESSAGE_WARNING_NO_CHANNELS_TO_EXTRACT,
         )
-        return
+        return ConfigExtractionSummary(
+            channels_count=0,
+            configs_count=0,
+        )
 
     logger.info(
         msg=TEMPLATE_INFO_CONFIG_EXTRACT_STARTED.format(
@@ -629,40 +705,46 @@ async def fetch_and_write_configs(
         ),
     )
 
-    results: list[ConfigExtractionResult] = await _run_channel_extraction(
+    summary = await _run_channel_extraction(
         ctx=ctx,
         channel_names=channels_to_extract,
         channels=channels,
     )
 
-    total_found = sum(
-        result.new_found
-        for result in results
-    )
-
     logger.debug(
         msg=TEMPLATE_DEBUG_CONFIG_EXTRACT_ORCHESTRATION_EXTRACTED.format(
-            channels_processed=len(results),
-            total_collected=total_found,
+            channels_processed=len(summary.results),
+            total_collected=summary.configs_count,
         ),
     )
 
     render_config_extract(
-        results=results,
+        results=list(summary.results),
     )
 
     logger.debug(
         msg=TEMPLATE_DEBUG_CONFIG_EXTRACT_ORCHESTRATION_RENDERED.format(
-            rendered_count=len(results),
+            rendered_count=len(summary.results),
         ),
     )
 
-    logger.info(
-        msg=TEMPLATE_INFO_CONFIG_EXTRACT_COMPLETED.format(
-            configs_count=total_found,
-            channels_count=filtered_channels_count,
-        ),
-    )
+    if summary.failures:
+        logger.info(
+            msg=TEMPLATE_INFO_CONFIG_EXTRACT_COMPLETED_WITH_FAILURES.format(
+                configs_count=summary.configs_count,
+                channels_count=summary.channels_count,
+                failed=summary.failed_count,
+            ),
+        )
+    else:
+        logger.info(
+            msg=TEMPLATE_INFO_CONFIG_EXTRACT_COMPLETED.format(
+                configs_count=summary.configs_count,
+                channels_count=summary.channels_count,
+            ),
+        )
+
+    return summary
 
 
 async def import_configs(

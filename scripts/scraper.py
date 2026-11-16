@@ -84,6 +84,9 @@ from core.constants.locales import (
     MESSAGE_INFO_PROGRAM_EXIT,
     TEMPLATE_ERROR_PROXY_AUTH_OR_PROTOCOL,
     TEMPLATE_ERROR_PROXY_NETWORK,
+    TEMPLATE_ERROR_SCRAPER_FAILURES_SUMMARY,
+    TEMPLATE_ERROR_SCRAPER_FAILURES_SUMMARY_ABORTED,
+    TEMPLATE_ERROR_SCRAPER_FETCH_ABORTED,
     TEMPLATE_TITLE_CLI_PARSED_ARGUMENTS,
 )
 from core.constants.templates.info.common import (
@@ -104,6 +107,7 @@ from core.terminal.logger import (
 )
 from core.typing import (
     ArgsNamespace,
+    ChannelsDict,
 )
 from core.utils import (
     abs_path,
@@ -314,8 +318,116 @@ def parse_args() -> ArgsNamespace:
     return args
 
 
+async def _run_pipeline(
+    *,
+    parsed_args: ArgsNamespace,
+    io_ctx: IOContext,
+    channels: ChannelsDict,
+) -> tuple[int, int, bool]:
+    refresh_failed = 0
+    fetch_failed = 0
+    fetch_aborted = False
+
+    async with AsyncClient(
+        proxy=parsed_args.proxy_url,
+        timeout=Timeout(
+            timeout=parsed_args.time_out,
+        ),
+    ) as client:
+        if parsed_args.proxy_url:
+            logger.info(
+                msg=TEMPLATE_INFO_PROXY_USED.format(
+                    url=parsed_args.proxy_url,
+                ),
+            )
+
+        runtime_ctx = RuntimeContext(
+            http=HttpContext(
+                client=client,
+                retries=parsed_args.retries,
+                retry_delay=parsed_args.retry_delay,
+            ),
+            io=io_ctx,
+            pipeline=PipelineRuntimeContext(
+                channel_update=ChannelUpdateContext(
+                    batch_size=parsed_args.channels_batch,
+                ),
+                config_extraction=ConfigExtractionContext(
+                    batch_size=parsed_args.configs_batch,
+                    max_concurrent_channels=parsed_args.channels_concurrency,
+                ),
+            ),
+        )
+
+        refresh_summary = await update_channels_info(
+            ctx=runtime_ctx,
+            channels=channels,
+            skip_update=parsed_args.skip_update,
+        )
+        refresh_failed = refresh_summary.failed_count
+
+        display_channel_info(
+            channels=channels,
+        )
+
+        try:
+            fetch_summary = await fetch_and_write_configs(
+                ctx=runtime_ctx,
+                channels=channels,
+            )
+        except (
+            CancelledError,
+            KeyboardInterrupt,
+        ):
+            raise
+        except Exception as e:
+            fetch_aborted = True
+
+            logger.exception(
+                msg=TEMPLATE_ERROR_SCRAPER_FETCH_ABORTED.format(
+                    exc_type=type(e).__name__,
+                    exc_msg=str(e),
+                ),
+            )
+        else:
+            fetch_failed = fetch_summary.failed_count
+
+    return refresh_failed, fetch_failed, fetch_aborted
+
+
+def _log_failures_summary(
+    *,
+    refresh_failed: int,
+    fetch_failed: int,
+    fetch_aborted: bool = False,
+) -> None:
+    if not (refresh_failed or fetch_failed or fetch_aborted):
+        return
+
+    template = (
+        TEMPLATE_ERROR_SCRAPER_FAILURES_SUMMARY_ABORTED
+        if fetch_aborted
+        else TEMPLATE_ERROR_SCRAPER_FAILURES_SUMMARY
+    )
+
+    logger.error(
+        msg=template.format(
+            failed=refresh_failed + fetch_failed,
+            refresh_failed=refresh_failed,
+            fetch_failed=fetch_failed,
+        ),
+    )
+
+
 async def main() -> None:
     parsed_args = parse_args()
+
+    io_ctx: IOContext | None = None
+    channels: ChannelsDict = {}
+    channels_loaded = False
+    refresh_failed = 0
+    fetch_failed = 0
+    fetch_aborted = False
 
     try:
         io_ctx = IOContext(
@@ -326,52 +438,17 @@ async def main() -> None:
         channels = await load_channels(
             ctx=io_ctx,
         )
+        channels_loaded = True
 
-        async with AsyncClient(
-            proxy=parsed_args.proxy_url,
-            timeout=Timeout(
-                timeout=parsed_args.time_out,
-            ),
-        ) as client:
-            if parsed_args.proxy_url:
-                logger.info(
-                    msg=TEMPLATE_INFO_PROXY_USED.format(
-                        url=parsed_args.proxy_url,
-                    ),
-                )
-
-            runtime_ctx = RuntimeContext(
-                http=HttpContext(
-                    client=client,
-                    retries=parsed_args.retries,
-                    retry_delay=parsed_args.retry_delay,
-                ),
-                io=io_ctx,
-                pipeline=PipelineRuntimeContext(
-                    channel_update=ChannelUpdateContext(
-                        batch_size=parsed_args.channels_batch,
-                    ),
-                    config_extraction=ConfigExtractionContext(
-                        batch_size=parsed_args.configs_batch,
-                        max_concurrent_channels=parsed_args.channels_concurrency,
-                    ),
-                ),
-            )
-
-            await update_channels_info(
-                ctx=runtime_ctx,
-                channels=channels,
-                skip_update=parsed_args.skip_update,
-            )
-
-            display_channel_info(
-                channels=channels,
-            )
-
-            await fetch_and_write_configs(
-                ctx=runtime_ctx,
-                channels=channels,
-            )
+        (
+            refresh_failed,
+            fetch_failed,
+            fetch_aborted,
+        ) = await _run_pipeline(
+            parsed_args=parsed_args,
+            io_ctx=io_ctx,
+            channels=channels,
+        )
     except (
         CancelledError,
         KeyboardInterrupt,
@@ -400,10 +477,18 @@ async def main() -> None:
             msg=MESSAGE_ERROR_UNEXPECTED_FAILURE,
         )
     finally:
-        await save_channels(
-            ctx=io_ctx,
-            channels=channels,
-        )
+        try:
+            if io_ctx is not None and channels_loaded:
+                await save_channels(
+                    ctx=io_ctx,
+                    channels=channels,
+                )
+        finally:
+            _log_failures_summary(
+                refresh_failed=refresh_failed,
+                fetch_failed=fetch_failed,
+                fetch_aborted=fetch_aborted,
+            )
 
 
 if __name__ == "__main__":
