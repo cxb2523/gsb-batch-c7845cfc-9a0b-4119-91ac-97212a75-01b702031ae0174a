@@ -12,8 +12,47 @@ msgstr "Specified path is not a directory or does not exist."
 msgid "msg:no-xamls"
 msgstr "No XAML files exist in the specified directory."
 
+msgid "msg:checkin-failed"
+msgstr "tf checkin failed"
+
+msgid "msg:checkin-skipped-all-failed"
+msgstr "Skipped tf checkin: all screenshot deletions failed."
+
+msgid "msg:checkin-skipped-partial-failed"
+msgstr "Skipped tf checkin: one or more screenshot deletions failed."
+
+msgid "msg:checkin-succeeded"
+msgstr "tf checkin completed successfully."
+
 msgid "msg:remove-screenshot"
-msgstr "Remove screenshot"
+msgstr "Screenshot"
+
+msgid "msg:remove-status-deleted"
+msgstr "deleted"
+
+msgid "msg:remove-status-failed"
+msgstr "failed"
+
+msgid "msg:remove-status-planned"
+msgstr "planned (dry run; nothing was deleted)"
+
+msgid "msg:count-deleted"
+msgstr "deleted"
+
+msgid "msg:count-failed"
+msgstr "failed"
+
+msgid "msg:count-skipped"
+msgstr "skipped"
+
+msgid "msg:remove-summary"
+msgstr "Screenshot removal summary"
+
+msgid "msg:tf-command-failed"
+msgstr "tf command failed"
+
+msgid "msg:tf-delete-failed"
+msgstr "tf delete failed"
 
 msgid "rule:empty-catch"
 msgstr "Found a TryCatch activity with an empty catch. Even if the purpose is to ignore any exceptions, how about logging it?"

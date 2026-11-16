@@ -12,8 +12,47 @@ msgstr "指定されたパスはディレクトリではないか、存在して
 msgid "msg:no-xamls"
 msgstr "チェック対象の XAML ファイルがありませんでした"
 
+msgid "msg:checkin-failed"
+msgstr "tf checkin に失敗しました"
+
+msgid "msg:checkin-skipped-all-failed"
+msgstr "スクリーンショットの削除がすべて失敗したため、tf checkin をスキップしました。"
+
+msgid "msg:checkin-skipped-partial-failed"
+msgstr "スクリーンショットの削除に失敗したものがあるため、tf checkin をスキップしました。"
+
+msgid "msg:checkin-succeeded"
+msgstr "tf checkin が正常に完了しました。"
+
 msgid "msg:remove-screenshot"
-msgstr "スクリーンショットを削除しました"
+msgstr "スクリーンショット"
+
+msgid "msg:remove-status-deleted"
+msgstr "削除済み"
+
+msgid "msg:remove-status-failed"
+msgstr "削除失敗"
+
+msgid "msg:remove-status-planned"
+msgstr "削除予定（ドライランのため実際には削除していません）"
+
+msgid "msg:count-deleted"
+msgstr "成功"
+
+msgid "msg:count-failed"
+msgstr "失敗"
+
+msgid "msg:count-skipped"
+msgstr "スキップ"
+
+msgid "msg:remove-summary"
+msgstr "スクリーンショット削除集計"
+
+msgid "msg:tf-command-failed"
+msgstr "tf コマンドが失敗しました"
+
+msgid "msg:tf-delete-failed"
+msgstr "tf delete が失敗しました"
 
 msgid "rule:empty-catch"
 msgstr "空の Catch をもつ TryCatch があります。例外を無視するのが目的でもせめてログぐらいは記録しましょう。"

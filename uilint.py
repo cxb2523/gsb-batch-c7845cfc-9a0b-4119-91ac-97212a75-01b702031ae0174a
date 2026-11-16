@@ -13,6 +13,9 @@ from lxml import etree
 
 import uixaml
 
+# Translation function (rebound to a gettext translation in main())
+_ = gettext.gettext
+
 # Tuple for result records (Result for the project, ResultXAML for each XAMLs)
 Result = namedtuple('Result', ('file', 'category', 'message'))
 ResultXAML = namedtuple('ResultXAML', ('category', 'message'))
@@ -22,6 +25,22 @@ ResultXAML = namedtuple('ResultXAML', ('category', 'message'))
 class MessageCategory(enum.Enum):
   ERROR = enum.auto()
   WARNING = enum.auto()
+
+
+# Enum for the outcome of each screenshot removal
+class RemoveStatus(enum.Enum):
+  DELETED = enum.auto()   # Deleted successfully
+  FAILED = enum.auto()    # Attempted but failed (reason is recorded)
+  PLANNED = enum.auto()   # Only planned (dryrun); nothing was touched
+
+
+# Result record of a single screenshot removal
+RemoveResult = namedtuple('RemoveResult', ('path', 'status', 'reason'))
+
+# Summary of a screenshot removal run
+RemoveSummary = namedtuple(
+  'RemoveSummary', ('mode', 'deleted', 'failed', 'skipped', 'checkin')
+)
 
 
 # Linter class for the project
@@ -459,7 +478,153 @@ class XAML:
         ))
 
 
-if __name__ == '__main__':
+# Build a short human-readable reason from an OSError
+def _oserror_reason(err: OSError) -> str:
+  if err.errno is not None:
+    return '[Errno %d] %s' % (err.errno, err.strerror or '')
+  return str(err)
+
+
+# Default file mode remover: delete one file with os.remove
+def _remove_file(path: str) -> None:
+  os.remove(path)
+
+
+# Default VSTS mode command runner: run a tf command and raise on failure
+def _run_tf_command(command: str) -> int:
+  return subprocess.run(
+    command,
+    shell=True,
+    stdout=subprocess.DEVNULL,
+    stderr=subprocess.DEVNULL
+  ).returncode
+
+
+# Remove unused screenshots. Each screenshot is settled independently:
+# a failure on one screenshot is recorded and never aborts the batch.
+# - 'dryrun': only reports planned paths; no file or VCS operation is done.
+# - 'file':   deletes each file with file_remover (default: os.remove).
+# - 'vsts':   runs `tf delete` for each file and, only when at least one
+#             deletion succeeded and none failed, runs one `tf checkin`.
+# Returns a RemoveSummary. Lint results and exit codes are not affected by
+# removal failures.
+def remove_unused_screenshots(
+  project: Project,
+  mode: str,
+  file_remover=_remove_file,
+  tf_runner=_run_tf_command
+) -> RemoveSummary:
+  ss_diff = project.stored_screenshots() - project.inuse_screenshots()
+
+  if not any(ss_diff):
+    return RemoveSummary(mode, 0, 0, 0, None)
+
+  print(_('msg:remove-screenshots'))
+
+  results = []
+
+  for ss in sorted(ss_diff):
+    ss_path = project.screenshot_path(ss)
+
+    if mode == 'dryrun':
+      print('%s: %s (%s)' % (
+        _('msg:remove-screenshot'), ss_path, _('msg:remove-status-planned')
+      ))
+      results.append(RemoveResult(ss_path, RemoveStatus.PLANNED, None))
+      continue
+
+    if mode == 'file':
+      try:
+        file_remover(ss_path)
+      except OSError as err:
+        reason = _oserror_reason(err)
+        print('%s: %s (%s: %s)' % (
+          _('msg:remove-screenshot'), ss_path,
+          _('msg:remove-status-failed'), reason
+        ))
+        results.append(RemoveResult(ss_path, RemoveStatus.FAILED, reason))
+        continue
+
+      print('%s: %s (%s)' % (
+        _('msg:remove-screenshot'), ss_path, _('msg:remove-status-deleted')
+      ))
+      results.append(RemoveResult(ss_path, RemoveStatus.DELETED, None))
+    elif mode == 'vsts':
+      try:
+        returncode = tf_runner(
+          'tf delete -jwt:"$SYSTEM_ACCESSTOKEN" "%s"' % ss_path
+        )
+      except OSError as err:
+        reason = _oserror_reason(err)
+        print('%s: %s (%s: %s)' % (
+          _('msg:remove-screenshot'), ss_path,
+          _('msg:remove-status-failed'), reason
+        ))
+        results.append(RemoveResult(ss_path, RemoveStatus.FAILED, reason))
+        continue
+
+      if returncode != 0:
+        reason = '%s (exit code %d)' % (_('msg:tf-delete-failed'), returncode)
+        print('%s: %s (%s: %s)' % (
+          _('msg:remove-screenshot'), ss_path,
+          _('msg:remove-status-failed'), reason
+        ))
+        results.append(RemoveResult(ss_path, RemoveStatus.FAILED, reason))
+        continue
+
+      print('%s: %s (%s)' % (
+        _('msg:remove-screenshot'), ss_path, _('msg:remove-status-deleted')
+      ))
+      results.append(RemoveResult(ss_path, RemoveStatus.DELETED, None))
+    else:
+      raise ValueError('Unknown screenshot removal mode: %s' % mode)
+
+  deleted = sum(1 for r in results if r.status == RemoveStatus.DELETED)
+  failed = sum(1 for r in results if r.status == RemoveStatus.FAILED)
+  skipped = sum(1 for r in results if r.status == RemoveStatus.PLANNED)
+
+  checkin = None
+
+  if mode == 'vsts':
+    if deleted < 1:
+      checkin = False
+      print(_('msg:checkin-skipped-all-failed'))
+    elif failed > 0:
+      checkin = False
+      print(_('msg:checkin-skipped-partial-failed'))
+    else:
+      try:
+        returncode = tf_runner(
+          'tf checkin -jwt:"$SYSTEM_ACCESSTOKEN" '
+          '-comment:"Remove screenshot(s)" -noprompt'
+        )
+      except OSError as err:
+        checkin = False
+        print('%s: %s' % (_('msg:checkin-failed'), _oserror_reason(err)))
+      else:
+        if returncode != 0:
+          checkin = False
+          print('%s: %s (exit code %d)' % (
+            _('msg:checkin-failed'), _('msg:tf-command-failed'), returncode
+          ))
+        else:
+          checkin = True
+          print(_('msg:checkin-succeeded'))
+
+  print('%s: %d %s, %d %s, %d %s' % (
+    _('msg:remove-summary'),
+    deleted, _('msg:count-deleted'),
+    failed, _('msg:count-failed'),
+    skipped, _('msg:count-skipped')
+  ))
+
+  return RemoveSummary(mode, deleted, failed, skipped, checkin)
+
+
+# Command line entry point. Returns a process exit code.
+def main(argv: list) -> int:
+  global _
+
   parser = argparse.ArgumentParser(
     description='UiLint - A static code analyzer for UiPath XAML files.'
   )
@@ -492,18 +657,25 @@ if __name__ == '__main__':
     help='Remove unused screenshots from Version control system. (default: none)',
     choices=['dryrun', 'file', 'vsts']
   )
-  arg = parser.parse_args()
+  arg = parser.parse_args(argv)
 
-  _ = gettext.translation(
-    'messages',
-    localedir=os.path.join(os.path.dirname(__file__), 'locale'),
-    languages=[arg.lang, 'en']
-  ).gettext
+  # Fall back to the identity translation when the compiled catalogs are
+  # missing (e.g. `make mo` has not been run); message IDs are then printed.
+  try:
+    translation = gettext.translation(
+      'messages',
+      localedir=os.path.join(os.path.dirname(__file__), 'locale'),
+      languages=[arg.lang, 'en']
+    )
+  except FileNotFoundError:
+    translation = gettext.NullTranslations()
+
+  _ = translation.gettext
 
   try:
     if not os.path.isdir(arg.dir):
       print(_('msg:directory-not-found'))
-      sys.exit(1)
+      return 1
     else:
       arg.dir = os.path.normpath(arg.dir)
 
@@ -525,7 +697,7 @@ if __name__ == '__main__':
     # Check XAML files are exist
     if not any(prj.xamlfiles):
       print(_('msg:no-xamls'))
-      sys.exit(1)
+      return 1
 
     # Do lint
     prj.lint()
@@ -550,49 +722,29 @@ if __name__ == '__main__':
       else:
         raise Exception('Result category is not implemented.')
 
-    # Remove unused screenshots
+    # Remove unused screenshots (each failure is reported, never fatal)
     if arg.remove_screenshots is not None:
-      ss_diff = prj.stored_screenshots() - prj.inuse_screenshots()
+      remove_unused_screenshots(prj, arg.remove_screenshots)
 
-      if any(ss_diff):
-        print(_('msg:remove-screenshots'))
-
-        for ss in ss_diff:
-          ss_path = prj.screenshot_path(ss)
-          print('%s: %s' % (_('msg:remove-screenshot'), ss_path))
-
-          if arg.remove_screenshots == 'file':
-            os.remove(ss_path)
-          elif arg.remove_screenshots == 'vsts':
-            subprocess.run(
-              'tf delete -jwt:"$SYSTEM_ACCESSTOKEN" "%s"' % ss_path,
-              shell=True,
-              stdout=subprocess.DEVNULL,
-              stderr=subprocess.DEVNULL
-            )
-
-        if arg.remove_screenshots == 'vsts':
-          subprocess.run(
-            'tf checkin -jwt:"$SYSTEM_ACCESSTOKEN" -comment:"Remove screeen shot(s)" -noprompt',
-            shell=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL
-          )
-
-    # Finalize
+    # Finalize: lint results alone determine the exit code
     if iserror:
       if arg.vsts:
         print('##vso[task.complete result=Failed;]')
       else:
-        sys.exit(1)
+        return 1
     else:
       if arg.vsts:
         print('##vso[task.complete result=Succeeded;]')
 
     sys.stdout.flush()
+    return 0
 
   except BrokenPipeError:
     # https://docs.python.org/ja/3/library/signal.html#note-on-sigpipe
     devnull = os.open(os.devnull, os.O_WRONLY)
     os.dup2(devnull, sys.stdout.fileno())
-    sys.exit(1)
+    return 1
+
+
+if __name__ == '__main__':
+  sys.exit(main(sys.argv[1:]))
