@@ -1,0 +1,2 @@
+# Offline test dependencies (not needed to run the Airflow DAG itself).
+pytest==9.0.3

@@ -83,13 +83,67 @@ airflow standalone
 
 Example output:
 
-| user     | username  | text                                            | like_count | reply_count | retweet_count | created_at                |
-| :------- | :-------- | :---------------------------------------------- | :--------- | :---------- | :------------ | :------------------------ |
-| elonmusk | Elon Musk | Je me souviens Pluto 🥹                          | 23794      | 4036        | 1802          | 2023-01-21 09:07:40+00:00 |
-| elonmusk | Elon Musk | Twitter is the source of truth                  | 35278      | 2525        | 3756          | 2023-01-21 08:25:50+00:00 |
-| elonmusk | Elon Musk | Notes Extremely important                       | 1116       | 74          | 75            | 2023-01-21 07:19:35+00:00 |
-| elonmusk | Elon Musk | I’m reviewing it next week for possible release | 2134       | 166         | 165           | 2023-01-21 03:13:31+00:00 |
-| elonmusk | Elon Musk | The debt trend is 🤯🤯                          | 2255       | 314         | 193           | 2023-01-21 00:27:49+00:00 |
+| id         | user     | username  | text                                            | like_count | reply_count | retweet_count | created_at                |
+| :--------- | :------- | :-------- | :---------------------------------------------- | :--------- | :---------- | :------------ | :------------------------ |
+| 161716...  | elonmusk | Elon Musk | Je me souviens Pluto 🥹                          | 23794      | 4036        | 1802          | 2023-01-21 09:07:40+00:00 |
+| 161714...  | elonmusk | Elon Musk | Twitter is the source of truth                  | 35278      | 2525        | 3756          | 2023-01-21 08:25:50+00:00 |
+
+The `id` column holds the tweet id and is used to de-duplicate rows across runs.
+
+## Incremental collection and data-loss protection
+
+The ETL no longer fetches only the latest 100 tweets and overwrites the S3
+object on every run. `run_twitter_etl` in `twitter_data_pipeline/twitter_etl.py`
+now works incrementally:
+
+1. **Read the existing CSV first.** `refined_tweets.csv` is downloaded from S3
+   and used as the lower bound for the run. Legacy files without an `id`
+   column (or with an old pandas index column) are migrated to the canonical
+   schema automatically.
+2. **Page through the API.** Each request returns at most 100 tweets; the
+   client follows `next_token` until there are no more pages or the run cap
+   (`max_tweets`, default 1000) is reached.
+3. **Tolerate mid-pagination failures.** If a page fails, the tweets already
+   fetched are still merged and written. The failure is captured on the
+   returned `EtlResult` (`status="partial_failure"`, populated `errors` list)
+   and logged instead of discarding the whole batch.
+4. **De-duplicate by tweet id.** Tweets already stored in S3, as well as ids
+   repeated within the freshly fetched batch, are skipped and counted in
+   `duplicate_tweets`.
+5. **Never overwrite with an empty result.** When the API returns no data or
+   every fetched tweet is a duplicate, the upload is skipped
+   (`status="skipped_empty"`) and the existing S3 object is left byte-for-byte
+   untouched.
+6. **Abort on real S3 read errors.** A missing object (`NoSuchKey`/404) simply
+   means this is the first run. Any other `get_object` failure raises and
+   aborts the task before any data is fetched or written, so empty data can
+   never clobber history.
+7. **Stable output.** The written CSV keeps the columns
+   `id, user, username, text, like_count, reply_count, retweet_count,
+   created_at`, is sorted by `created_at` ascending (with `id` as the
+   tie-breaker) and is written without a pandas index column, so repeated
+   runs produce stable file content.
+
+The function returns an `EtlResult` dataclass (status, counters, page count
+and per-page errors) which Airflow can expose through XCom and which is also
+emitted through the logger for observability. Both the Twitter client and the
+S3 client are injected as arguments — real tweepy/boto3 clients are built by
+lazy factory helpers when the function is called with no arguments from the
+DAG, which also keeps the module importable without tweepy or `config.py`.
+
+## Running the tests offline
+
+The test suite under `tests/` uses in-memory fake Twitter and S3 clients, so
+it needs no network access, AWS credentials, Twitter token or tweepy:
+
+```bash
+pip install -r requirements-dev.txt
+python -m pytest tests/ -v
+```
+
+It covers the first run (no S3 object), incremental appends, duplicate
+tweets, empty API responses, mid-pagination failures, S3 read failures and
+migration of legacy CSV files.
 
 ## Notes
 
