@@ -376,12 +376,54 @@ def test_public_bi_skips_only_a_schema_the_upstream_does_not_have(tmp_path, monk
         got = custom_fetch.public_bi_fetch(spec)
     assert [p.name for p in got] == ["Tiny_1.csv.bz2", "Tiny_2.csv.bz2", "Tiny_1.table.sql"]
     assert "no schema for partition 2" in capsys.readouterr().err
-    # Anything but a definitive 404 -- here, a server error after the retries -- raises.
+    # Anything but a definitive 404 -- here, a server error after the retries --
+    # settles that partition as failed: its data stays cached on disk but is
+    # not returned, and the failure names the partition.
     broken = urllib.error.HTTPError("https://x/Tiny_2.table.sql", 503, "Unavailable", {}, None)
     spec, _ = _public_bi(tmp_path / "again", monkeypatch, bodies, fail={"Tiny_2.table.sql": broken})
     (tmp_path / "again").mkdir()
     with operation(config_for(tmp_path / "again", [spec])):
-        with pytest.raises(urllib.error.HTTPError, match="Unavailable"):
+        got = custom_fetch.public_bi_fetch(spec)
+    assert [p.name for p in got] == ["Tiny_1.csv.bz2", "Tiny_1.table.sql"]
+    assert "partition 2" in capsys.readouterr().err
+
+
+def test_public_bi_settles_each_partition_independently(tmp_path, monkeypatch, capsys):
+    bodies = {"data-urls.txt": b"http://event.test/Tiny_1.csv.bz2\n"
+                               b"http://event.test/Tiny_2.csv.bz2\n"
+                               b"http://event.test/Tiny_3.csv.bz2\n",
+              "Tiny_1.csv.bz2": b"one", "Tiny_2.csv.bz2": b"two", "Tiny_3.csv.bz2": b"three",
+              "Tiny_1.table.sql": b"CREATE TABLE t1(a int);",
+              "Tiny_2.table.sql": b"CREATE TABLE t2(a int);",
+              "Tiny_3.table.sql": b"CREATE TABLE t3(a int);"}
+    fail = {"Tiny_2.csv.bz2": ConnectionError("reset by peer")}
+    spec, calls = _public_bi(tmp_path, monkeypatch, bodies, fail=fail)
+    with operation(config_for(tmp_path, [spec])):
+        got = custom_fetch.public_bi_fetch(spec)
+        # Partition 2's failure neither aborts the run nor returns half results.
+        assert [p.name for p in got] == ["Tiny_1.csv.bz2", "Tiny_3.csv.bz2",
+                                         "Tiny_1.table.sql", "Tiny_3.table.sql"]
+        err = capsys.readouterr().err
+        assert "partition 2" in err and "reset by peer" in err
+        target = fetch.slug_dir("bi-tiny")
+        assert not (target / "Tiny_2.csv.bz2").exists(), "a failed partition leaves no half file"
+        assert (target / "Tiny_1.csv.bz2").exists()  # settled partitions stay on disk
+        # Rerun: settled partitions hit their receipts, only partition 2 is retried.
+        calls.clear()
+        fail.clear()
+        got = custom_fetch.public_bi_fetch(spec)
+        assert [p.name for p in got] == ["Tiny_1.csv.bz2", "Tiny_2.csv.bz2", "Tiny_3.csv.bz2",
+                                         "Tiny_1.table.sql", "Tiny_2.table.sql", "Tiny_3.table.sql"]
+        assert [c.rsplit("/", 1)[-1] for c in calls] == ["Tiny_2.csv.bz2", "Tiny_2.table.sql"]
+        assert "[cached]" in capsys.readouterr().out
+
+
+def test_public_bi_partition_list_failure_fails_the_fetch(tmp_path, monkeypatch):
+    bodies = {"Tiny_1.csv.bz2": b"one", "Tiny_1.table.sql": b"CREATE TABLE t1(a int);"}
+    spec, _ = _public_bi(tmp_path, monkeypatch, bodies,
+                         fail={"data-urls.txt": ConnectionError("down")})
+    with operation(config_for(tmp_path, [spec])):
+        with pytest.raises(ConnectionError, match="down"):
             custom_fetch.public_bi_fetch(spec)
 
 
