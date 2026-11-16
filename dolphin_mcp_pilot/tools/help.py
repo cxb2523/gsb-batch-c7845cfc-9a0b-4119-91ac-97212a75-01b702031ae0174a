@@ -89,7 +89,7 @@ def register_help_tools(mcp: MCPServer):
                 "tools": [
                     {
                         "name": "ds_list_workflows",
-                        "desc": "List workflows (supports search= for fuzzy matching)",
+                        "desc": "List workflows (supports search= for fuzzy matching; fetch_all=True auto-continues all pages)",
                         "risk": "read-only",
                     },
                     {

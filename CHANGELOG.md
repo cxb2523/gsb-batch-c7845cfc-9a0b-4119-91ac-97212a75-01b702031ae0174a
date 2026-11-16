@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `ds_list_workflows` gained an optional `fetch_all` parameter (default
+  `False`, so existing callers keep the single-page bare-list behavior). When
+  enabled, the tool continues from `page_no` with `page_size` until the
+  reported `total` is reached or an empty page is returned, and replies with an
+  envelope describing the data source, pages fetched, completeness, duplicate
+  `code` dedup count and any failed-page error. A failed page stops
+  continuation without discarding already-merged entries and without falling
+  back to `simple-list`; `name`/`search` filters run on the full merged
+  collection. `use_simple=True` still takes the simple-list branch and ignores
+  `fetch_all`.
+
 ---
 
 ## [0.3.1] - 2026-08-28

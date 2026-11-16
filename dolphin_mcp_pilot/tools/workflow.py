@@ -28,6 +28,10 @@ from ..utils import require_ok, resolve_project_code
 def register_workflow_tools(mcp: MCPServer):
     """Register workflow basic operation MCP tools."""
 
+    # Safety bound for automatic pagination: a broken server that never reaches
+    # its reported total and never returns an empty page cannot loop forever.
+    _MAX_FETCH_ALL_PAGES = 1000
+
     @mcp.tool()
     def ds_list_workflows(
         project_name: str,
@@ -36,14 +40,25 @@ def register_workflow_tools(mcp: MCPServer):
         search: str = "",
         name: str = "",
         use_simple: bool = False,
-    ) -> list:
+        fetch_all: bool = False,
+    ) -> list | dict:
         """List workflow definitions with pagination, search and exact-match support.
 
         v2.0.12: merged ds_list_workflows_simple and ds_get_workflow_by_name.
-        - Default: paginated API (auto-falls back to simple-list on failure)
+        - Default (fetch_all=False): single-page request, identical to the
+          historical behavior (auto-falls back to simple-list on failure).
+          Returns a bare list so existing callers are unaffected.
+        - fetch_all=True: automatically requests page_no, page_no+1, ... with
+          page_size until the reported total is reached or an empty page is
+          returned. No simple-list fallback: if a page request raises or returns
+          a non-zero code, pagination stops and the pages already fetched are
+          kept. Returns a dict describing the source, pages fetched, whether the
+          result is complete, per-page errors and duplicate-code deduplication.
         - search="xx": case-insensitive fuzzy match on name + description
-        - name="xxx": exact name match (single-element list or empty list)
-        - use_simple=True: use /process-definition/simple-list (bypasses pagination SQL)
+        - name="xxx": exact name match; with fetch_all it runs against the
+          full merged collection, not just the first page
+        - use_simple=True: use /process-definition/simple-list (bypasses
+          pagination SQL); fetch_all is ignored in this branch
 
         Args:
             project_name: Project name
@@ -52,21 +67,148 @@ def register_workflow_tools(mcp: MCPServer):
             search: Fuzzy search keyword (name + description)
             name: Exact workflow name match
             use_simple: Use simple-list endpoint when True
+            fetch_all: When True, auto-continue subsequent pages and return a
+                result envelope with completeness/source metadata instead of a
+                bare list
+
+        Returns:
+            fetch_all=False (default): a list of workflow dicts, as before.
+            fetch_all=True: a dict with keys:
+                workflows     - merged, deduplicated (and name/search filtered) list
+                source        - "paginated" (or "simple-list" when use_simple=True)
+                complete      - True if the reported total was reached / an empty
+                                 page terminated the loop; False on page failure
+                pages_fetched - number of pages actually retrieved
+                page_size     - page size used for the requests
+                total         - total reported by the API (None if unavailable)
+                deduped       - number of duplicate-code entries removed (first
+                                 occurrence is kept)
+                failed_page   - 1-based page number that failed, or None
+                error         - error message for the failed page, or None
         """
         pcode = resolve_project_code(project_name)
+
+        def _normalize(raw_items):
+            """Project raw API items onto the public workflow shape."""
+            return [
+                {
+                    "id": w.get("id"),
+                    "code": w.get("code"),
+                    "name": w.get("name"),
+                    "releaseState": w.get("releaseState", "OFFLINE"),
+                    "description": w.get("description", ""),
+                    "projectCode": w.get("projectCode"),
+                }
+                for w in raw_items
+                if w and w.get("code")
+            ]
 
         if use_simple:
             simple_result = ds_get(f"/projects/{pcode}/process-definition/simple-list")
             require_ok(simple_result, "list workflows (simple)")
             data = simple_result.get("data")
             if data is None:
-                items = []
+                raw_items = []
             elif isinstance(data, list):
-                items = data
+                raw_items = data
             elif isinstance(data, dict):
-                items = data.get("list", []) or data.get("data", []) or []
+                raw_items = data.get("list", []) or data.get("data", []) or []
             else:
-                items = []
+                raw_items = []
+            workflows = _normalize(raw_items)
+            if fetch_all:
+                # Simple-list is a single unpaginated call; the continuation
+                # parameter is intentionally ignored here, but the envelope still
+                # tells the caller where the data came from.
+                return _build_fetch_all_result(
+                    workflows,
+                    source="simple-list",
+                    pages_fetched=1,
+                    page_size=page_size,
+                    total=len(workflows),
+                    deduped=0,
+                    failed_page=None,
+                    error=None,
+                    complete=True,
+                    name=name,
+                    search=search,
+                )
+        elif fetch_all:
+            merged_items = []
+            seen_codes = set()
+            deduped = 0
+            pages_fetched = 0
+            total = None
+            failed_page = None
+            error = None
+            current_page = page_no
+
+            while current_page < page_no + _MAX_FETCH_ALL_PAGES:
+                try:
+                    result = ds_get(
+                        f"/projects/{pcode}/process-definition"
+                        f"?pageNo={current_page}&pageSize={page_size}"
+                    )
+                except Exception as exc:  # network/timeout etc.: stop, keep data
+                    failed_page = current_page
+                    error = f"page {current_page} request failed: {str(exc)[:200]}"
+                    break
+
+                if result.get("code") != 0:
+                    # Never fall back to simple-list: that would overwrite the
+                    # pages already merged with a differently-shaped dataset.
+                    failed_page = current_page
+                    error = (
+                        f"page {current_page} returned code={result.get('code')}: "
+                        f"{result.get('msg', 'unknown error')}"
+                    )
+                    break
+
+                pages_fetched += 1
+                page_data = result.get("data") or {}
+                total = page_data.get("total", total)
+                page_items = page_data.get("totalList", []) or []
+
+                if not page_items:
+                    # Empty page terminates the loop; everything available was read.
+                    break
+
+                for item in page_items:
+                    item_code = item.get("code") if item else None
+                    if not item_code:
+                        continue
+                    if item_code in seen_codes:
+                        deduped += 1
+                        continue
+                    seen_codes.add(item_code)
+                    merged_items.append(item)
+
+                if isinstance(total, int) and len(seen_codes) >= total:
+                    break
+
+                current_page += 1
+
+            if failed_page is None and pages_fetched >= _MAX_FETCH_ALL_PAGES:
+                failed_page = current_page
+                error = (
+                    f"fetch_all stopped after {_MAX_FETCH_ALL_PAGES} pages "
+                    f"(safety limit); total={total}, collected={len(seen_codes)}"
+                )
+
+            workflows = _normalize(merged_items)
+            return _build_fetch_all_result(
+                workflows,
+                source="paginated",
+                pages_fetched=pages_fetched,
+                page_size=page_size,
+                total=total,
+                deduped=deduped,
+                failed_page=failed_page,
+                error=error,
+                complete=failed_page is None,
+                name=name,
+                search=search,
+            )
         else:
             result = ds_get(
                 f"/projects/{pcode}/process-definition?pageNo={page_no}&pageSize={page_size}"
@@ -80,19 +222,7 @@ def register_workflow_tools(mcp: MCPServer):
                 items = simple_result.get("data", []) or []
             else:
                 items = result.get("data", {}).get("totalList", [])
-
-        workflows = [
-            {
-                "id": w.get("id"),
-                "code": w.get("code"),
-                "name": w.get("name"),
-                "releaseState": w.get("releaseState", "OFFLINE"),
-                "description": w.get("description", ""),
-                "projectCode": w.get("projectCode"),
-            }
-            for w in items
-            if w and w.get("code")
-        ]
+            workflows = _normalize(items)
 
         # Exact match takes precedence
         if name:
@@ -109,6 +239,50 @@ def register_workflow_tools(mcp: MCPServer):
             ]
 
         return workflows
+
+    def _build_fetch_all_result(
+        workflows,
+        *,
+        source,
+        pages_fetched,
+        page_size,
+        total,
+        deduped,
+        failed_page,
+        error,
+        complete,
+        name,
+        search,
+    ):
+        """Apply name/search filters to the full merged set and wrap the result.
+
+        Filtering happens here rather than per page so exact/fuzzy matches cannot
+        be silently limited to the first page.
+        """
+        # Exact match takes precedence
+        if name:
+            workflows = [w for w in workflows if w.get("name") == name]
+        elif search:
+            kw = search.lower()
+            workflows = [
+                w
+                for w in workflows
+                if kw in (w.get("name") or "").lower()
+                or kw in (w.get("description") or "").lower()
+            ]
+
+        return {
+            "workflows": workflows,
+            "source": source,
+            "complete": complete,
+            "pages_fetched": pages_fetched,
+            "page_size": page_size,
+            "total": total,
+            "returned": len(workflows),
+            "deduped": deduped,
+            "failed_page": failed_page,
+            "error": error,
+        }
 
     @mcp.tool()
     def ds_get_workflow(

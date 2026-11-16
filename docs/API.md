@@ -244,3 +244,30 @@ RuntimeError: 查询项目失败 (code=10001): Project 'my_project' not found
 - **v0.1.0**：初始版本，53 工具
 
 详见 [CHANGELOG.md](../CHANGELOG.md)
+
+### ds_list_workflows 分页续取（fetch_all）
+
+默认（`fetch_all=False`）只请求单页并返回裸列表，行为与历史版本完全一致；
+分页接口失败时仍自动回退到 `simple-list`。
+
+设置 `fetch_all=True` 后，工具会从 `page_no` 开始按 `page_size` 逐页续取，
+直到取满接口返回的 `total` 或遇到空页。续取过程中任一页请求抛异常或返回
+非 0 `code` 时立即停止，**保留此前已合并的条目，且不会回退覆盖为
+simple-list 数据**。跨页出现重复 `code` 时只保留首次出现的条目，去重数量
+计入返回结果。此时返回带元数据的字典：
+
+| 字段 | 说明 |
+| --- | --- |
+| `workflows` | 合并、去重并经 `name`/`search` 过滤后的完整条目 |
+| `source` | 数据来源：`paginated`，或 `use_simple=True` 时的 `simple-list` |
+| `complete` | 是否取满（失败页存在时为 `false`） |
+| `pages_fetched` | 实际成功取到的页数 |
+| `page_size` | 续取使用的页大小 |
+| `total` | 接口上报的总数（缺失时为 `null`） |
+| `returned` | 过滤后返回的条目数 |
+| `deduped` | 因重复 `code` 被丢弃的条目数 |
+| `failed_page` | 失败页码（1 起），无失败为 `null` |
+| `error` | 失败页错误信息，无失败为 `null` |
+
+`name` 精确匹配与 `search` 模糊过滤均作用在合并后的完整集合上，而非仅第一页。
+`use_simple=True` 始终走 simple-list 分支，不受 `fetch_all` 影响。
