@@ -805,6 +805,7 @@ from .services.compute import (
     get_instance_by_id,
     search_instances,
     get_instances_by_status,
+    collect_instances_by_status,
     set_instance,
     get_flavor_list,
     get_server_events,

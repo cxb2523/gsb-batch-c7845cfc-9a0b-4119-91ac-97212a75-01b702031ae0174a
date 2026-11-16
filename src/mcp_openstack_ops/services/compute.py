@@ -580,6 +580,98 @@ def get_instances_by_status(
         raise RuntimeError("OpenStack instance status query failed") from None
 
 
+def normalize_instance_statuses(statuses: List[str]) -> List[str]:
+    """Validate and deduplicate Nova server statuses, preserving order.
+
+    Raises:
+        ValueError: if the list is empty or holds an invalid status.
+    """
+    normalized = []
+    for status in statuses or []:
+        value = str(status or '').strip().upper()
+        if value not in NOVA_SERVER_STATUSES:
+            raise ValueError(
+                f'Invalid instance status "{status}". Valid statuses: '
+                + ', '.join(sorted(NOVA_SERVER_STATUSES))
+            )
+        if value not in normalized:
+            normalized.append(value)
+    if not normalized:
+        raise ValueError('At least one instance status is required')
+    return normalized
+
+
+def collect_instances_by_status(
+    statuses: List[str], *, enrich_images: bool = True, all_projects: bool = False
+) -> Dict[str, Any]:
+    """
+    Collect instances for several statuses in one call.
+
+    Each status is an independent sub-query: a failed one is recorded with a
+    safe error type and never discards the statuses that already succeeded.
+    A disabled or denied cross-project read aborts the whole call with
+    CrossProjectReadError instead of returning partial results as if complete.
+
+    Args:
+        statuses: Nova server statuses to collect (case-insensitive)
+        all_projects: Include instances of every project the credential's
+            OpenStack policy allows (requires ALLOW_CROSS_PROJECT_READ=true)
+
+    Returns:
+        Dictionary with per-status settlement (queries), the combined
+        instances, success/failure counts, and a scope when all_projects.
+
+    Raises:
+        ValueError: if a status is invalid (before any query runs).
+        CrossProjectReadError: if a cross-project read is disabled or denied.
+    """
+    from ..connection import (
+        CrossProjectReadError, cross_project_items_scope,
+        require_cross_project_read,
+    )
+    normalized = normalize_instance_statuses(statuses)
+    if all_projects:
+        require_cross_project_read()
+
+    queries = []
+    instances: List[Dict[str, Any]] = []
+    for value in normalized:
+        try:
+            found = get_instances_by_status(
+                value, enrich_images=enrich_images, all_projects=all_projects)
+        except CrossProjectReadError:
+            # Never present partial data as a complete cross-project view.
+            raise
+        except Exception as error:
+            # Log the type only; exception text may hold response content.
+            logger.warning(
+                "Instance collection failed for status %s: %s",
+                value, type(error).__name__)
+            queries.append({
+                'status': value,
+                'success': False,
+                'error_type': 'query_failed',
+            })
+            continue
+        queries.append({
+            'status': value,
+            'success': True,
+            'instances_found': len(found),
+        })
+        instances.extend(found)
+
+    result = {
+        'queries': queries,
+        'instances': instances,
+        'instances_found': len(instances),
+        'succeeded_queries': sum(1 for query in queries if query['success']),
+        'failed_queries': sum(1 for query in queries if not query['success']),
+    }
+    if all_projects:
+        result['scope'] = cross_project_items_scope(instances)
+    return result
+
+
 def _root_disk_option_error(options: Dict[str, Any]) -> Optional[str]:
     """Return why the create root-disk options conflict, or None if they fit."""
     boot_volume = options.get('boot_volume')
