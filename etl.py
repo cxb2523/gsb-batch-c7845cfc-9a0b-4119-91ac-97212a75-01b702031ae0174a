@@ -15,9 +15,93 @@ import numpy as np
 import urllib
 import json
 import psutil
+import time
 
 
 special_sources = ['http://','https://','ftp://','google+sheets', 'microsoft+graph', 'bigquery://']
+
+# default logger, replaced inside cli() after logging setup
+log = logging.getLogger()
+
+# remote csv read retry: number of retries after the first failure and seconds to wait between attempts
+remote_csv_retry_defaults = {'retries': 2, 'retry_delay': 5}
+# http statuses considered recoverable: timeouts, throttling and server-side errors
+remote_csv_retryable_http_statuses = frozenset({408, 429, *range(500, 600)})
+
+
+class RemoteCsvReadError(Exception):
+    """Remote csv read failed: either immediately (deterministic error) or after all retries."""
+
+
+def is_retryable_remote_csv_error(error):
+    """Only recoverable read failures (connection issues, timeouts, 5xx) should be retried,
+    deterministic ones (bad parameters, missing files, parse errors) should not.
+
+    """
+    import ftplib
+    import http.client
+    import socket
+    from urllib.error import HTTPError, URLError
+
+    if isinstance(error, HTTPError):
+        return error.code in remote_csv_retryable_http_statuses
+    if isinstance(error, URLError):
+        reason = error.reason
+        if isinstance(reason, ftplib.error_perm):
+            return False # ftp permanent error, e.g. 550 file not found
+        return True # connection errors, dns failures, timeouts, ftp temporary errors
+    if isinstance(error, (TimeoutError, socket.timeout, http.client.HTTPException, ConnectionError)):
+        return True
+    return False
+
+def remote_csv_error_reason(error):
+    reason = str(getattr(error, 'orig', None) or error)
+    return reason.replace('\n', '\\n')
+
+def split_remote_csv_retry_params(source_params):
+    """Pop remote csv retry params from source params and validate them.
+
+    """
+    params = dict(source_params)
+    retries = params.pop('retries', remote_csv_retry_defaults['retries'])
+    retry_delay = params.pop('retry_delay', remote_csv_retry_defaults['retry_delay'])
+
+    # bool is a subclass of int, it is not a valid attempt count
+    if isinstance(retries, bool) or not isinstance(retries, int) or retries < 0:
+        raise RemoteCsvReadError(f'invalid retry parameter retries=<{retries}>, expected non-negative integer')
+    if isinstance(retry_delay, bool) or not isinstance(retry_delay, (int, float)) or retry_delay < 0:
+        raise RemoteCsvReadError(f'invalid retry parameter retry_delay=<{retry_delay}>, expected non-negative number of seconds')
+    return params, retries, retry_delay
+
+def read_remote_csv(source, source_params, read_method=None, sleep=None):
+    """Read a remote csv source with retries on recoverable failures.
+
+    Raises RemoteCsvReadError when the error is deterministic or when all retries are exhausted,
+    so caller can exit with non-zero code before any data is written to target.
+    """
+    read_method = read_method or pd.read_csv
+    sleep = sleep or time.sleep
+    try:
+        params, retries, retry_delay = split_remote_csv_retry_params(source_params)
+    except RemoteCsvReadError as error:
+        log.error(f'extract failed from <{source}>: {error}')
+        raise
+
+    attempts = retries + 1
+    log.debug(f'remote csv retry params: retries={retries}, retry_delay={retry_delay}s')
+    for attempt in range(1, attempts + 1):
+        try:
+            return read_method(source, **params)
+        except Exception as error:
+            reason = remote_csv_error_reason(error)
+            if not is_retryable_remote_csv_error(error):
+                log.error(f'extract failed from <{source}>: {reason} (error is not retryable)')
+                raise RemoteCsvReadError(reason) from error
+            if attempt >= attempts:
+                log.error(f'extract failed from <{source}> after {attempts} attempts: {reason}')
+                raise RemoteCsvReadError(reason) from error
+            log.warning(f'extract failed from <{source}>, retry {attempt}/{retries} in {retry_delay}s: {reason}')
+            sleep(retry_delay)
 
 def parse_url_params(url):
     result = dict()
@@ -398,9 +482,8 @@ def cli(ctx, **kwargs):
                     source_params.setdefault('sep',';') # default params
                     source_params.setdefault('header',0) # default params # means you have the names of columns in the first row in the file
                     try:
-                        dataset = pd.read_csv(source, **source_params)
-                    except Exception as e:
-                        log.error(e)
+                        dataset = read_remote_csv(source, source_params)
+                    except RemoteCsvReadError:
                         sys.exit(1)
                 # extract from bigquery
                 if 'bigquery://' in source:

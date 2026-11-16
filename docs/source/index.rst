@@ -169,6 +169,23 @@ This will help understand how to integrate your project into their own projects.
     etl --source "$dataset_file??sep=," \
         --target input/titanic.xlsx
 
+  Remote csv sources (``http://``, ``https://``, ``ftp://``) are read with retries on recoverable failures,
+  so a short network glitch or a temporary server error does not fail the whole run.
+  Use ``??retries=`` to set how many retries follow the first failed attempt (default ``2``)
+  and ``??retry_delay=`` to set seconds to wait between attempts (default ``5``):
+
+  .. code-block:: concole
+    :caption: update.sh
+    :linenos:
+
+    etl --source "$dataset_file??sep=,&retries=3&retry_delay=10" \
+        --target input/titanic.xlsx
+
+  Only recoverable failures are retried (connection errors, timeouts, HTTP 408/429 and 5xx).
+  Deterministic failures (bad parameters, 4xx, missing files, parse errors) fail immediately.
+  If all retries are exhausted, ``etl`` writes nothing to ``--target`` and exits with a non-zero code.
+  These options apply to remote csv sources only; local files and other source types are not affected.
+
 3) Report or dashboard update in google sheets
 
   We can build quick report and dashboards using google sheets. 
@@ -493,10 +510,19 @@ When specifying files using the ``--source`` and ``--target`` option keys, you c
     - ``??header=`` same as header=False, to save data without header
     - ``??sep=;`` specify the column delimiter when loading or saving CSV files
     - ``??low_memory=false`` disable the memory usage optimization for reading large files
-  `to_excel <https://pandas.pydata.org/docs/reference/api/pandas.DataFrame.to_excel.html>`_: 
+  `to_excel <https://pandas.pydata.org/docs/reference/api/pandas.DataFrame.to_excel.html>`_:
     - ``??sheet_name=data`` specify the sheet name to use when saving to an Excel file
     - ``??mode=a`` file mode to use (write or append)
     - ``??engine=openpyxl`` write engine to use, ‘openpyxl’ or ‘xlsxwriter’.
+
+Remote csv sources (``http://``, ``https://``, ``ftp://``) additionally accept retry options:
+  - ``??retries=2`` number of retries after the first failed read attempt (default ``2``)
+  - ``??retry_delay=5`` seconds to wait between attempts (default ``5``)
+
+Retries cover recoverable read failures only (connection errors, timeouts, HTTP 408/429/5xx).
+Invalid options, 4xx responses, missing files and parse errors fail immediately without retrying.
+When every attempt fails, the command exits with a non-zero code and nothing is written to ``--target``.
+
 
 When loading data to databases using the ``--load`` option key, you can pass additional parameters.
   `to_sql <https://pandas.pydata.org/docs/reference/api/pandas.DataFrame.to_sql.html?highlight=to_sql>`_: 
